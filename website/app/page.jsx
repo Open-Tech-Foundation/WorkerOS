@@ -22,14 +22,6 @@ export default function Home() {
             <Link href="/playground" class="btn btn-primary">
               Launch the playground <span class="arrow">→</span>
             </Link>
-            <a
-              href="https://github.com/Open-Tech-Foundation"
-              target="_blank"
-              rel="noreferrer"
-              class="btn"
-            >
-              View source
-            </a>
           </div>
           <div class="quickstart">
             <span class="prompt">$</span>
