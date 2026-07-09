@@ -13,7 +13,7 @@ const RUNTIME_URL = "/workeros/packages/workeros-web/src/index.js";
 const loadRuntime = new Function("u", "return import(u)");
 
 const EXAMPLES = [
-  "ls /bin",
+  "ls /sbin",
   "echo hello | cat",
   "mkdir -p a/b && ls a",
   "echo hi > /f.txt && cat /f.txt",
@@ -130,7 +130,7 @@ export default function Playground() {
         await os.fs.write("/readme.txt", "hello from the WorkerOS VFS\n");
         write(
           `\nWorkerOS ${os.version} (${os.abi}) — wsh ready.\n` +
-            `Type a command and press Enter. Try: ls /bin · echo hi | cat · ps · clear\n\n`,
+            `Type a command and press Enter. Try: ls /sbin · echo hi | cat · ps · clear\n\n`,
           "ok",
         );
         status = "ready";

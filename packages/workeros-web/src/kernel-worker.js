@@ -18,7 +18,7 @@ let kernel = null;
 let shell = null;
 
 // The interactive shell session state (cwd/env), persisted across exec lines.
-const session = { cwd: "/", env: { HOME: "/", PATH: "/bin" } };
+const session = { cwd: "/", env: { HOME: "/", PATH: "/bin:/sbin" } };
 
 // pid → { worker, sink, onExit, resolveExit, done }.
 const programs = new Map();
@@ -210,7 +210,8 @@ self.onmessage = async (ev) => {
       case MSG.BOOT: {
         await init({ module_or_path: msg.wasmUrl });
         kernel = WebKernel.boot();
-        // Install the coreutils into /bin so the shell can resolve them.
+        // Install the coreutils into /sbin (system binaries, kept apart from the
+        // /bin OS programs) so the shell can resolve them via PATH.
         for (const [path, source] of Object.entries(coreutils)) {
           kernel.fs_write(path, enc.encode(source));
         }

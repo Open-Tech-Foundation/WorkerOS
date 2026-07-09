@@ -8,9 +8,12 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Added
-- Initial coreutils set, each installed at `/bin` and executed as a real process:
+- Initial coreutils set, installed at **`/sbin`** as **system binaries** (kept apart
+  from the `/bin` OS/user programs so they read as untouchable OS internals), each
+  executed as a real process:
   - **`echo`**, **`true`**, **`false`**, **`pwd`**, **`env`**
   - **`cat`**, **`ls`**, **`mkdir`**, **`rm`**, **`cp`**, **`mv`**
+- Resolved via `PATH` (`/bin:/sbin`), so bare command names still work.
 - Written against the kernel's WASI-shaped syscalls (stdio, path ops, args/env),
   so they compose under `wsh` pipes, redirects, and globbing.
 

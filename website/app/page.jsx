@@ -33,7 +33,7 @@ export default function Home() {
           </div>
           <div class="quickstart">
             <span class="prompt">$</span>
-            <span class="cmd">echo hi | cat &amp;&amp; ls /bin &amp;&amp; ps</span>
+            <span class="cmd">echo hi | cat &amp;&amp; ls /sbin &amp;&amp; ps</span>
           </div>
         </div>
       </section>
@@ -136,7 +136,7 @@ const os = await `}<span class="f">boot</span>{`();
 await os.fs.`}<span class="f">write</span>{`(`}<span class="s">"/hello.txt"</span>{`, `}<span class="s">"from the WorkerOS VFS\\n"</span>{`);
 
 `}<span class="c">// wsh: pipes, &&, redirects, glob — executed by the kernel.</span>{`
-await os.`}<span class="f">exec</span>{`(`}<span class="s">"cat /hello.txt | cat && ls /bin"</span>{`, {
+await os.`}<span class="f">exec</span>{`(`}<span class="s">"cat /hello.txt | cat && ls /sbin"</span>{`, {
   onStdout: (b) => screen.write(b),
 });
 

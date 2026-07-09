@@ -102,8 +102,10 @@ impl Interpreter {
     }
 }
 
-/// The directories searched for a bare command name, in order.
-pub const DEFAULT_PATH: &[&str] = &["/bin"];
+/// The directories searched for a bare command name, in order: `/bin` (OS and
+/// user programs, e.g. `npm`) then `/sbin` (system binaries — the coreutils,
+/// kept apart so they read as untouchable OS internals).
+pub const DEFAULT_PATH: &[&str] = &["/bin", "/sbin"];
 
 /// A resolved invocation: the interpreter to run under and the entry file.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -10,7 +10,7 @@
 // coreutil is a thin argv→syscall adapter. `sys.exit(code)` unwinds the program;
 // unhandled errors are reported by the program worker as a non-zero exit.
 //
-// The host installs these into the VFS at `/bin/*` on boot.
+// The host installs these into the VFS at `/sbin/*` (system binaries) on boot.
 
 const PRELUDE = `const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -28,7 +28,7 @@ function util(body) {
 }
 
 export const coreutils = {
-  "/bin/echo": util(`
+  "/sbin/echo": util(`
 let nl = true;
 let args = sys.argv.slice(1);
 if (args[0] === "-n") { nl = false; args = args.slice(1); }
@@ -36,18 +36,18 @@ out(args.join(" ") + (nl ? "\\n" : ""));
 sys.exit(0);
 `),
 
-  "/bin/true": `sys.exit(0);`,
-  "/bin/false": `sys.exit(1);`,
+  "/sbin/true": `sys.exit(0);`,
+  "/sbin/false": `sys.exit(1);`,
 
-  "/bin/pwd": util(`out(sys.cwd + "\\n"); sys.exit(0);`),
+  "/sbin/pwd": util(`out(sys.cwd + "\\n"); sys.exit(0);`),
 
-  "/bin/env": util(`
+  "/sbin/env": util(`
 const lines = Object.entries(sys.env).map(([k, v]) => k + "=" + v);
 out(lines.join("\\n") + (lines.length ? "\\n" : ""));
 sys.exit(0);
 `),
 
-  "/bin/cat": util(`
+  "/sbin/cat": util(`
 async function dump(fd) {
   for (;;) {
     const b = await sys.read(fd, 65536);
@@ -74,7 +74,7 @@ if (operands.length === 0) {
 sys.exit(code);
 `),
 
-  "/bin/ls": util(`
+  "/sbin/ls": util(`
 const showAll = has("a");
 const targets = operands.length ? operands : ["."];
 let code = 0;
@@ -98,7 +98,7 @@ for (const t of targets) {
 sys.exit(code);
 `),
 
-  "/bin/mkdir": util(`
+  "/sbin/mkdir": util(`
 const parents = has("p");
 async function mkone(p) {
   if (parents) {
@@ -120,7 +120,7 @@ for (const d of operands) {
 sys.exit(code);
 `),
 
-  "/bin/rm": util(`
+  "/sbin/rm": util(`
 const recursive = has("r") || has("R");
 const force = has("f");
 async function rmrf(p) {
@@ -148,7 +148,7 @@ for (const t of operands) {
 sys.exit(code);
 `),
 
-  "/bin/cp": util(`
+  "/sbin/cp": util(`
 if (operands.length < 2) { err("cp: missing file operand\\n"); sys.exit(1); }
 const src = operands[0];
 let dst = operands[1];
@@ -171,7 +171,7 @@ try {
 }
 `),
 
-  "/bin/mv": util(`
+  "/sbin/mv": util(`
 if (operands.length < 2) { err("mv: missing file operand\\n"); sys.exit(1); }
 const src = operands[0];
 let dst = operands[1];
