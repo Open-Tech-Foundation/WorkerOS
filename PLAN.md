@@ -80,10 +80,10 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 
 - Program worker gains a WASM path: instantiate a `.wasm` with imports bound to the kernel's WASI host + `otf:*` dispatch (§5.1, §6). **✅ done** — `kind === "wasm"` entries read from the VFS, instantiate with the WASI P1 host (`workeros-programs/wasi`), and call `_start`.
 - Validate against real binaries: a `wasm32-wasi` build of a small CLI runs unmodified, reading VFS and writing stdout. **✅ done** — the **SAB synchronous-syscall channel** (ADR-010/-016) is built (`workeros-web/sync-syscall.js`), so a real rustc-built `wasm32-wasip1` binary runs unmodified with correct stdio/exit **and** reads the VFS (`std::fs::File::open`/read), seeks (`fd_seek`, backed by a `sys_seek` kernel binding), lists directories (`fd_readdir`), renames (`path_rename`), and blocks on `stdin` from a pipe. A `curl` program downloads a wasm over HTTP into the VFS so it can be run. Remaining: `esbuild-wasm`/PGlite and an off-the-shelf CLI (`jq`/`ripgrep`) as the marquee proof.
-- Integrate a WASM **library** tool end-to-end (esbuild-wasm or swc-wasm) as a callable build step. **⏳ TODO**
+- Integrate a WASM **library** tool end-to-end (esbuild-wasm or swc-wasm) as a callable build step. **⏳ gated on Node compat.** The underlying capability is proven — a spike drove **esbuild-wasm** installed via the OS's own `npm` (loads its ESM API + `esbuild.wasm` from the VFS `node_modules`, runs the Go service on-thread with `worker:false`, bundles+transpiles a multi-file project through a VFS resolver plugin, verified in a real browser). But that spike required a bespoke `/bin/esbuild` driver baked into a core package, which violates the clean-OS goal, so it was **backed out**. The right shape: esbuild ships as a normal package (`npm install esbuild-wasm`) whose **own** `bin/esbuild` runs under `/bin/node`, with `node_modules/.bin` on PATH — no OS-specific shim. That needs the Phase-5 Node-compat parts below (VFS-backed `fs`/`path`, `worker_threads` or its no-worker fallback, `node:` builtins) plus **npm bin-linking** and **`node_modules/.bin` on PATH** (PATH is currently just `/bin:/sbin`). Track it there, not as a core program.
 - PGlite as a process in its own worker: `import`, query, and a `ps`-visible/killable wrapper (§5.1). Document the daemon-costume caveat. **⏳ TODO**
 
-**Exit criteria:** an off-the-shelf `wasm32-wasi` CLI runs with zero source changes and correct stdio/exit; PGlite runs a query inside a WorkerOS process without freezing the kernel. *(Substantially met for the WASI host: rustc-built `wasm32-wasip1` binaries run unmodified with full stdio/exit + VFS reads/seek/readdir/rename + blocking stdin. Still to prove: an off-the-shelf CLI like `jq`/`ripgrep`, and PGlite.)*
+**Exit criteria:** an off-the-shelf `wasm32-wasi` CLI runs with zero source changes and correct stdio/exit; PGlite runs a query inside a WorkerOS process without freezing the kernel. *(Substantially met for the WASI host: rustc-built `wasm32-wasip1` binaries run unmodified with full stdio/exit + VFS reads/seek/readdir/rename + blocking stdin. The WASM-library build step is proven as a spike (esbuild-wasm bundles a multi-file project) but not shipped — it belongs on the standard `npm`+`node` path once Node compat lands, not as a core program. Still to prove: an off-the-shelf CLI like `jq`/`ripgrep`, and PGlite.)*
 
 ---
 
@@ -94,9 +94,23 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 - Fetch npm tarballs from the registry (§8, ADR-008); unpack into `node_modules` in the VFS. **✅ done** — `npm` is a guest program (`workeros-programs`, `/bin/npm`): packument fetch, semver resolution, tarball download → in-browser `DecompressionStream` gunzip → untar, transitive deps.
 - Node-style resolution in the guest node layer (`workeros-programs/node`): the `require`/`import` `node_modules` walk, `package.json` `main`/`exports`. (Stays in the guest layer — INV-1.) **✅ CommonJS `require`** works (`node index.js` resolves installed packages); ESM `import` of installed packages and `node:` builtins are still TODO.
 - Lockfile + integrity; dedupe. **⏳ TODO** — dedupe is currently basic (hoist, first-writer-wins); no lockfile yet.
-- Node compatibility is an **ongoing, incremental** effort (grow `workeros-programs/node` over time), not a one-shot.
+- Node compatibility is an **ongoing, incremental** effort (grow `workeros-programs/node` over time), not a one-shot. The concrete pending work is scoped below.
 
-**Exit criteria:** `install express` (or similar pure-JS package) then a script that imports and uses it runs correctly; a Vite-class dependency tree installs. *(Partially met: pure-JS packages with transitive deps install and run under `require` — e.g. `is-even`; larger ESM/tooling trees pending.)*
+### Node-compat — pending work
+
+The goal is that **real npm packages and their bins run on the host JS engine** via the guest node layer (INV-1) — *not* by hosting a foreign runtime (see the out-of-scope note). Two concrete proofs drive the scope: **esbuild-wasm** (its own `bin/esbuild` needs `module`/`path`/**synchronous `fs`**) and **edge.js** (ESM-only, imports `node:fs`/`node:path`/`node:url` and subpath-exported deps). Workstreams, roughly in dependency order:
+
+- **A · Synchronous VFS `fs` builtin** ⏳ — the keystone. Expose the per-process **SAB sync-syscall channel** (already used by the WASI path; `sync-syscall.js` + `makeSyncCaller`, ADR-010/-016) to JS programs, and implement `fs` sync ops (`readFileSync`/`writeFileSync`/`statSync`/`readdirSync`/`mkdirSync`/`openSync`/`readSync`/`closeSync`/`existsSync`/`realpathSync`) + thin async/`fs.promises` on top. Needed because tools do runtime file I/O that can't be prefetched the way the CJS `require` graph is today.
+- **B · Core builtins** ⏳ — promote the `path` subset in `require-runtime.js` to a real `node:path`; grow `process` (`cwd`/`chdir`/`hrtime`/`nextTick`/`stdout.isTTY=false`/`versions`); add `os` (`platform`/`EOL`/`tmpdir`/`homedir`), `url`, `module` (`createRequire`), `crypto.getRandomValues`, `tty.isatty→false`.
+- **C · `node:` builtin resolution** ⏳ — resolve both `require('fs')` and `require('node:fs')`, **and** `import … from 'node:…'`, to the builtin registry (wire into `require-runtime.js` resolve and the kernel ESM resolver as runtime-provided externals).
+- **D · ESM `import` of installed packages** ⏳ — extend `sys.resolveGraph` (the kernel ESM resolver) to walk `node_modules` with `package.json` `exports`/`module`/`browser` and **subpath exports** (e.g. `@poppinss/utils/lodash`). This is the gate for ESM-only packages like `edge.js`.
+- **E · npm bin-linking + PATH** ⏳ — `npm install` creates `node_modules/.bin/<name>` for packages with a `bin` field (a generated launcher, since the VFS has no symlinks), and shell command resolution prepends `./node_modules/.bin` (walking up) ahead of `/bin:/sbin` — so an installed package's command is runnable as a bare name, the standard Unix/npm model, with **no OS-specific shim baked into core**.
+
+**Proof targets (add opt-in browser tests when green):** `npm install esbuild-wasm && esbuild src/main.ts --bundle` runs the package's own bin under `/bin/node` (A+B+C+E); `npm install edge.js` then a script that renders a template imports it as ESM (C+D+B). A spike already proved esbuild-wasm loads + bundles from the VFS, but via a bespoke `/bin/esbuild` driver that was **backed out** to keep core clean (Phase 4 note).
+
+**Out of scope — hosting a foreign runtime.** Dropping a prebuilt Node-compatible runtime *binary* into WorkerOS is not the path. Concretely, the Edge.js runtime (edgejs.org) ships an `edge-wasix` build, but it is not a portable WASI guest: its 61 MB V8-in-WASIX module imports **284 host functions** — the full **WASIX** extension surface (`wasix_32v1`: threads/`futex_*`, sockets/`sock_*`, `epoll_*`, `proc_spawn3`/`proc_exec4`), a **shared imported memory** + `wasi.thread-spawn`, and **~198 host-provided N-API functions** (`napi` + `napi_extension_wasmer_v0`, Wasmer's V8 embedding API). It would fail at instantiation (link error) and would require WorkerOS to become a Wasmer-compatible WASIX + N-API host with real threads/sockets/fork — enormous and partly at odds with the browser sandbox (ADR-008: no raw sockets). Node compat comes from running packages on the host engine, not from embedding another runtime.
+
+**Exit criteria:** `install express` (or similar pure-JS package) then a script that imports and uses it runs correctly; a Vite-class dependency tree installs. *(Partially met: pure-JS packages with transitive deps install and run under `require` — e.g. `is-even`; larger ESM/tooling trees pending on the workstreams above.)*
 
 ---
 
@@ -129,6 +143,7 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 
 - Raw TCP/UDP, real DNS, `net`/`dgram` (ADR-008).
 - Native addons / C-ABI (`.node`) (§1.1).
+- **Hosting a foreign JS runtime binary** (e.g. Edge.js's `edge-wasix`, a Deno/Bun-in-wasm). These are not portable WASI guests — they import the **WASIX** superset (threads/sockets/`epoll`/fork-exec), a shared imported memory + `wasi.thread-spawn`, and host-provided **N-API** — i.e. they assume a specific embedder (Wasmer). Node compat comes from running packages on the host JS engine (Phase 5), not from embedding another runtime. See Phase 5 "Out of scope — hosting a foreign runtime".
 - WASM Component Model / WASI Preview 2 host (forward path only; ADR-005).
 - The native/server tier & V8 isolates — that's `es-runtime`, a separate product (ADR-002, §12).
 - Spectre-class isolation (ADR-009).
@@ -142,6 +157,6 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 | **M1 — Boot** | 0–1 | Kernel boots, VFS + syscall spine, fully tested, no execution |
 | **M2 — Run JS (MVP)** | 2 | Spawn/run/kill JS programs, concurrent, Rust-authoritative |
 | **M3 — Usable shell** | 3 | `wsh`, pipes, coreutils, `ps` |
-| **M4 — WASM apps** | 4 | Unmodified WASI binaries + PGlite as processes — 🚧 wasm32-wasip1 runs with stdio/exit + VFS reads + blocking stdin (sync-syscall channel done); esbuild-wasm/PGlite pending |
-| **M5 — Ecosystem** | 5–6 | npm install + Vite dev preview — 🚧 `npm` registry install + `node` CommonJS `require` done; preview/lockfiles pending |
+| **M4 — WASM apps** | 4 | Unmodified WASI binaries + WASM-library build step + PGlite as processes — 🚧 wasm32-wasip1 runs with stdio/exit + VFS reads + blocking stdin (sync-syscall channel done); esbuild-wasm build step proven as a spike but deferred to the `npm`+`node` path (Node compat); PGlite + off-the-shelf CLI pending |
+| **M5 — Ecosystem** | 5–6 | npm install + Vite dev preview — 🚧 `npm` registry install + `node` CommonJS `require` done; Node-compat pending (sync `fs` / `node:` builtins / ESM `node_modules` / bin-linking+PATH — see Phase 5), preview + lockfiles pending |
 | **M6 — Durable & hardened** | 7 | Persistence + membrane isolation |
