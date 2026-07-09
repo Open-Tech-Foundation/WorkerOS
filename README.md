@@ -27,11 +27,12 @@ CommonJS that `require()`s them — all as ordinary programs invoked through the
 shell (`os.exec("npm install …")`, `os.exec("node app.js")`). npm/node are guest
 programs; the kernel stays Node-agnostic (INV-1).
 
-**WASI has started (Phase 4).** An unmodified `wasm32-wasip1` binary runs as a
+**WASI is running (Phase 4).** An unmodified `wasm32-wasip1` binary runs as a
 WorkerOS process — the program worker instantiates the `.wasm` against a WASI
-Preview 1 host bound to the kernel's syscalls and calls `_start`. stdout/stderr,
-args, env, clocks, random, and `proc_exit` work today; reading the VFS from wasm
-(`fd_read`/`path_open`) awaits the SharedArrayBuffer synchronous-syscall channel.
+Preview 1 host bound to the kernel's syscalls and calls `_start`. It does stdio,
+args/env, clocks, random, `proc_exit`, **and real blocking I/O**: a
+SharedArrayBuffer synchronous-syscall channel lets a wasm program open and read
+VFS files (`std::fs`) and block on `stdin` from a pipe (`echo … | prog.wasm`).
 
 | Milestone | Phases | State |
 |-----------|--------|-------|

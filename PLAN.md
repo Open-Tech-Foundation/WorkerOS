@@ -79,7 +79,7 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 **Goal:** Run unmodified `wasm32-wasi` binaries as first-class processes (the thing that makes WorkerOS a JS+WASM OS, not a Node polyfill).
 
 - Program worker gains a WASM path: instantiate a `.wasm` with imports bound to the kernel's WASI host + `otf:*` dispatch (§5.1, §6). **✅ done** — `kind === "wasm"` entries read from the VFS, instantiate with the WASI P1 host (`workeros-programs/wasi`), and call `_start`.
-- Validate against real binaries: a `wasm32-wasi` build of a small CLI runs unmodified, reading VFS and writing stdout. **🚧 stdout half done** — a real rustc-built `wasm32-wasip1` binary runs unmodified and streams correct stdout/stderr + exit code. **VFS reads still TODO**: `fd_read`/`path_open` block on a kernel value, which needs the **SAB synchronous-syscall channel** (ADR-010/-016). That is the next WASI increment and unblocks reading the VFS from wasm.
+- Validate against real binaries: a `wasm32-wasi` build of a small CLI runs unmodified, reading VFS and writing stdout. **✅ done** — the **SAB synchronous-syscall channel** (ADR-010/-016) is built (`workeros-web/sync-syscall.js`), so a real rustc-built `wasm32-wasip1` binary runs unmodified with correct stdio/exit **and** reads the VFS (`std::fs::File::open`/read) and blocks on `stdin` from a pipe. Remaining: seek beyond "tell", `fd_readdir`, and richer path ops.
 - Integrate a WASM **library** tool end-to-end (esbuild-wasm or swc-wasm) as a callable build step. **⏳ TODO**
 - PGlite as a process in its own worker: `import`, query, and a `ps`-visible/killable wrapper (§5.1). Document the daemon-costume caveat. **⏳ TODO**
 
@@ -142,6 +142,6 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 | **M1 — Boot** | 0–1 | Kernel boots, VFS + syscall spine, fully tested, no execution |
 | **M2 — Run JS (MVP)** | 2 | Spawn/run/kill JS programs, concurrent, Rust-authoritative |
 | **M3 — Usable shell** | 3 | `wsh`, pipes, coreutils, `ps` |
-| **M4 — WASM apps** | 4 | Unmodified WASI binaries + PGlite as processes — 🚧 wasm32-wasip1 runs (stdout/exit); VFS reads pending the sync-syscall channel |
+| **M4 — WASM apps** | 4 | Unmodified WASI binaries + PGlite as processes — 🚧 wasm32-wasip1 runs with stdio/exit + VFS reads + blocking stdin (sync-syscall channel done); esbuild-wasm/PGlite pending |
 | **M5 — Ecosystem** | 5–6 | npm install + Vite dev preview — 🚧 `npm` registry install + `node` CommonJS `require` done; preview/lockfiles pending |
 | **M6 — Durable & hardened** | 7 | Persistence + membrane isolation |

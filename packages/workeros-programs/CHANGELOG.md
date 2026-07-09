@@ -20,10 +20,15 @@ guest runtime. Format:
   `wasi_snapshot_preview1` import module bound to the kernel's `sys` syscalls, so an
   **unmodified `wasm32-wasip1` binary runs as a WorkerOS process** (the program
   worker reads the `.wasm` from the VFS, instantiates it, and calls `_start`).
-  First slice: stdout/stderr, args, environ, clocks, random, and `proc_exit` work;
-  blocking reads and the filesystem (`fd_read`, `path_open`, …) return `ENOSYS`/EOF
-  until the SAB synchronous-syscall channel lands (ADR-010/-016) — the next WASI
-  increment. Verified with a real rustc-built binary (`println!` + compute → stdout).
+  stdout/stderr, args, environ, clocks, random, and `proc_exit` work.
+  - **Filesystem + blocking reads** work via the synchronous SAB syscall channel
+    (see `@opentf/workeros-web` `sync-syscall.js`): `path_open`, `fd_read`,
+    `fd_close`, `fd_filestat_get`/`path_filestat_get`, and `path_create_directory`/
+    `path_unlink_file`/`path_remove_directory`, with a single `/` preopen so wasm
+    resolves absolute paths; kernel errnos map to WASI errnos.
+  - Verified with real rustc-built `wasm32-wasip1` binaries: one reads a VFS file
+    via `std::fs` and prints it (missing file → WASI `ENOENT`); another blocks on
+    `stdin` and receives piped input (`echo … | prog.wasm`).
 - **Node-compatible runtime** (`src/node/`) — the guest Node layer:
   - `process` shim (`argv`/`env`/`stdout`/`stderr`/`exit`).
   - CommonJS runtime (`createNodeRuntime`): a `require()` with relative +

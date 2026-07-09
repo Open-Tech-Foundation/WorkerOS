@@ -5,8 +5,8 @@
 //   kernel worker ⇆ program worker  (init + syscalls + exit)
 //
 // This is the *control* transport. The synchronous syscall transport for WASI
-// guests is a separate SharedArrayBuffer ring buffer (ringbuffer.js); JS guests
-// (Phase 2/3) only need this async channel because JS stdio does not block.
+// guests is a separate per-process SharedArrayBuffer slot (sync-syscall.js); JS
+// guests (Phase 2/3) only need this async channel because JS stdio does not block.
 
 export const MSG = Object.freeze({
   // main → kernel
@@ -34,6 +34,9 @@ export const MSG = Object.freeze({
   START: "start",
   // program worker → kernel worker
   SYSCALL: "syscall",
+  // program worker → kernel worker: "a synchronous syscall request is waiting in
+  // the shared buffer" (WASI blocking calls; the reply travels via the SAB).
+  SYNC: "sync",
   PROC_EXIT: "proc_exit",
   // kernel worker → program worker (syscall reply)
   SYSCALL_RESULT: "syscall_result",

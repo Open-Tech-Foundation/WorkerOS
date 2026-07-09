@@ -15,6 +15,7 @@ import { MSG } from "./protocol.js";
 import { createProcess, ProcessExit } from "../../workeros-programs/src/node/process-shim.js";
 import { createNodeRuntime, usesCommonjs } from "../../workeros-programs/src/node/require-runtime.js";
 import { createWasiImports } from "../../workeros-programs/src/wasi/host.js";
+import { makeSyncCaller } from "./sync-syscall.js";
 
 const kernel = self; // the kernel worker created us; postMessage talks back to it.
 
@@ -132,8 +133,12 @@ async function readAll(sys, path) {
 async function runWasm(start, sys) {
   const bytes = await readAll(sys, start.graph.entry);
   let memory = null;
+  // Blocking WASI calls (fd_read/path_open/…) go through the synchronous SAB
+  // channel; the kernel worker services them while this thread parks.
+  const syncCall = makeSyncCaller(start.syncSab, () => kernel.postMessage({ type: MSG.SYNC }));
   const imports = createWasiImports({
     sys,
+    syncCall,
     argv: start.argv,
     env: start.env,
     getMemory: () => memory,

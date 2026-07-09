@@ -12,6 +12,7 @@ import { MSG } from "./protocol.js";
 import { createShell } from "./shell-exec.js";
 import { coreutils } from "../../workeros-coreutils/src/index.js";
 import { programs as osPrograms } from "../../workeros-programs/src/index.js";
+import { allocSyncBuffer, readRequest, writeResponse } from "./sync-syscall.js";
 
 const enc = new TextEncoder();
 let kernel = null;
@@ -41,7 +42,9 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
   const worker = new Worker(PROGRAM_WORKER_URL, { type: "module" });
   let resolveExit;
   const exited = new Promise((r) => (resolveExit = r));
-  programs.set(spawned.pid, { worker, sink, onExit, resolveExit, done: false });
+  // Per-process synchronous-syscall buffer (used by WASI blocking calls; ADR-010).
+  const syncSab = allocSyncBuffer();
+  programs.set(spawned.pid, { worker, sink, onExit, resolveExit, done: false, syncSab });
   worker.onmessage = (e) => onProgramMessage(spawned.pid, e.data);
   worker.onerror = (e) => {
     try {
@@ -57,6 +60,7 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
     cwd,
     pid: spawned.pid,
     graph: spawned.graph,
+    syncSab,
   });
   return exited;
 }
@@ -75,6 +79,7 @@ function handleExit(pid, code) {
   rec.done = true;
   kernel.mark_exited(pid, code); // idempotent; closes its pipe/file fds → EOF downstream
   retryPendingReads(); // downstream pipe readers may now see EOF
+  retrySyncPending();
   kernel.reap(pid);
   rec.worker.terminate();
   programs.delete(pid);
@@ -119,10 +124,97 @@ function retryPendingReads() {
   pendingReads = still;
 }
 
+// Parked synchronous reads (WASI) that would block: re-serviced when data/EOF
+// arrives, at which point the response is written to the SAB and the program
+// worker's Atomics.wait is released.
+let syncPending = [];
+
+function retrySyncPending() {
+  if (syncPending.length === 0) return;
+  const still = [];
+  for (const item of syncPending) {
+    const rec = programs.get(item.pid);
+    if (!rec || rec.done) continue;
+    let res;
+    try {
+      res = kernel.sys_read(item.pid, item.req.fd, item.req.max);
+    } catch (e) {
+      writeResponse(rec.syncSab, -1, { error: String(e.message || e) });
+      continue;
+    }
+    if (res.status === "again") still.push(item);
+    else writeResponse(rec.syncSab, 0, res.status === "data" ? res.data : new Uint8Array(0));
+  }
+  syncPending = still;
+}
+
+/** Service one synchronous syscall request sitting in a process's SAB. */
+function serviceSync(pid) {
+  const rec = programs.get(pid);
+  if (!rec || rec.done) return;
+  let req;
+  try {
+    req = readRequest(rec.syncSab);
+  } catch (e) {
+    writeResponse(rec.syncSab, -1, { error: String(e.message || e) });
+    return;
+  }
+  try {
+    switch (req.call) {
+      case "read": {
+        const res = kernel.sys_read(pid, req.fd, req.max);
+        if (res.status === "again") {
+          syncPending.push({ pid, req }); // park; respond when data/EOF arrives
+          return;
+        }
+        writeResponse(rec.syncSab, 0, res.status === "data" ? res.data : new Uint8Array(0));
+        break;
+      }
+      case "open":
+        writeResponse(rec.syncSab, 0, { fd: kernel.sys_open(pid, req.path, req.opts || {}) });
+        break;
+      case "close":
+        kernel.sys_close(pid, req.fd);
+        writeResponse(rec.syncSab, 0, {});
+        break;
+      case "stat":
+        writeResponse(rec.syncSab, 0, kernel.sys_stat(pid, req.path));
+        break;
+      case "readdir":
+        writeResponse(rec.syncSab, 0, { entries: kernel.sys_readdir(pid, req.path) });
+        break;
+      case "mkdir":
+        kernel.sys_mkdir(pid, req.path);
+        writeResponse(rec.syncSab, 0, {});
+        break;
+      case "unlink":
+        kernel.sys_unlink(pid, req.path);
+        writeResponse(rec.syncSab, 0, {});
+        break;
+      case "rmdir":
+        kernel.sys_rmdir(pid, req.path);
+        writeResponse(rec.syncSab, 0, {});
+        break;
+      case "rename":
+        kernel.sys_rename(pid, req.from, req.to);
+        writeResponse(rec.syncSab, 0, {});
+        break;
+      default:
+        writeResponse(rec.syncSab, -1, { error: "unknown sync call: " + req.call });
+    }
+  } catch (e) {
+    // A kernel errno (e.g. Noent). The WASI host maps a negative status to an errno.
+    writeResponse(rec.syncSab, -1, { error: String(e && e.message ? e.message : e) });
+  }
+}
+
 function onProgramMessage(pid, msg) {
   switch (msg.type) {
     case MSG.SYSCALL:
       handleSyscall(pid, msg);
+      break;
+    case MSG.SYNC:
+      serviceSync(pid);
       break;
     case MSG.PROC_EXIT:
       handleExit(pid, msg.code | 0);
@@ -142,6 +234,7 @@ function handleSyscall(pid, msg) {
           else if (eff.target === "stderr") rec.sink.stderr(args.data);
         }
         retryPendingReads(); // a pipe may have gained data
+        retrySyncPending();
         break; // fire-and-forget: no reply
       }
       case "read": {
@@ -285,6 +378,7 @@ self.onmessage = async (ev) => {
       case MSG.STDIN:
         kernel.feed_stdin(msg.pid, msg.data);
         retryPendingReads();
+        retrySyncPending();
         break;
 
       default:
