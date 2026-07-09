@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/workeros-kernel",
+    "packages/workeros-web/wasm",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/opentf/workeros"
+authors = ["Open Tech Foundation"]
+
+[profile.release]
+# Small, fast wasm.
+opt-level = "s"
+lto = true

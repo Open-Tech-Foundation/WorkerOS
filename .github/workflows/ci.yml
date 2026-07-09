@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  kernel-native:
+    name: Kernel — native tests + Node-ism gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Node-ism grep gate (INV-1 / ADR-007)
+        run: ./ci/grep-gate.sh
+      - name: cargo test (native)
+        run: cargo test --workspace --exclude workeros-web-wasm
+
+  kernel-wasm:
+    name: Kernel — wasm build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --target wasm32-unknown-unknown
+        run: cargo build -p workeros-kernel --target wasm32-unknown-unknown
+
+  browser-boot:
+    name: Headless browser boot smoke test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/workeros-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build kernel wasm
+        run: npm run build:wasm:dev
+      - name: Install JS deps
+        run: npm install
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Headless boot test
+        run: npm test

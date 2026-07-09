@@ -1,0 +1,23 @@
+{
+  "name": "@opentf/workeros-web",
+  "version": "0.0.0",
+  "description": "WorkerOS host runtime: kernel-worker + program-worker shims and the main-thread client API.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --release",
+    "build:wasm:dev": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --dev",
+    "serve": "node tools/serve.js",
+    "test": "node --test tools/*.test.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}

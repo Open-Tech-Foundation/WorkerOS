@@ -1,0 +1,17 @@
+[package]
+name = "workeros-kernel"
+description = "WorkerOS kernel: Node-agnostic core — VFS, process table, WASI-shaped syscall dispatch, ring-buffer transport."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+# `rlib` so the wasm-bindgen crate and native tests can depend on it;
+# `cdylib` so the kernel can also be built directly to wasm32-unknown-unknown.
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+
+[dev-dependencies]

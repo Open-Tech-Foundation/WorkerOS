@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WorkerOS — Phase 0 harness</title>
+    <style>
+      body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem; }
+      .ok { color: #16794b; }
+      .fail { color: #b3261e; }
+      pre { background: #f5f5f5; padding: 1rem; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>WorkerOS — Phase 0 harness</h1>
+    <p>crossOriginIsolated: <b id="coi"></b></p>
+    <pre id="out">running…</pre>
+    <script type="module">
+      import { boot } from "../src/index.js";
+      import { allocRingBuffer, RingBuffer } from "../src/ringbuffer.js";
+
+      const out = document.getElementById("out");
+      document.getElementById("coi").textContent = String(self.crossOriginIsolated);
+
+      // The test harness reads this global to decide pass/fail.
+      const results = { crossOriginIsolated: self.crossOriginIsolated, checks: [] };
+      window.__workeros_results = results;
+
+      function record(name, pass, detail) {
+        results.checks.push({ name, pass, detail });
+      }
+
+      async function run() {
+        // Check 1: boot handshake round-trips main → kernel → main.
+        try {
+          const os = await boot();
+          record("boot handshake", !!os.version, `version=${os.version} abi=${os.abi}`);
+          os.shutdown();
+        } catch (e) {
+          record("boot handshake", false, String(e));
+        }
+
+        // Check 2: SAB ring buffer round-trips a payload in the browser (mirror
+        // of the Rust reference spec). Single-thread here; cross-worker blocking
+        // is exercised natively in Rust.
+        try {
+          const sab = allocRingBuffer(16);
+          const rb = new RingBuffer(sab);
+          const enc = new TextEncoder().encode("hello ring");
+          rb.write(enc);
+          const got = rb.readBlocking(enc.length);
+          const text = new TextDecoder().decode(got);
+          record("ring buffer roundtrip", text === "hello ring", `got="${text}"`);
+        } catch (e) {
+          record("ring buffer roundtrip", false, String(e));
+        }
+
+        results.done = true;
+        const allPass = results.crossOriginIsolated && results.checks.every((c) => c.pass);
+        out.innerHTML =
+          `crossOriginIsolated: ${results.crossOriginIsolated}\n\n` +
+          results.checks
+            .map((c) => `${c.pass ? "✓" : "✗"} ${c.name} — ${c.detail}`)
+            .join("\n") +
+          `\n\n${allPass ? "ALL PASS" : "FAILURES"}`;
+        out.className = allPass ? "ok" : "fail";
+      }
+
+      run();
+    </script>
+  </body>
+</html>
