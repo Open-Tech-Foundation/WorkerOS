@@ -1,10 +1,10 @@
 // Copies the WorkerOS host runtime into the site's `public/` tree so the
 // playground can boot the real kernel from a same-origin URL.
 //
-// The runtime is authored across three packages whose worker files import each
-// other with *relative* paths (e.g. program-worker.js → `../../workeros-node/src/
-// process-shim.js`). To keep those imports resolving, we mirror the original
-// `packages/<pkg>/src/...` layout verbatim under `public/workeros/`.
+// The runtime is authored across several packages whose worker files import each
+// other with *relative* paths (e.g. program-worker.js → `../../workeros-programs/
+// src/node/process-shim.js`). To keep those imports resolving, we mirror the
+// original `packages/<pkg>/src/...` layout verbatim under `public/workeros/`.
 //
 // This runs before `otfw dev` / `otfw build` (see package.json scripts), so the
 // playground always serves the current kernel — including the wasm-pack output in
@@ -20,7 +20,7 @@ const repoRoot = join(siteRoot, "..");
 const dest = join(siteRoot, "public", "workeros", "packages");
 
 // The three packages that make up the bootable runtime. Order is cosmetic.
-const packages = ["workeros-web", "workeros-node", "workeros-coreutils", "workeros-npm"];
+const packages = ["workeros-web", "workeros-coreutils", "workeros-programs"];
 
 async function exists(p) {
   try {

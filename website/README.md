@@ -10,7 +10,7 @@ The marketing site and the **live playground**, built with the
 
 ## How the playground boots a real OS
 
-The kernel runtime lives in `../packages/{workeros-web,workeros-node,workeros-coreutils}`.
+The kernel runtime lives in `../packages/{workeros-web,workeros-coreutils,workeros-programs}`.
 Those worker files import each other with relative paths, so `tools/sync-runtime.mjs`
 mirrors the `packages/<pkg>/src/...` layout verbatim into `public/workeros/` (served
 same-origin). The playground loads it with a runtime-only dynamic import, so the site

@@ -6,14 +6,14 @@
 // It exposes two guest surfaces:
 //   • `globalThis.sys` — the WorkerOS-native syscall ABI (argv/env/cwd + fd ops),
 //     available to every guest; coreutils are written against it.
-//   • `globalThis.process` / `console` — the Node tenant sugar (workeros-node),
+//   • `globalThis.process` / `console` — the Node tenant sugar (workeros-programs/node),
 //     installed for the `node` interpreter, built on top of `sys`.
 //
 // Isolation level: `Full` (bare dynamic import), ADR-009/§7.1.
 
 import { MSG } from "./protocol.js";
-import { createProcess, ProcessExit } from "../../workeros-node/src/process-shim.js";
-import { createNodeRuntime, usesCommonjs } from "../../workeros-node/src/require-runtime.js";
+import { createProcess, ProcessExit } from "../../workeros-programs/src/node/process-shim.js";
+import { createNodeRuntime, usesCommonjs } from "../../workeros-programs/src/node/require-runtime.js";
 
 const kernel = self; // the kernel worker created us; postMessage talks back to it.
 

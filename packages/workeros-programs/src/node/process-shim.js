@@ -1,4 +1,4 @@
-// workeros-node — the minimal `process` global (Phase 2, PLAN.md).
+// workeros-programs/node — the minimal `process` global (Phase 2, PLAN.md).
 //
 // This is the GUEST tenant layer (INV-1/ADR-007): it maps Node's `process`
 // semantics onto the kernel's WASI-shaped primitives. It knows nothing about how

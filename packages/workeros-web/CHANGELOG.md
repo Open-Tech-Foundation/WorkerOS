@@ -12,10 +12,10 @@ main-thread client API). Format:
   sub-process through the shell driver, routing its output to the caller's streams
   and resolving the exit code. Powers `npm run <script>`.
 - **CommonJS execution path** — the program worker routes `require`-using `node`
-  entries through the guest `node` runtime (`workeros-node`), so `node index.js`
-  resolves `node_modules` from the VFS; ES-module and plain async scripts keep the
-  kernel-resolved graph + stitch path. The kernel worker installs the `npm` program
-  (`/bin/npm`) into the VFS at boot alongside the coreutils.
+  entries through the guest node runtime (`workeros-programs/node`), so
+  `node index.js` resolves `node_modules` from the VFS; ES-module and plain async
+  scripts keep the kernel-resolved graph + stitch path. The kernel worker installs
+  the OS programs (`/bin/npm`, …) into the VFS at boot alongside the coreutils.
 - **`boot()`** — spins up the kernel worker, loads the kernel wasm, performs the
   boot handshake, and resolves a `WorkerOS` handle (`version`, `abi`).
 - **`WorkerOS` client** — thin main-thread API over the kernel worker:

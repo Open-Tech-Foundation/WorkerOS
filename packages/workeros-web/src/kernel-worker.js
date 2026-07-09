@@ -11,7 +11,7 @@ import init, { WebKernel } from "./kernel-wasm/workeros_web_wasm.js";
 import { MSG } from "./protocol.js";
 import { createShell } from "./shell-exec.js";
 import { coreutils } from "../../workeros-coreutils/src/index.js";
-import { npmSource, NPM_BIN } from "../../workeros-npm/src/index.js";
+import { programs as osPrograms } from "../../workeros-programs/src/index.js";
 
 const enc = new TextEncoder();
 let kernel = null;
@@ -214,9 +214,13 @@ self.onmessage = async (ev) => {
         for (const [path, source] of Object.entries(coreutils)) {
           kernel.fs_write(path, enc.encode(source));
         }
-        // Install the `npm` package manager program into /bin (its source text is
-        // fetched same-origin; it's a guest program, not a host import).
-        kernel.fs_write(NPM_BIN, enc.encode(await npmSource()));
+        // Install the OS programs (npm, …) into /bin. Everything at once for now;
+        // a selectable install manifest is future work. Each program's source is
+        // loaded on demand (js text is fetched same-origin; wasm would be bytes).
+        for (const prog of osPrograms) {
+          const data = await prog.source();
+          kernel.fs_write(prog.bin, typeof data === "string" ? enc.encode(data) : new Uint8Array(data));
+        }
         shell = createShell({ kernel, startProcess, session });
         post({ type: MSG.BOOTED, version: kernel.version, abi: kernel.abi });
         break;

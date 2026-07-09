@@ -1,0 +1,17 @@
+{
+  "name": "@opentf/workeros-programs",
+  "version": "0.0.0",
+  "description": "WorkerOS OS programs: the installable /bin programs (npm, …) plus the Node-compatible guest runtime (process shim + CommonJS require).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./node": "./src/node/index.js",
+    "./node/process-shim": "./src/node/process-shim.js",
+    "./node/require-runtime": "./src/node/require-runtime.js"
+  },
+  "files": [
+    "src"
+  ]
+}

@@ -40,9 +40,8 @@ programs; the kernel stays Node-agnostic (INV-1).
 ```
 crates/workeros-kernel/    Rust core: VFS, process table, syscall dispatch, resolver, wsh parser/glob (native-testable)
 packages/workeros-web/     wasm-bindgen bindings + host runtime (kernel/program workers, shell driver, client API)
-packages/workeros-node/    guest-side Node-compat tenant layer (`process` shim + CommonJS `require` runtime)
-packages/workeros-coreutils/  coreutils as guest programs over the native `sys` ABI
-packages/workeros-npm/     the `npm` package manager as a guest program (registry install, run scripts)
+packages/workeros-coreutils/  system binaries: POSIX coreutils as guest programs over the `sys` ABI
+packages/workeros-programs/ OS programs (npm, …) as installable /bin programs + the Node-compatible guest runtime (process shim + CommonJS require)
 website/                   marketing site + live playground, built with the OTF Web framework
 examples/                  runnable demos (run-js, shell)
 ```
