@@ -1,0 +1,56 @@
+//! Capability sets — what a process is allowed to do.
+//!
+//! The kernel is the sole authority for capability granting (INV-2). A process
+//! receives a [`CapabilitySet`] at spawn time; every syscall is checked against
+//! it. v1 grants are coarse (stdio + a filesystem root + which `otf:*` calls are
+//! permitted); finer-grained per-fd rights can be added without changing the
+//! call sites.
+
+/// The three-call `otf:*` kernel ABI (ADR-006). A process must hold the matching
+/// capability to invoke each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtfCall {
+    /// `otf:spawn` — create a new process.
+    Spawn,
+    /// `otf:kill` — signal / terminate a process.
+    Kill,
+    /// `otf:ipc_open` — open an IPC channel fd.
+    IpcOpen,
+}
+
+/// The set of capabilities granted to a process.
+#[derive(Debug, Clone)]
+pub struct CapabilitySet {
+    /// Absolute, normalized filesystem root the process is confined to. Path
+    /// arguments are resolved within this root. `/` grants the whole VFS.
+    pub fs_root: String,
+    /// May read stdin (fd 0).
+    pub stdin: bool,
+    /// May write stdout (fd 1).
+    pub stdout: bool,
+    /// May write stderr (fd 2).
+    pub stderr: bool,
+    /// Which `otf:*` calls are permitted.
+    pub otf: Vec<OtfCall>,
+}
+
+impl CapabilitySet {
+    /// Whether a given `otf:*` call is permitted.
+    pub fn allows(&self, call: OtfCall) -> bool {
+        self.otf.contains(&call)
+    }
+}
+
+impl Default for CapabilitySet {
+    /// A reasonable default for an ordinary program: full VFS, all stdio, and
+    /// all three `otf:*` calls. Tighten per-process as policy requires.
+    fn default() -> Self {
+        CapabilitySet {
+            fs_root: "/".to_string(),
+            stdin: true,
+            stdout: true,
+            stderr: true,
+            otf: vec![OtfCall::Spawn, OtfCall::Kill, OtfCall::IpcOpen],
+        }
+    }
+}

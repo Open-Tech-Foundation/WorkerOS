@@ -15,7 +15,12 @@
 //! separate `workeros-web` crate; the browser is for integration, not for
 //! unit-testing pure logic.
 
+pub mod caps;
+pub mod errno;
+pub mod process;
 pub mod ringbuf;
+pub mod syscall;
+pub mod vfs;
 
 /// The ABI version the kernel speaks: WASI Preview 1 (the floor) plus the
 /// three-call `otf:*` kernel ABI (the ceiling, ADR-005/ADR-006).
@@ -35,16 +40,24 @@ pub struct Handshake {
     pub abi: &'static str,
 }
 
-/// The kernel instance. In Phase 0 it holds no state beyond identity; Phase 1
-/// grows it a VFS and a process table.
+/// The kernel instance and the authoritative owner of system state: the VFS and
+/// the process table (INV-2/ADR-004). Phase 2 wires spawn/execution on top.
 #[derive(Debug, Default)]
-pub struct Kernel {}
+pub struct Kernel {
+    /// The single-source-of-truth virtual filesystem.
+    pub vfs: vfs::MemVfs,
+    /// The process table.
+    pub processes: process::ProcessTable,
+}
 
 impl Kernel {
     /// Boot the kernel and produce the version handshake.
     pub fn boot() -> (Self, Handshake) {
         (
-            Kernel::default(),
+            Kernel {
+                vfs: vfs::MemVfs::new(),
+                processes: process::ProcessTable::new(),
+            },
             Handshake {
                 version: VERSION,
                 abi: ABI,
