@@ -6,8 +6,10 @@
 // all the decisions.
 
 import { MSG } from "./protocol.js";
+import { installPackage, scanImports, isBare, rewriteSpecifier } from "./npm.js";
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 function toBytes(data) {
   return typeof data === "string" ? encoder.encode(data) : new Uint8Array(data);
@@ -61,6 +63,8 @@ export class WorkerOS {
     this._pending = new Map(); // request id → {resolve, reject}
     this._procs = new Map(); // pid → Process
     this._execs = new Map(); // exec id → {onStdout, onStderr, resolve}
+    this._runSeq = 0; // unique temp-file counter for run()
+    this._pkgCache = new Map(); // installed npm specifier → VFS path
 
     /** @type {{ write: (path: string, data: Uint8Array|string) => Promise<void>,
      *           read: (path: string) => Promise<Uint8Array> }} */
@@ -168,6 +172,54 @@ export class WorkerOS {
       this._execs.set(id, { onStdout: opts.onStdout, onStderr: opts.onStderr, resolve });
       this._worker.postMessage({ type: MSG.EXEC, id, line });
     });
+  }
+
+  /**
+   * Run a snippet of JS as a real WorkerOS process and collect its output.
+   *
+   * Bare `import`s (e.g. `import { camelCase } from "@opentf/std"`) are resolved
+   * the Node way — outside the kernel (INV-1): each package is fetched from a CDN
+   * into the VFS and the specifier is rewritten to its absolute VFS path, which
+   * the kernel then graph-walks and runs. `console.log` output is streamed and
+   * accumulated. This is the primitive a docs-site "try it" widget calls: user
+   * types code, it executes in the OS, and you get its output back.
+   *
+   * @param {string} code  the JS source to run (ES module; may use bare imports)
+   * @param {object} [opts]
+   * @param {(b: Uint8Array) => void} [opts.onStdout]  live stdout chunks
+   * @param {(b: Uint8Array) => void} [opts.onStderr]  live stderr chunks
+   * @param {(name: string) => void} [opts.onInstall]  called before fetching each package
+   * @param {object} [opts.env]
+   * @param {string} [opts.cwd]
+   * @returns {Promise<{ stdout: string, stderr: string, code: number }>}
+   */
+  async run(code, opts = {}) {
+    // Resolve + install every bare package the snippet imports.
+    const specs = scanImports(code).filter(isBare);
+    let src = code;
+    for (const spec of specs) {
+      if (!this._pkgCache.has(spec)) opts.onInstall?.(spec);
+      const vfsPath = await installPackage(this, spec, this._pkgCache);
+      src = rewriteSpecifier(src, spec, vfsPath);
+    }
+
+    const path = `/tmp/run-${++this._runSeq}.mjs`;
+    await this.fs.write(path, src);
+
+    const proc = await this.spawn(["node", path], { env: opts.env, cwd: opts.cwd });
+    let stdout = "";
+    let stderr = "";
+    proc.onStdout((b) => {
+      stdout += decoder.decode(b);
+      opts.onStdout?.(b);
+    });
+    proc.onStderr((b) => {
+      stderr += decoder.decode(b);
+      opts.onStderr?.(b);
+    });
+    const code2 = await proc.exited;
+    this._procs.delete(proc.pid);
+    return { stdout, stderr, code: code2 };
   }
 
   /** `ps` — a snapshot of the live process table. */

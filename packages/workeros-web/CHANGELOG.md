@@ -8,6 +8,16 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`WorkerOS.run(code, opts)`** — run a JS snippet as a real WorkerOS process and
+  collect its output (`{ stdout, stderr, code }`), streaming via `onStdout`/
+  `onStderr`. Bare `import`s are auto-installed (see below). This is the primitive
+  a docs-site “try it” widget calls.
+- **npm install (`npm.js`)** — guest-side, Node-style package resolution kept out
+  of the kernel (INV-1 / PLAN Phase 5). `installPackage()` fetches a self-contained
+  ESM build from a CORS-friendly CDN (jsDelivr `+esm`, ADR-008) into `/node_modules`,
+  following any externalized dependency transitively and rewriting each module's
+  imports to VFS paths, so the kernel graph-walks and runs it with no bare
+  specifiers. Also exports `scanImports`, `isBare`, `rewriteSpecifier`.
 - **`boot()`** — spins up the kernel worker, loads the kernel wasm, performs the
   boot handshake, and resolves a `WorkerOS` handle (`version`, `abi`).
 - **`WorkerOS` client** — thin main-thread API over the kernel worker:

@@ -147,6 +147,47 @@ const procs = await os.`}<span class="f">ps</span>{`();`}
         </div>
       </section>
 
+      {/* ---------------- run npm packages ---------------- */}
+      <section class="section" id="try">
+        <div class="container">
+          <div class="section-head">
+            <p class="kicker">Run real npm packages</p>
+            <h2>A live “try it” for your package docs.</h2>
+            <p>
+              <code>os.run(code)</code> takes a JS snippet, fetches any package it{" "}
+              <code>import</code>s into the VFS, and executes it as a real process —
+              then hands you the output. Drop it into your docs site and users can run
+              your package for real, in the browser, with no backend.
+            </p>
+          </div>
+
+          <div class="code-wrap">
+            <div class="code-bar">
+              <span class="dots"><i /><i /><i /></span>
+              <span class="file">try-it.js — run a package, get output</span>
+            </div>
+            <pre class="code">
+{`const os = await `}<span class="f">boot</span>{`();
+
+`}<span class="c">// User types this into your docs widget:</span>{`
+const code = `}<span class="s">{'`import { camelCase } from "@opentf/std"; console.log(camelCase("hi there"));`'}</span>{`;
+
+`}<span class="c">// It runs inside WorkerOS — the import is fetched into the VFS,</span>{`
+`}<span class="c">// executed as a real process, and its output comes back.</span>{`
+const { stdout, code: exit } = await os.`}<span class="f">run</span>{`(code);
+
+`}<span class="a">{'// stdout === "hiThere\\n"'}</span>
+            </pre>
+          </div>
+
+          <div class="hero-cta" style="justify-content:flex-start;margin-top:28px">
+            <Link href="/try" class="btn btn-primary">
+              Open the “try it” widget <span class="arrow">→</span>
+            </Link>
+          </div>
+        </div>
+      </section>
+
       {/* ---------------- milestones ---------------- */}
       <section class="section" id="milestones">
         <div class="container">

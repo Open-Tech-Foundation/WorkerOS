@@ -21,6 +21,7 @@ export default function RootLayout({ children }) {
             >
               GitHub
             </a>
+            <Link href="/try">Try it</Link>
             <Link href="/playground" class="nav-cta">
               Playground
             </Link>
