@@ -68,4 +68,4 @@ for `SharedArrayBuffer`; the dev server sets these headers (ADR-010).
 
 ## License
 
-Apache-2.0.
+Apache-2.0. See [NOTICE](./NOTICE) for attribution details.
