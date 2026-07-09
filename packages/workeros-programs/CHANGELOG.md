@@ -23,12 +23,17 @@ guest runtime. Format:
   stdout/stderr, args, environ, clocks, random, and `proc_exit` work.
   - **Filesystem + blocking reads** work via the synchronous SAB syscall channel
     (see `@opentf/workeros-web` `sync-syscall.js`): `path_open`, `fd_read`,
-    `fd_close`, `fd_filestat_get`/`path_filestat_get`, and `path_create_directory`/
-    `path_unlink_file`/`path_remove_directory`, with a single `/` preopen so wasm
-    resolves absolute paths; kernel errnos map to WASI errnos.
-  - Verified with real rustc-built `wasm32-wasip1` binaries: one reads a VFS file
-    via `std::fs` and prints it (missing file → WASI `ENOENT`); another blocks on
-    `stdin` and receives piped input (`echo … | prog.wasm`).
+    `fd_seek`, `fd_readdir`, `fd_close`, `fd_filestat_get`/`path_filestat_get`, and
+    `path_create_directory`/`path_unlink_file`/`path_remove_directory`/`path_rename`,
+    with a single `/` preopen so wasm resolves absolute paths; kernel errnos map to
+    WASI errnos.
+  - Verified with real rustc-built `wasm32-wasip1` binaries: reading a VFS file via
+    `std::fs` (missing file → WASI `ENOENT`), blocking on `stdin` from a pipe
+    (`echo … | prog.wasm`), `read_dir` of a directory, and `Seek`+read.
+- **`curl`** (`src/curl/`) — download a URL into the VFS or to stdout
+  (`curl -o /x.wasm <url>`, `curl -O <url>`, `curl <url>`). Uses the worker's
+  `fetch` (ADR-008); cross-origin URLs must send CORS. Pairs with the WASI runtime:
+  `curl` a wasm binary, then run it.
 - **Node-compatible runtime** (`src/node/`) — the guest Node layer:
   - `process` shim (`argv`/`env`/`stdout`/`stderr`/`exit`).
   - CommonJS runtime (`createNodeRuntime`): a `require()` with relative +

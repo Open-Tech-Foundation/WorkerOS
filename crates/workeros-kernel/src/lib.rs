@@ -395,6 +395,14 @@ impl Kernel {
         ctx.fd_close(&mut self.vfs, &mut self.pipes, fd)
     }
 
+    /// `fd_seek` for a guest; `whence` is the raw WASI value (0=set, 1=cur, 2=end).
+    /// Returns the new absolute offset.
+    pub fn sys_seek(&mut self, pid: Pid, fd: Fd, offset: i64, whence: u8) -> SysResult<u64> {
+        let whence = syscall::Whence::from_raw(whence)?;
+        let ctx = self.contexts.get_mut(&pid).ok_or(Errno::Badf)?;
+        ctx.fd_seek(&self.vfs, fd, offset, whence)
+    }
+
     /// List a directory by path (for `ls`).
     pub fn sys_readdir(&self, pid: Pid, path: &str) -> SysResult<Vec<DirEntry>> {
         self.contexts.get(&pid).ok_or(Errno::Badf)?.path_readdir(&self.vfs, path)

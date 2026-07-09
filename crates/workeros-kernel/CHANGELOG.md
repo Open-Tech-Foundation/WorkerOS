@@ -7,6 +7,8 @@ a release yet, so everything lives under **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **`sys_seek` host wrapper** — exposes the process context's `fd_seek` to the host
+  runtime so WASI guests can seek (`whence` = set/cur/end; returns the new offset).
 - **Authoritative core.** The Node-agnostic kernel that owns all system state:
   VFS, process table, module resolution, scheduling, and capability granting
   (`caps`, `errno`, `process`, `resolver`, `ringbuf`, `shell`, `syscall`, `vfs`).

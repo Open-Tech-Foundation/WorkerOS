@@ -345,6 +345,14 @@ impl WebKernel {
         self.inner.sys_close(pid, fd).map_err(errno_to_js)
     }
 
+    /// `fd_seek`. `offset` is passed as an f64 (JS number); the new absolute
+    /// offset is returned the same way. `whence`: 0=set, 1=cur, 2=end.
+    #[wasm_bindgen]
+    pub fn sys_seek(&mut self, pid: Pid, fd: Fd, offset: f64, whence: u8) -> Result<f64, JsError> {
+        let n = self.inner.sys_seek(pid, fd, offset as i64, whence).map_err(errno_to_js)?;
+        Ok(n as f64)
+    }
+
     #[wasm_bindgen]
     pub fn sys_readdir(&self, pid: Pid, path: String) -> Result<JsValue, JsError> {
         let entries = self.inner.sys_readdir(pid, &path).map_err(errno_to_js)?;

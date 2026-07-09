@@ -31,8 +31,14 @@ programs; the kernel stays Node-agnostic (INV-1).
 WorkerOS process — the program worker instantiates the `.wasm` against a WASI
 Preview 1 host bound to the kernel's syscalls and calls `_start`. It does stdio,
 args/env, clocks, random, `proc_exit`, **and real blocking I/O**: a
-SharedArrayBuffer synchronous-syscall channel lets a wasm program open and read
-VFS files (`std::fs`) and block on `stdin` from a pipe (`echo … | prog.wasm`).
+SharedArrayBuffer synchronous-syscall channel lets a wasm program open/read VFS
+files (`std::fs`), seek, `read_dir`, rename, and block on `stdin` from a pipe. A
+`curl` program downloads a wasm over HTTP so you can fetch and run one:
+
+```sh
+curl -o /hello.wasm https://example.com/hello.wasm   # needs CORS on the host
+/hello.wasm
+```
 
 | Milestone | Phases | State |
 |-----------|--------|-------|

@@ -177,6 +177,11 @@ function serviceSync(pid) {
         kernel.sys_close(pid, req.fd);
         writeResponse(rec.syncSab, 0, {});
         break;
+      case "seek":
+        writeResponse(rec.syncSab, 0, {
+          offset: kernel.sys_seek(pid, req.fd, req.offset, req.whence),
+        });
+        break;
       case "stat":
         writeResponse(rec.syncSab, 0, kernel.sys_stat(pid, req.path));
         break;

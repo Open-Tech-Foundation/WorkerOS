@@ -231,13 +231,12 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
 
     fd_seek: (fd, offset, whence, newOffPtr) => {
       const info = fds.get(fd);
-      const cur = info ? info.offset : 0;
-      // Only "tell" (SEEK_CUR + 0) is supported without a kernel seek binding.
-      if (whence === 1 && offset === 0n) {
-        view().setBigUint64(newOffPtr, BigInt(cur), true);
-        return ERRNO_SUCCESS;
-      }
-      return ERRNO_NOSYS;
+      if (!info && fd > 2) return ERRNO_BADF;
+      const r = syncCall("seek", { fd: info ? info.kfd : fd, offset: Number(offset), whence }, false);
+      if (r.status < 0) return mapErr(r.value);
+      if (info) info.offset = r.value.offset;
+      view().setBigUint64(newOffPtr, BigInt(r.value.offset), true);
+      return ERRNO_SUCCESS;
     },
     fd_tell: (fd, offPtr) => {
       const info = fds.get(fd);
@@ -277,6 +276,50 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
       const r = syncCall("rmdir", { path: absPath(readStr(pathPtr, pathLen)) }, false);
       return r.status < 0 ? mapErr(r.value) : ERRNO_SUCCESS;
     },
+    path_rename: (_oldFd, oldPtr, oldLen, _newFd, newPtr, newLen) => {
+      const from = absPath(readStr(oldPtr, oldLen));
+      const to = absPath(readStr(newPtr, newLen));
+      const r = syncCall("rename", { from, to }, false);
+      return r.status < 0 ? mapErr(r.value) : ERRNO_SUCCESS;
+    },
+
+    fd_readdir: (fd, bufPtr, bufLen, cookie, bufusedPtr) => {
+      const info = fds.get(fd);
+      if (!info) return ERRNO_BADF;
+      const r = syncCall("readdir", { path: info.path }, false);
+      if (r.status < 0) return mapErr(r.value);
+      // "." and ".." lead, then the directory's own entries.
+      const list = [
+        { name: ".", is_dir: true },
+        { name: "..", is_dir: true },
+        ...r.value.entries,
+      ];
+      const dv = view();
+      const mem = u8();
+      let used = 0;
+      for (let i = Number(cookie); i < list.length; i++) {
+        if (used + 24 > bufLen) {
+          used = bufLen;
+          break;
+        }
+        const e = list[i];
+        const nameBytes = encoder.encode(e.name);
+        const p = bufPtr + used;
+        dv.setBigUint64(p, BigInt(i + 1), true); // d_next (cookie of next entry)
+        dv.setBigUint64(p + 8, BigInt(i + 1), true); // d_ino
+        dv.setUint32(p + 16, nameBytes.length, true); // d_namlen
+        dv.setUint8(p + 20, e.is_dir ? FILETYPE_DIRECTORY : FILETYPE_REGULAR_FILE);
+        const room = Math.min(nameBytes.length, bufLen - used - 24);
+        mem.set(nameBytes.subarray(0, room), p + 24);
+        used += 24 + room;
+        if (room < nameBytes.length) {
+          used = bufLen; // truncated → signal "buffer full, call again"
+          break;
+        }
+      }
+      dv.setUint32(bufusedPtr, used, true);
+      return ERRNO_SUCCESS;
+    },
 
     fd_close: (fd) => {
       const info = fds.get(fd);
@@ -296,9 +339,9 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
   // import, but honestly ENOSYS until implemented.
   const NOT_YET = [
     "fd_advise", "fd_allocate", "fd_datasync", "fd_filestat_set_size",
-    "fd_filestat_set_times", "fd_pread", "fd_pwrite", "fd_readdir", "fd_renumber",
+    "fd_filestat_set_times", "fd_pread", "fd_pwrite", "fd_renumber",
     "fd_sync", "fd_fdstat_set_rights", "path_filestat_set_times", "path_link",
-    "path_readlink", "path_rename", "path_symlink", "poll_oneoff", "proc_raise",
+    "path_readlink", "path_symlink", "poll_oneoff", "proc_raise",
     "sock_accept", "sock_recv", "sock_send", "sock_shutdown", "clock_nanosleep",
   ];
   for (const name of NOT_YET) {

@@ -32,4 +32,9 @@ export const programs = [
     type: "js",
     source: () => fetchText("./npm/npm-program.js"),
   },
+  {
+    bin: "/bin/curl",
+    type: "js",
+    source: () => fetchText("./curl/curl-program.js"),
+  },
 ];

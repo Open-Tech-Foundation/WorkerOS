@@ -11,8 +11,8 @@ main-thread client API). Format:
 - **Synchronous syscall channel** (`sync-syscall.js`) — a per-process
   SharedArrayBuffer request/response slot (ADR-010/-016). A program worker writes a
   blocking syscall, signals the kernel worker, and parks in `Atomics.wait`; the
-  kernel worker services it (`read`/`open`/`close`/`stat`/`readdir`/`mkdir`/…) and
-  wakes it via `Atomics.notify`. Would-block reads are parked and released when
+  kernel worker services it (`read`/`open`/`close`/`seek`/`stat`/`readdir`/`mkdir`/
+  `rename`/…) and wakes it via `Atomics.notify`. Would-block reads are parked and released when
   data/EOF arrives. This gives a synchronous wasm `_start` real blocking I/O —
   `fd_read`, `path_open`, and blocking `stdin` from a pipe.
 - **`sys.exec(line)` syscall** — system(3)-style: run a command line as a

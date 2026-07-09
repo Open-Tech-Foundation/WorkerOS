@@ -79,11 +79,11 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 **Goal:** Run unmodified `wasm32-wasi` binaries as first-class processes (the thing that makes WorkerOS a JS+WASM OS, not a Node polyfill).
 
 - Program worker gains a WASM path: instantiate a `.wasm` with imports bound to the kernel's WASI host + `otf:*` dispatch (§5.1, §6). **✅ done** — `kind === "wasm"` entries read from the VFS, instantiate with the WASI P1 host (`workeros-programs/wasi`), and call `_start`.
-- Validate against real binaries: a `wasm32-wasi` build of a small CLI runs unmodified, reading VFS and writing stdout. **✅ done** — the **SAB synchronous-syscall channel** (ADR-010/-016) is built (`workeros-web/sync-syscall.js`), so a real rustc-built `wasm32-wasip1` binary runs unmodified with correct stdio/exit **and** reads the VFS (`std::fs::File::open`/read) and blocks on `stdin` from a pipe. Remaining: seek beyond "tell", `fd_readdir`, and richer path ops.
+- Validate against real binaries: a `wasm32-wasi` build of a small CLI runs unmodified, reading VFS and writing stdout. **✅ done** — the **SAB synchronous-syscall channel** (ADR-010/-016) is built (`workeros-web/sync-syscall.js`), so a real rustc-built `wasm32-wasip1` binary runs unmodified with correct stdio/exit **and** reads the VFS (`std::fs::File::open`/read), seeks (`fd_seek`, backed by a `sys_seek` kernel binding), lists directories (`fd_readdir`), renames (`path_rename`), and blocks on `stdin` from a pipe. A `curl` program downloads a wasm over HTTP into the VFS so it can be run. Remaining: `esbuild-wasm`/PGlite and an off-the-shelf CLI (`jq`/`ripgrep`) as the marquee proof.
 - Integrate a WASM **library** tool end-to-end (esbuild-wasm or swc-wasm) as a callable build step. **⏳ TODO**
 - PGlite as a process in its own worker: `import`, query, and a `ps`-visible/killable wrapper (§5.1). Document the daemon-costume caveat. **⏳ TODO**
 
-**Exit criteria:** an off-the-shelf `wasm32-wasi` CLI runs with zero source changes and correct stdio/exit; PGlite runs a query inside a WorkerOS process without freezing the kernel. *(Partially met: stdout/exit proven; reading the VFS from wasm awaits the sync-syscall channel.)*
+**Exit criteria:** an off-the-shelf `wasm32-wasi` CLI runs with zero source changes and correct stdio/exit; PGlite runs a query inside a WorkerOS process without freezing the kernel. *(Substantially met for the WASI host: rustc-built `wasm32-wasip1` binaries run unmodified with full stdio/exit + VFS reads/seek/readdir/rename + blocking stdin. Still to prove: an off-the-shelf CLI like `jq`/`ripgrep`, and PGlite.)*
 
 ---
 

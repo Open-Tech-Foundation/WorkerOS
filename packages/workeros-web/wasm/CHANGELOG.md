@@ -9,6 +9,8 @@ No release cut yet — see **Unreleased**.
 ### Added
 - **`WebKernel` binding** — a `wasm-bindgen` façade over `workeros-kernel` that
   the kernel worker instantiates in the browser.
+- **`sys_seek(pid, fd, offset, whence)`** binding (offset/result as JS numbers) for
+  WASI `fd_seek`.
 - **Boot handshake** — exposes the kernel `version` and `ABI`
   (`wasi-preview-1+otf-1`) so the host can verify it before use.
 - **VFS bridge** — `fs` read/write crossing the JS↔wasm boundary.
