@@ -20,12 +20,6 @@ there is now `wsh`, a bash-flavored shell with pipes, redirects, `&&`/`||`/`;`,
 globbing, background jobs, `cd`, and a set of coreutils (`echo cat ls cp mv rm
 mkdir pwd env true false`) that run as real, `ps`-visible, killable processes.
 
-There is also a **website + live playground** ([`website/`](./website)) built with
-the OTF Web framework, including a **"try it" widget**: `os.run(code)` runs a JS
-snippet as a real process, fetching any npm package it `import`s into the VFS
-(guest-side Node resolution — INV-1) and returning its output — a Phase-5
-down-payment aimed at live docs for JS packages.
-
 | Milestone | Phases | State |
 |-----------|--------|-------|
 | M1 — Boot | 0–1 | ✅ kernel boots, VFS + WASI-shaped syscall spine, fully native-tested |
