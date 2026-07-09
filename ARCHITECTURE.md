@@ -3,7 +3,7 @@
 **Status:** Authoritative design document
 **License:** Apache-2.0
 **Owner:** Open Tech Foundation (`opentf`)
-**Crates / packages:** `workeros-kernel` (Rust core), `workeros-node` (Node-compat layer), `workeros-web` (wasm/JS bindings + host runtime)
+**Crates / packages:** `workeros-kernel` (Rust core), `workeros-web` (wasm/JS bindings + host runtime), `workeros-coreutils` (system binaries, installed in `/sbin`), `workeros-programs` (OS programs like `npm` in `/bin`, plus the Node-compat guest runtime under `/node`)
 
 ---
 
@@ -51,7 +51,7 @@ The naming discipline matters: WorkerOS is an **"OS-style runtime,"** never a "f
 
 These constraints are load-bearing. Violating any of them collapses WorkerOS back into "NodePod-in-Rust" and forfeits the differentiation.
 
-- **INV-1 — Node-agnostic kernel.** The kernel understands *processes, files, syscalls, and the ABI*. It must **not** know what `require`, `express`, or `node_modules` are. All Node-isms live in `workeros-node`, a guest-side compatibility layer — exactly as Node would be "just a program" on real Linux.
+- **INV-1 — Node-agnostic kernel.** The kernel understands *processes, files, syscalls, and the ABI*. It must **not** know what `require`, `express`, or `node_modules` are. All Node-isms live in the guest-side node layer (`workeros-programs/node`) — exactly as Node would be "just a program" on real Linux. (`npm` likewise is a guest program in `workeros-programs`, not a kernel feature.)
 - **INV-2 — Rust is the control center.** The Rust kernel is authoritative for module resolution, VFS, the process table, scheduling, and capability granting. Host JS is a "dumb CPU": it executes source it is handed and reports results back. Logic never leaks host-side.
 - **INV-3 — WASI is the floor, `otf:*` is the ceiling.** Anything WASI Preview 1 can express is done with WASI (so unmodified `wasm32-wasi` binaries run). Custom `otf:*` calls exist **only** where WASI has no primitive.
 - **INV-4 — Every process is a real, killable process.** A process is backed by its own worker; it can run in parallel and be terminated externally. No "fake" cooperative-only processes in the core model.
@@ -144,7 +144,7 @@ Implemented as a host in the kernel; a plain `wasm32-wasi` binary uses these unm
 - `args_get` / `args_sizes_get`, `environ_get` / `environ_sizes_get`.
 - `clock_time_get`, `random_get`, `proc_exit`.
 
-For JS programs, `workeros-node` maps Node's `fs`/`path`/`process` onto these same kernel primitives — so JS and WASI guests bottom out at one VFS/stdio surface.
+For JS programs, the guest node layer (`workeros-programs/node`) maps Node's `fs`/`path`/`process` onto these same kernel primitives — so JS and WASI guests bottom out at one VFS/stdio surface.
 
 ### 6.2 `otf:*` extensions (the ceiling — v1 is exactly three)
 

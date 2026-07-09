@@ -10,7 +10,7 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 
 **Goal:** A buildable Rust→wasm kernel skeleton, a host runtime that boots it in a worker, and a test harness — no execution yet.
 
-- Workspace: `workeros-kernel` (Rust lib, `cdylib` + native test target), `workeros-web` (wasm-bindgen bindings + host JS runtime), `workeros-node` (empty stub).
+- Workspace: `workeros-kernel` (Rust lib, `cdylib` + native test target), `workeros-web` (wasm-bindgen bindings + host JS runtime), `workeros-node` (empty stub; later folded into `workeros-programs/node`).
 - Kernel builds to `wasm32-unknown-unknown` and loads in a Web Worker; a `boot()` returns a version handshake to the main thread.
 - Control transport up: `postMessage` message framing + a `SharedArrayBuffer` ring-buffer primitive with `Atomics.wait`/`notify` (the synchronous syscall channel, ADR-010). Unit-test the ring buffer natively.
 - Cross-origin isolation dev server (COOP/COEP headers) so SAB works locally.
@@ -47,7 +47,7 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 - `otf:spawn` wired end-to-end: kernel resolves entrypoint via the Rust resolver (§7), creates a worker, injects source + caps, registers the process.
 - stdio streaming: guest `console.log`/writes → `fd_write` → kernel → main-thread stdout stream. stderr + exit code likewise.
 - `otf:kill` / hard `terminate()` for runaway processes; `wait(pid)`.
-- Minimal `workeros-node` shim: just enough `process` (`argv`, `env`, `stdout.write`, `exit`) for ordinary scripts. **No `require` graph yet** beyond relative `import` of local files via the kernel resolver.
+- Minimal Node `process` shim (now in `workeros-programs/node`): just enough `process` (`argv`, `env`, `stdout.write`, `exit`) for ordinary scripts. **No `require` graph yet** beyond relative `import` of local files via the kernel resolver.
 - Public client API on main thread: `boot()`, `fs.write(path, bytes)`, `spawn(argv)`, `onStdout`, `onExit`.
 
 **Exit criteria (the MVP acceptance test):**
@@ -87,15 +87,16 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 
 ---
 
-## Phase 5 — Package manager · [post-MVP]
+## Phase 5 — Package manager · [post-MVP] · 🚧 in progress
 
 **Goal:** `install` real packages into the VFS.
 
-- Fetch npm tarballs through a CORS proxy (§8, ADR-008); unpack into `node_modules` in the VFS.
-- Node-style resolution in `workeros-node`: the full `require`/`import` `node_modules` walk, `package.json` `main`/`exports`. (Stays in the guest layer — INV-1.)
-- Lockfile + integrity; dedupe.
+- Fetch npm tarballs from the registry (§8, ADR-008); unpack into `node_modules` in the VFS. **✅ done** — `npm` is a guest program (`workeros-programs`, `/bin/npm`): packument fetch, semver resolution, tarball download → in-browser `DecompressionStream` gunzip → untar, transitive deps.
+- Node-style resolution in the guest node layer (`workeros-programs/node`): the `require`/`import` `node_modules` walk, `package.json` `main`/`exports`. (Stays in the guest layer — INV-1.) **✅ CommonJS `require`** works (`node index.js` resolves installed packages); ESM `import` of installed packages and `node:` builtins are still TODO.
+- Lockfile + integrity; dedupe. **⏳ TODO** — dedupe is currently basic (hoist, first-writer-wins); no lockfile yet.
+- Node compatibility is an **ongoing, incremental** effort (grow `workeros-programs/node` over time), not a one-shot.
 
-**Exit criteria:** `install express` (or similar pure-JS package) then a script that imports and uses it runs correctly; a Vite-class dependency tree installs.
+**Exit criteria:** `install express` (or similar pure-JS package) then a script that imports and uses it runs correctly; a Vite-class dependency tree installs. *(Partially met: pure-JS packages with transitive deps install and run under `require` — e.g. `is-even`; larger ESM/tooling trees pending.)*
 
 ---
 
@@ -104,7 +105,7 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 **Goal:** "Servers" that a browser can actually hit.
 
 - `otf:preview` + Service Worker interception: a guest "server" registers routes; SW routes `fetch` on the preview URL into the kernel/handler (§8).
-- HTTP-server shim in `workeros-node` mapping `http.createServer` onto the route registry.
+- HTTP-server shim in the guest node layer (`workeros-programs/node`) mapping `http.createServer` onto the route registry.
 - Target: a Vite dev server boots and its preview URL renders in an iframe.
 
 **Exit criteria:** a Vite (or equivalent) project runs `dev` and the preview URL serves the app through the Service Worker; HMR-style reload optional.
@@ -118,6 +119,7 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 - IndexedDB `Vfs` implementation behind the existing trait; snapshot / COW overlay for "reset project" (§9, ADR-011).
 - `Membrane` execution level: frozen intrinsics + proxied global / `ShadowRealm` (§7.1, ADR-009).
 - (Optional, later) `Wasm` execution level via a pure-Rust JS engine for strong capability isolation.
+- **Protected system paths** (ADR-018): a kernel-level protected-prefix / read-only-subtree check so `/sbin` (system binaries) and other protected paths reject mutating syscalls with `EPERM` — turning today's `/sbin` *convention* into real enforcement.
 
 **Exit criteria:** a project persists across reloads; a project can be reset to a snapshot; membrane level denies ambient `fetch`/globals to a guest while still running ordinary code.
 
@@ -141,5 +143,5 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 | **M2 — Run JS (MVP)** | 2 | Spawn/run/kill JS programs, concurrent, Rust-authoritative |
 | **M3 — Usable shell** | 3 | `wsh`, pipes, coreutils, `ps` |
 | **M4 — WASM apps** | 4 | Unmodified WASI binaries + PGlite as processes |
-| **M5 — Ecosystem** | 5–6 | npm install + Vite dev preview |
+| **M5 — Ecosystem** | 5–6 | npm install + Vite dev preview — 🚧 `npm` registry install + `node` CommonJS `require` done; preview/lockfiles pending |
 | **M6 — Durable & hardened** | 7 | Persistence + membrane isolation |

@@ -7,7 +7,7 @@
 //!
 //! It is deliberately free of every Node.js concept — module resolution by
 //! package folder, the legacy module loader, HTTP framework globals, and so on.
-//! Those all live in the guest-side `workeros-node` layer (INV-1 / ADR-007), and
+//! Those all live in the guest-side node layer (`workeros-programs/node`) (INV-1 / ADR-007), and
 //! CI grep-gates this crate against the forbidden identifiers to keep it that way.
 //!
 //! Everything here is pure Rust with no browser dependency, so the kernel is

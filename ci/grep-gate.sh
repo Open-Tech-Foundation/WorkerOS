@@ -4,7 +4,7 @@
 # The kernel must never contain Node.js concepts. This fails CI if any forbidden
 # identifier appears anywhere in the kernel crate — comments included, on
 # purpose: the invariant is that the kernel does not even *know* these words. All
-# Node semantics belong in the guest-side `workeros-node` layer.
+# Node semantics belong in the guest-side node layer (workeros-programs/node).
 #
 # Usage: ci/grep-gate.sh
 set -euo pipefail

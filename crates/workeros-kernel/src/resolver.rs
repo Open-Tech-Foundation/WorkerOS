@@ -10,7 +10,7 @@
 //!
 //! Scope (Phase 2): **relative** specifiers only (`./`, `../`, `/`). Bare
 //! specifiers (`import "foo"`) need the package-folder resolution walk, which is
-//! a guest-side `workeros-node` concern for Phase 5 — here they are an explicit,
+//! a guest-side `workeros-programs/node` concern for Phase 5 — here they are an explicit,
 //! honest error, never a silent stub (INV-5).
 //!
 //! The import scanner recognizes static `import`/`export … from "spec"`,

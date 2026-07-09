@@ -41,7 +41,7 @@ Status legend: **[locked]** settled for v1 · **[deferred]** intentionally out o
 **Deferred:** `otf:net`, `otf:preview`, `otf:gpu`, live-reload.
 
 ### ADR-007 — Node is a guest tenant, kernel is Node-agnostic · [locked]
-**Choice:** The kernel knows processes/files/syscalls only. All Node semantics (`require`, `node_modules` resolution, `fs`/`http`/`path` shims) live in `workeros-node`, a guest-side layer.
+**Choice:** The kernel knows processes/files/syscalls only. All Node semantics (`require`, `node_modules` resolution, `fs`/`http`/`path` shims) live in the guest-side node layer (`workeros-programs/node`). `npm` is likewise a guest program (`workeros-programs`, installed at `/bin/npm`), not a kernel feature.
 **Why:** This is *the* differentiator from NodePod (a Node-runtime). If Node concepts leak into the kernel, WorkerOS becomes "NodePod-in-Rust" and loses its reason to exist. On real Linux, Node is just a program; same here.
 **Rules out:** Kernel-level Node fast-paths.
 
@@ -71,7 +71,7 @@ Status legend: **[locked]** settled for v1 · **[deferred]** intentionally out o
 **Rules out:** Complex `.sh` scripts (arrays, `[[ ]]`, param expansion, traps, functions). Documented.
 
 ### ADR-013 — Name & packaging · [locked]
-**Choice:** Product **WorkerOS**. Crates/packages: `workeros-kernel`, `workeros-node`, `workeros-web`. GitHub `opentf/workeros`. Apache-2.0.
+**Choice:** Product **WorkerOS**. Crates/packages: `workeros-kernel`, `workeros-web`, `workeros-coreutils` (system binaries), `workeros-programs` (OS programs + the Node-compat runtime; absorbed the former `workeros-node` and `workeros-npm`). GitHub `opentf/workeros`. Apache-2.0.
 **Why:** Name is descriptive (boots in a worker, is OS-shaped), on-brand with the `*OS` style, and verified free on npm (`workeros`, `@opentf/workeros`) and GitHub (`opentf/workeros`). "webOS" was rejected — LG trademark + existing OSS edition. The "Worker" halo (Cloudflare Workers) is adjacent but non-colliding; the tagline resolves it.
 **Rules out:** —
 
@@ -96,10 +96,20 @@ Status legend: **[locked]** settled for v1 · **[deferred]** intentionally out o
 
 ### ADR-017 — Phase 3 coreutils are JS guest programs, not kernel builtins or WASI binaries · [revisit]
 **Context (the fork):** Phase 3 needs `echo cat ls cp mv rm mkdir pwd env true false`. Three shapes were considered: (a) Rust builtins inside the kernel; (b) JS guest programs run as real processes; (c) Rust compiled to `wasm32-wasi` and run through the WASI host.
-**Choice:** (b) — JS guest programs installed at `/bin/*`, written against the native `sys` syscall ABI, each running in its own program worker as a real, `ps`-visible, killable process (INV-4).
+**Choice:** (b) — JS guest programs written against the native `sys` syscall ABI, each running in its own program worker as a real, `ps`-visible, killable process (INV-4). (Installed in `/sbin` as system binaries — see ADR-018.)
 **Why:**
 - (a) is wrong-shaped: a coreutil executing inside the kernel worker is not a separate process (breaks INV-4) and teaches the kernel the names `ls`/`cat`/… (breaks INV-1's small authoritative core). On real systems `/bin/ls` is userland, not the kernel.
 - (c) is the right *long-term* form and the project's differentiator, but a real WASI guest's `fd_read` on a pipe must block synchronously — so it forces the WASM program-worker path **plus** the SAB synchronous-syscall path (ADR-010/-016) **plus** the WASI host to all land first. That is essentially all of Phase 4, pulled forward out of the gated order, just to run `echo`.
 - The coreutils carry almost no logic: the substance (VFS, glob, path resolution, pipe semantics) is already Rust and native-tested; `echo`/`cat`/`ls` are ~15-line argv→syscall adapters. Writing them in Rust buys negligible test coverage and no correctness; the postMessage syscall hop, not the language, is the cost.
 **Consequence:** "kernel Rust / userland JS" is the intended tier split, not an inconsistency. JS coreutils remain the lightweight default even after Phase 4; they coexist with dropped-in `wasm32-wasi` binaries (§5.1 tier table).
 **Revisit when:** Phase 4 builds the WASI host — at which point the *marquee* demo is an **unmodified** off-the-shelf binary (`ripgrep`/`jq`), a far stronger proof of the WASI-first thesis than a hand-written `echo.rs`.
+
+### ADR-018 — Coreutils are system binaries in `/sbin`, apart from `/bin` programs · [locked]
+**Choice:** The coreutils install in **`/sbin`** (system binaries); OS/user programs like `npm` install in **`/bin`**. The command search path is `PATH=/bin:/sbin` (kernel `DEFAULT_PATH`), so bare names still resolve, and `/bin` wins so a user program can shadow a system one.
+**Why:** Separating the OS internals from the general program namespace makes them read as untouchable and keeps `ls /bin` about installed programs, not plumbing. It mirrors the FHS intuition (system vs. general binaries) even though our split is by *ownership*, not by admin-vs-user.
+**Future work (not yet enforced):** `/sbin` is currently only a *convention* — nothing physically prevents `rm /sbin/ls`. Real enforcement is a kernel-level **protected-prefix** check in the syscall layer (`unlink`/`rmdir`/`rename`/`write`/`open(create,truncate)` under a protected prefix → `EPERM`), plus a way to mark a VFS subtree read-only/immutable. Deferred; see PLAN Phase 7 (isolation/hardening).
+
+### ADR-019 — One OS-programs package, not one package per program · [locked]
+**Choice:** All installable `/bin` programs (`npm`, …) and the Node-compatible guest runtime live in a single package, **`@opentf/workeros-programs`** (with `./node` for the runtime), which absorbed the former `@opentf/workeros-npm` and `@opentf/workeros-node`. A small registry lists programs; the kernel worker installs the whole set at boot. Programs carry a `type` (`js` now, `wasm` later).
+**Why:** Avoids a package-per-program sprawl; adding a program is one registry entry. `workeros-coreutils` stays separate as the *system* binaries (ADR-018).
+**Future work:** A selectable install manifest (choose which builtins to include) — for now everything installs at boot.

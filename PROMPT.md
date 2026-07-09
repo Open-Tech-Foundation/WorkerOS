@@ -16,7 +16,7 @@ The first milestone that matters is **Phase 2 in `PLAN.md`: run a JS program, st
 
 These are correctness conditions, not style preferences. Violating any of them is a defect even if tests pass.
 
-1. **Node-agnostic kernel.** `workeros-kernel` must never contain the concepts `require`, `node_modules`, `express`, or any Node semantics. It knows only processes, files, syscalls, capabilities, and the ABI. All Node-isms live in `workeros-node`. (There is a CI grep gate for forbidden identifiers — keep it green.)
+1. **Node-agnostic kernel.** `workeros-kernel` must never contain the concepts `require`, `node_modules`, `express`, or any Node semantics. It knows only processes, files, syscalls, capabilities, and the ABI. All Node-isms live in the guest node layer (`workeros-programs/node`). (There is a CI grep gate for forbidden identifiers — keep it green.)
 2. **Rust is the control center.** The Rust kernel is the sole authority for module resolution, the VFS, the process table, scheduling, and capability granting. The host JS shim is a "dumb CPU": it evaluates source it is handed and reports results back. Never resolve modules, touch the filesystem, or make capability decisions in JS.
 3. **WASI is the floor; `otf:*` is the ceiling.** Implement everything WASI Preview 1 can express using WASI's exact names and semantics, so an unmodified `wasm32-wasi` binary runs. Add custom calls **only** where WASI has no primitive. For v1 the entire custom surface is three calls: `otf:spawn`, `otf:kill`, `otf:ipc_open`. Do not invent others without an ADR.
 4. **Every process is real and killable.** A process is backed by its own program worker. It runs in parallel and can be stopped with `worker.terminate()`. There is no cooperative-only "fake process" in the core.
@@ -45,7 +45,9 @@ workeros/
 │  └─ workeros-kernel/     # Rust core: VFS, process table, syscall dispatch, resolver
 ├─ packages/
 │  ├─ workeros-web/        # wasm-bindgen bindings + host runtime (kernel-worker + program-worker shims + client API)
-│  └─ workeros-node/       # guest-side Node-compat layer (starts as a thin `process` shim)
+│  ├─ workeros-coreutils/  # system binaries (POSIX coreutils), installed in /sbin
+│  └─ workeros-programs/   # OS programs (npm in /bin) + the Node-compat guest runtime (./node)
+├─ website/                # marketing site + live playground (OTF Web framework)
 ├─ examples/               # runnable demos gated to the current phase
 ├─ ARCHITECTURE.md
 ├─ PLAN.md

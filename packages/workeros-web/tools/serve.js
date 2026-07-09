@@ -11,7 +11,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Serve from the repo root so both cross-package ESM imports (the program
-// worker loads the workeros-node tenant shim) and the examples/ demos resolve.
+// worker loads the workeros-programs/node tenant shim) and the examples/ demos resolve.
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 
 const MIME = {
