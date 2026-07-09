@@ -16,8 +16,9 @@ Notable changes to the coreutils — guest programs written against the native
 - **Text-pipeline tools** — the utilities that make `wsh` pipelines useful:
   - **`seq`** `[FIRST [INCR]] LAST`, **`head`**/**`tail`** `[-n N]`, **`wc`** `[-l|-w|-c]`
   - **`sort`** `[-r|-n|-u]`, **`uniq`** `[-c]`, **`cut`** `-d DELIM -f LIST` (ranges/lists)
-  - **`tr`** `SET1 [SET2]` / `-d`, **`grep`** `[-i|-v|-n] PATTERN` (JS regex; a Rust
-    `wasm32-wasip1` build is planned for real regex speed)
+  - **`tr`** `SET1 [SET2]` / `-d`
+  - `grep` is **not** a JS coreutil — it's a Rust `regex` binary compiled to
+    `wasm32-wasip1` (`crates/wsh-grep`, installed at `/bin/grep`), for real regex.
   - All read file operands or stdin, so `seq 5 | grep 3 | sort -rn | head -n 2` works.
   - Covered by `tools/coreutils.test.js` (Node) and browser pipeline cases.
 - Resolved via `PATH` (`/bin:/sbin`), so bare command names still work.

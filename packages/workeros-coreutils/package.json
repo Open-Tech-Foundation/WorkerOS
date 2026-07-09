@@ -1,7 +1,7 @@
 {
   "name": "@opentf/workeros-coreutils",
   "version": "0.0.0",
-  "description": "WorkerOS coreutils — guest programs (echo, cat, ls, cp, mv, rm, mkdir, pwd, env, true, false, seq, head, tail, wc, sort, uniq, cut, tr, grep) written against the native `sys` syscall ABI.",
+  "description": "WorkerOS coreutils — guest programs (echo, cat, ls, cp, mv, rm, mkdir, pwd, env, true, false, seq, head, tail, wc, sort, uniq, cut, tr) written against the native `sys` syscall ABI.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "src/index.js",

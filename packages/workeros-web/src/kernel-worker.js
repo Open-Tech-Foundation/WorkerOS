@@ -323,6 +323,7 @@ self.onmessage = async (ev) => {
         // loaded on demand (js text is fetched same-origin; wasm would be bytes).
         for (const prog of osPrograms) {
           const data = await prog.source();
+          if (data == null) continue; // a wasm program not built in this environment
           kernel.fs_write(prog.bin, typeof data === "string" ? enc.encode(data) : new Uint8Array(data));
         }
         shell = createShell({ kernel, startProcess, session });

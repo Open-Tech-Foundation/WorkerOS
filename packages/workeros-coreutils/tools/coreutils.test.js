@@ -74,12 +74,5 @@ test("tr", async () => {
   assert.equal((await run("tr", { argv: ["-d", "aeiou"], stdin: "hello world\n" })).out, "hll wrld\n");
 });
 
-test("grep", async () => {
-  assert.deepEqual(await pick(run("grep", { argv: ["ell"], stdin: "hello\nworld\nbell\n" })), { out: "hello\nbell\n", code: 0 });
-  assert.deepEqual(await pick(run("grep", { argv: ["-v", "o"], stdin: "foo\nbar\nbaz\n" })), { out: "bar\nbaz\n", code: 0 });
-  assert.deepEqual(await pick(run("grep", { argv: ["-n", "b"], stdin: "a\nb\nc\nb\n" })), { out: "2:b\n4:b\n", code: 0 });
-  assert.deepEqual(await pick(run("grep", { argv: ["-i", "HE"], stdin: "hello\nHERO\nx\n" })), { out: "hello\nHERO\n", code: 0 });
-  assert.deepEqual(await pick(run("grep", { argv: ["zzz"], stdin: "a\nb\n" })), { out: "", code: 1 });
-});
-
-async function pick(p) { const r = await p; return { out: r.out, code: r.code }; }
+// grep is a Rust `wasm32-wasip1` binary (crates/wsh-grep), not a JS coreutil —
+// tested in that crate and in the browser pipeline suite.

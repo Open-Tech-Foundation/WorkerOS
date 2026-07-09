@@ -1,0 +1,23 @@
+# A small, fast `grep` compiled to `wasm32-wasip1` and run as a WorkerOS process.
+# Kept out of the main workspace (its own `[workspace]`) so its heavier deps and
+# wasi target don't touch the kernel's dependency-free build.
+[package]
+name = "wsh-grep"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "grep"
+path = "src/main.rs"
+
+[dependencies]
+regex = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+
+[workspace]

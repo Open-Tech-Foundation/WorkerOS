@@ -22,6 +22,18 @@ async function fetchText(rel) {
   return res.text();
 }
 
+// Fetch a locally-built wasm binary (e.g. the Rust `grep`) as bytes. Returns null
+// when it isn't built (`npm run build:grep` produces it), so environments that
+// skip the wasm build — like CI's boot smoke test — still boot.
+async function fetchBytes(rel) {
+  try {
+    const res = await fetch(new URL(rel, import.meta.url));
+    return res.ok ? await res.arrayBuffer() : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The installable programs, written to `bin` in the VFS at boot.
  * @type {{ bin: string, type: "js" | "wasm", source: () => Promise<string | ArrayBuffer> }[]}
@@ -55,5 +67,12 @@ export const programs = [
     bin: "/bin/bash",
     type: "js",
     source: () => fetchText("./sh/sh-program.js"),
+  },
+  {
+    // `grep` — a Rust `regex` binary compiled to wasm32-wasip1 (crates/wsh-grep),
+    // run through the WASI host. Built by `npm run build:grep` into ./grep/.
+    bin: "/bin/grep",
+    type: "wasm",
+    source: () => fetchBytes("./grep/grep.wasm"),
   },
 ];

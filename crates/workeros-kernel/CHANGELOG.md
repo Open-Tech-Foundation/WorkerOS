@@ -34,6 +34,10 @@ a release yet, so everything lives under **Unreleased**.
   `2>&1`. `parse_script` returns an AST that serializes itself to JSON (the crate
   stays dependency-free); the host walks it. Keeps the grammar kernel-owned and
   native-tested (ADR-012).
+- **Content-based wasm detection** (`resolver`) — the module resolver recognizes a
+  wasm binary by its magic header (`\0asm`), not just a `.wasm` extension, so a
+  program installed at an extensionless path (e.g. `/bin/grep`) runs through the
+  WASI host instead of being misread as JS.
 - **Capability sets** — the kernel is the sole authority for granting
   capabilities to guests.
 - **Ring-buffer transport** (`ringbuf`) for host↔kernel byte streams.

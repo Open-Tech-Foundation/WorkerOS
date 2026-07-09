@@ -168,6 +168,18 @@ pub fn resolve_invocation(
 
 /// Resolve the full JS module graph rooted at `entry` (an absolute VFS path).
 pub fn resolve_graph(vfs: &dyn Vfs, entry: &str) -> Result<ModuleGraph, ResolveError> {
+    // Classify by extension first, then by content: a program installed at an
+    // extensionless path (e.g. `/bin/grep`) is still wasm if the file starts with
+    // the wasm magic header. wasm is opaque to the JS import scanner, so a wasm
+    // entry resolves to a single-node graph.
+    let bytes = read_file(vfs, entry)?;
+    if ModuleKind::from_path(entry) == ModuleKind::Wasm || is_wasm_bytes(&bytes) {
+        return Ok(ModuleGraph {
+            entry: entry.to_string(),
+            kind: ModuleKind::Wasm,
+            modules: Vec::new(),
+        });
+    }
     let kind = ModuleKind::from_path(entry);
     let mut modules: Vec<ModuleRecord> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
@@ -226,6 +238,11 @@ pub fn resolve_graph(vfs: &dyn Vfs, entry: &str) -> Result<ModuleGraph, ResolveE
 
 fn is_relative(specifier: &str) -> bool {
     specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/')
+}
+
+/// True if `bytes` begins with the WebAssembly magic header (`\0asm`).
+fn is_wasm_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && bytes[..4] == [0x00, 0x61, 0x73, 0x6d]
 }
 
 fn read_file(vfs: &dyn Vfs, path_abs: &str) -> Result<Vec<u8>, ResolveError> {
@@ -395,6 +412,13 @@ mod tests {
             resolve_invocation(&vfs, "/proj", &["ls".into(), "-a".into()], DEFAULT_PATH).unwrap(),
             Invocation { interpreter: Interpreter::Js, entry: "/bin/ls".into() }
         );
+    }
+
+    #[test]
+    fn wasm_magic_detection() {
+        assert!(is_wasm_bytes(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00]));
+        assert!(!is_wasm_bytes(b"console.log(1)"));
+        assert!(!is_wasm_bytes(b"\0as")); // too short
     }
 
     #[test]

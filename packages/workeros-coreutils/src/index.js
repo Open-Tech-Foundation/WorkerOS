@@ -334,20 +334,4 @@ else {
 out(res);
 sys.exit(0);
 `),
-
-  // grep [-i] [-v] [-n] PATTERN [files] — JS regex grep (a Rust build is planned).
-  "/sbin/grep": util(`
-if (operands.length === 0) { err("usage: grep [-ivn] PATTERN [file...]\\n"); sys.exit(2); }
-const pattern = operands[0];
-const files = operands.slice(1);
-let re;
-try { re = new RegExp(pattern, has("i") ? "i" : ""); }
-catch (e) { err("grep: invalid pattern: " + e.message + "\\n"); sys.exit(2); }
-const invert = has("v"), number = has("n");
-const arr = toLines(await readInputs(files));
-let matched = false, buf = "";
-arr.forEach((l, i) => { if (re.test(l) !== invert) { matched = true; buf += (number ? (i + 1) + ":" : "") + l + "\\n"; } });
-out(buf);
-sys.exit(matched ? 0 : 1);
-`),
 };

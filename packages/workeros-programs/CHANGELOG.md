@@ -43,6 +43,11 @@ guest runtime. Format:
   shell driver via `sys.exec`, so the installer idiom `curl -fsSL … | bash` now has
   a working entrypoint (subject to the wsh subset and the sandbox — no native
   binaries or sockets). Pairs with the expanded wsh interpreter in workeros-web.
+- **`grep`** (`/bin/grep`) — a `type: "wasm"` program: the Rust `regex` binary
+  from `crates/wsh-grep`, compiled to `wasm32-wasip1` and run through the WASI
+  host (real regex, unlike a shell glob). The `.wasm` is gitignored and built by
+  `npm run build:wasm` (dev) / the release GH action (publish); `fetchBytes` loads
+  it into the VFS at boot.
 - **`curl`** (`src/curl/`) — HTTP(S) transfer over the worker's `fetch` (ADR-008),
   streaming the response body through the `sys` ABI. Pairs with the WASI runtime:
   `curl` a wasm binary, then run it.

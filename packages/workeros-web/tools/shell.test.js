@@ -204,22 +204,20 @@ test("sh/bash program: -c, script file, and piped stdin (curl | bash idiom)", op
   assert.equal(result.piped.out, "piped-ok\n");
 });
 
-test("text coreutils pipelines: seq/grep/sort/uniq/wc/head/cut end-to-end", opts, async () => {
+test("text coreutils pipelines: seq/sort/uniq/wc/tail/cut end-to-end", opts, async () => {
   const { result, pageErrors } = await withPage((page) =>
     page.evaluate(async () => {
       const os = await window.__wos.boot();
       const sh = (l) => window.sh(os, l);
       const r = {};
-      r.seqGrep = await sh("seq 5 | grep 3");
       r.sortUniq = await sh('printf "b\\na\\nb\\na\\nc\\n" | sort | uniq');
       r.wc = await sh("seq 100 | wc -l");
       r.headCut = await sh('printf "id:name\\n1:ada\\n2:bob\\n" | tail -n 2 | cut -d: -f2');
-      r.pipeline = await sh('seq 10 | grep -v 5 | sort -rn | head -n 3');
+      r.pipeline = await sh('seq 10 | sort -rn | head -n 3');
       return r;
     }),
   );
   assert.deepEqual(pageErrors, []);
-  assert.equal(result.seqGrep.out, "3\n");
   assert.equal(result.sortUniq.out, "a\nb\nc\n");
   assert.equal(result.wc.out, "100\n");
   assert.equal(result.headCut.out, "ada\nbob\n");

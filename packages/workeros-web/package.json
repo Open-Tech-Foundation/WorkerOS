@@ -12,6 +12,7 @@
     "src"
   ],
   "scripts": {
+    "build:grep": "cargo build --manifest-path ../../crates/wsh-grep/Cargo.toml --release --target wasm32-wasip1 && mkdir -p ../workeros-programs/src/grep && cp ../../crates/wsh-grep/target/wasm32-wasip1/release/grep.wasm ../workeros-programs/src/grep/grep.wasm",
     "build:wasm": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --release",
     "build:wasm:dev": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --dev",
     "serve": "node tools/serve.js",
