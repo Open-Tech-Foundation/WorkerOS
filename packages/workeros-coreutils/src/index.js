@@ -20,6 +20,27 @@ const flags = sys.argv.slice(1).filter((a) => a.startsWith("-") && a !== "-");
 const operands = sys.argv.slice(1).filter((a) => !a.startsWith("-") || a === "-");
 const has = (f) => flags.some((g) => g.includes(f.replace("-", "")));
 const basename = (p) => p.replace(/\\/+$/, "").split("/").pop();
+// Read a whole fd to text.
+const readFd = async (fd) => {
+  const chunks = [];
+  for (;;) { const b = await sys.read(fd, 65536); if (b.length === 0) break; chunks.push(b); }
+  let n = 0; for (const c of chunks) n += c.length;
+  const u = new Uint8Array(n); let o = 0; for (const c of chunks) { u.set(c, o); o += c.length; }
+  return dec.decode(u);
+};
+// Read a list of file operands (or stdin when empty / "-"), concatenated to text.
+const readInputs = async (files) => {
+  if (!files || files.length === 0) return readFd(0);
+  let s = "";
+  for (const f of files) {
+    if (f === "-") { s += await readFd(0); continue; }
+    const fd = await sys.open(f, {}); s += await readFd(fd); await sys.close(fd);
+  }
+  return s;
+};
+// Split text into lines, dropping a single trailing newline's empty element.
+const toLines = (t) => { const a = t.split("\\n"); if (a.length && a[a.length - 1] === "") a.pop(); return a; };
+const emit = (arr) => out(arr.length ? arr.join("\\n") + "\\n" : "");
 `;
 
 /** Wrap a coreutil body with the shared prelude. */
@@ -184,5 +205,149 @@ try {
   err("mv: " + e.message + "\\n");
   sys.exit(1);
 }
+`),
+
+  // seq [FIRST [INCR]] LAST — print a number sequence.
+  "/sbin/seq": util(`
+const a = operands.map(Number);
+let first = 1, incr = 1, last = 0;
+if (a.length === 1) { last = a[0]; }
+else if (a.length === 2) { first = a[0]; last = a[1]; }
+else if (a.length >= 3) { first = a[0]; incr = a[1]; last = a[2]; }
+if (incr === 0) { err("seq: increment must not be zero\\n"); sys.exit(1); }
+const res = [];
+if (incr > 0) for (let i = first; i <= last; i += incr) res.push(i);
+else for (let i = first; i >= last; i += incr) res.push(i);
+emit(res.map(String));
+sys.exit(0);
+`),
+
+  // head [-n N] [files] — first N lines (default 10).
+  "/sbin/head": util(`
+let n = 10; const files = []; const av = sys.argv.slice(1);
+for (let i = 0; i < av.length; i++) {
+  const a = av[i];
+  if (a === "-n") { n = parseInt(av[++i], 10); }
+  else if (/^-n/.test(a)) { n = parseInt(a.slice(2), 10); }
+  else if (/^-[0-9]+$/.test(a)) { n = parseInt(a.slice(1), 10); }
+  else files.push(a);
+}
+emit(toLines(await readInputs(files)).slice(0, n));
+sys.exit(0);
+`),
+
+  // tail [-n N] [files] — last N lines (default 10).
+  "/sbin/tail": util(`
+let n = 10; const files = []; const av = sys.argv.slice(1);
+for (let i = 0; i < av.length; i++) {
+  const a = av[i];
+  if (a === "-n") { n = parseInt(av[++i], 10); }
+  else if (/^-n/.test(a)) { n = parseInt(a.slice(2), 10); }
+  else if (/^-[0-9]+$/.test(a)) { n = parseInt(a.slice(1), 10); }
+  else files.push(a);
+}
+const arr = toLines(await readInputs(files));
+emit(n >= arr.length ? arr : arr.slice(arr.length - n));
+sys.exit(0);
+`),
+
+  // wc [-l|-w|-c] [files] — count lines, words, characters.
+  "/sbin/wc": util(`
+const text = await readInputs(operands);
+const lines = (text.match(/\\n/g) || []).length;
+const words = text.trim() === "" ? 0 : text.trim().split(/\\s+/).length;
+const chars = text.length;
+let parts = [];
+if (has("l")) parts.push(lines);
+if (has("w")) parts.push(words);
+if (has("c")) parts.push(chars);
+if (parts.length === 0) parts = [lines, words, chars];
+out(parts.join(" ") + "\\n");
+sys.exit(0);
+`),
+
+  // sort [-r] [-n] [-u] [files] — sort lines.
+  "/sbin/sort": util(`
+let arr = toLines(await readInputs(operands));
+if (has("n")) arr.sort((a, b) => parseFloat(a) - parseFloat(b));
+else arr.sort();
+if (has("r")) arr.reverse();
+if (has("u")) arr = arr.filter((v, i) => i === 0 || v !== arr[i - 1]);
+emit(arr);
+sys.exit(0);
+`),
+
+  // uniq [-c] [files] — collapse adjacent duplicate lines.
+  "/sbin/uniq": util(`
+const arr = toLines(await readInputs(operands));
+const res = []; let prev = null, count = 0;
+const push = () => { if (prev !== null) res.push(has("c") ? String(count).padStart(7) + " " + prev : prev); };
+for (const l of arr) { if (l === prev) count++; else { push(); prev = l; count = 1; } }
+push();
+emit(res);
+sys.exit(0);
+`),
+
+  // cut -d DELIM -f LIST [files] — select fields (1-based; ranges 1-3, lists 1,3).
+  "/sbin/cut": util(`
+let delim = "\\t", spec = null; const files = []; const av = sys.argv.slice(1);
+for (let i = 0; i < av.length; i++) {
+  const a = av[i];
+  if (a === "-d") delim = av[++i];
+  else if (/^-d/.test(a)) delim = a.slice(2);
+  else if (a === "-f") spec = av[++i];
+  else if (/^-f/.test(a)) spec = a.slice(2);
+  else files.push(a);
+}
+if (!spec) { err("cut: you must specify a list of fields with -f\\n"); sys.exit(1); }
+const idx = [];
+for (const part of spec.split(",")) {
+  if (part.includes("-")) { const [x, y] = part.split("-").map(Number); for (let i = x; i <= y; i++) idx.push(i); }
+  else idx.push(Number(part));
+}
+const arr = toLines(await readInputs(files));
+emit(arr.map((l) => { const f = l.split(delim); return idx.map((i) => f[i - 1]).filter((v) => v !== undefined).join(delim); }));
+sys.exit(0);
+`),
+
+  // tr SET1 [SET2] / tr -d SET1 — translate or delete characters (reads stdin).
+  "/sbin/tr": util(`
+const expand = (set) => {
+  let r = "";
+  for (let i = 0; i < set.length; i++) {
+    if (set[i + 1] === "-" && set[i + 2] !== undefined) {
+      for (let c = set.charCodeAt(i); c <= set.charCodeAt(i + 2); c++) r += String.fromCharCode(c);
+      i += 2;
+    } else r += set[i];
+  }
+  return r;
+};
+const text = await readFd(0);
+const set1 = expand(operands[0] || "");
+let res;
+if (has("d")) { const s = new Set(set1); res = [...text].filter((c) => !s.has(c)).join(""); }
+else {
+  const set2 = expand(operands[1] || "");
+  const map = {}; for (let i = 0; i < set1.length; i++) map[set1[i]] = set2[Math.min(i, set2.length - 1)] ?? set1[i];
+  res = [...text].map((c) => (c in map ? map[c] : c)).join("");
+}
+out(res);
+sys.exit(0);
+`),
+
+  // grep [-i] [-v] [-n] PATTERN [files] — JS regex grep (a Rust build is planned).
+  "/sbin/grep": util(`
+if (operands.length === 0) { err("usage: grep [-ivn] PATTERN [file...]\\n"); sys.exit(2); }
+const pattern = operands[0];
+const files = operands.slice(1);
+let re;
+try { re = new RegExp(pattern, has("i") ? "i" : ""); }
+catch (e) { err("grep: invalid pattern: " + e.message + "\\n"); sys.exit(2); }
+const invert = has("v"), number = has("n");
+const arr = toLines(await readInputs(files));
+let matched = false, buf = "";
+arr.forEach((l, i) => { if (re.test(l) !== invert) { matched = true; buf += (number ? (i + 1) + ":" : "") + l + "\\n"; } });
+out(buf);
+sys.exit(matched ? 0 : 1);
 `),
 };

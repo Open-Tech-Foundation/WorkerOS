@@ -13,6 +13,13 @@ Notable changes to the coreutils — guest programs written against the native
   executed as a real process:
   - **`echo`**, **`true`**, **`false`**, **`pwd`**, **`env`**
   - **`cat`**, **`ls`**, **`mkdir`**, **`rm`**, **`cp`**, **`mv`**
+- **Text-pipeline tools** — the utilities that make `wsh` pipelines useful:
+  - **`seq`** `[FIRST [INCR]] LAST`, **`head`**/**`tail`** `[-n N]`, **`wc`** `[-l|-w|-c]`
+  - **`sort`** `[-r|-n|-u]`, **`uniq`** `[-c]`, **`cut`** `-d DELIM -f LIST` (ranges/lists)
+  - **`tr`** `SET1 [SET2]` / `-d`, **`grep`** `[-i|-v|-n] PATTERN` (JS regex; a Rust
+    `wasm32-wasip1` build is planned for real regex speed)
+  - All read file operands or stdin, so `seq 5 | grep 3 | sort -rn | head -n 2` works.
+  - Covered by `tools/coreutils.test.js` (Node) and browser pipeline cases.
 - Resolved via `PATH` (`/bin:/sbin`), so bare command names still work.
 - Written against the kernel's WASI-shaped syscalls (stdio, path ops, args/env),
   so they compose under `wsh` pipes, redirects, and globbing.
