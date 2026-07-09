@@ -19,5 +19,8 @@ Notable changes to the WorkerOS website + live playground, built with the
   imports resolve); runs before `dev`/`build`.
 - **COI service worker** (`public/coi-serviceworker.js`) — injects COOP/COEP so
   `SharedArrayBuffer` works on `otfw dev` and on any static host.
+- **Cloudflare Pages deploy** — `public/_headers` sets COOP/COEP + wasm MIME at the
+  edge; `public/_redirects` is the SPA fallback. Both are emitted to `dist/` root.
+  README documents the local-build + `wrangler pages deploy dist` flow.
 
 [Unreleased]: https://github.com/opentf/workeros/commits/main
