@@ -20,21 +20,41 @@ there is now `wsh`, a bash-flavored shell with pipes, redirects, `&&`/`||`/`;`,
 globbing, background jobs, `cd`, and a set of coreutils (`echo cat ls cp mv rm
 mkdir pwd env true false`) that run as real, `ps`-visible, killable processes.
 
+There is now also a real **`npm` + `node`** inside the OS (a Phase-5 slice):
+`npm install` fetches packages from the npm registry (semver + transitive deps),
+gunzips/untars their tarballs into `node_modules`, and `node index.js` runs
+CommonJS that `require()`s them — all as ordinary programs invoked through the
+shell (`os.exec("npm install …")`, `os.exec("node app.js")`). npm/node are guest
+programs; the kernel stays Node-agnostic (INV-1).
+
 | Milestone | Phases | State |
 |-----------|--------|-------|
 | M1 — Boot | 0–1 | ✅ kernel boots, VFS + WASI-shaped syscall spine, fully native-tested |
 | M2 — Run JS (MVP) | 2 | ✅ spawn/run/kill JS, concurrent, `import` resolved by the kernel |
 | M3 — Usable shell | 3 | ✅ `wsh` (pipes, redirects, `&&`/`\|\|`, glob, `&`), IPC pipes, coreutils, `ps` |
-| M4+ | 4–7 | ⏳ WASI binaries, npm, preview, persistence |
+| M5 — Ecosystem | 5 | 🚧 `npm` (registry install, deps) + `node` CJS `require`; preview/lockfiles TBD |
+| M4 / M6+ | 4,6,7 | ⏳ WASI binaries, preview, persistence |
 
 ## Layout
 
 ```
 crates/workeros-kernel/    Rust core: VFS, process table, syscall dispatch, resolver, wsh parser/glob (native-testable)
 packages/workeros-web/     wasm-bindgen bindings + host runtime (kernel/program workers, shell driver, client API)
-packages/workeros-node/    guest-side Node-compat tenant layer (minimal `process` shim so far)
+packages/workeros-node/    guest-side Node-compat tenant layer (`process` shim + CommonJS `require` runtime)
 packages/workeros-coreutils/  coreutils as guest programs over the native `sys` ABI
+packages/workeros-npm/     the `npm` package manager as a guest program (registry install, run scripts)
+website/                   marketing site + live playground, built with the OTF Web framework
 examples/                  runnable demos (run-js, shell)
+```
+
+Run a package inside the OS (all through the normal shell):
+
+```sh
+npm init -y
+npm install is-even        # registry fetch → gunzip/untar → node_modules (+ deps)
+echo 'console.log(require("is-even")(42))' > app.js
+node app.js                # CommonJS require resolves node_modules → true
+npm run start
 ```
 
 ## Develop

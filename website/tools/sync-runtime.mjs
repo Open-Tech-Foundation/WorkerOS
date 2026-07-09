@@ -20,7 +20,7 @@ const repoRoot = join(siteRoot, "..");
 const dest = join(siteRoot, "public", "workeros", "packages");
 
 // The three packages that make up the bootable runtime. Order is cosmetic.
-const packages = ["workeros-web", "workeros-node", "workeros-coreutils"];
+const packages = ["workeros-web", "workeros-node", "workeros-coreutils", "workeros-npm"];
 
 async function exists(p) {
   try {

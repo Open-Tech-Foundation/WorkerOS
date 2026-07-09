@@ -9,6 +9,13 @@ program that maps Node semantics onto the kernel's WASI-shaped primitives
 ## [Unreleased]
 
 ### Added
+- **CommonJS `node` runtime** (`require-runtime.js`) — `createNodeRuntime(sys)` runs
+  a CJS entry as `node <file>` does: a `require()` with relative + `node_modules`
+  resolution (package.json `exports`/`main`, `.js`/`.cjs`/`.json` + `index`
+  fallbacks), reading files via `sys` and async-prefetching the whole graph so
+  `require` itself is synchronous. JSON modules and `require` cycles supported.
+  `usesCommonjs()` decides when an entry takes this path vs the kernel's ESM graph.
+  This is the guest-side engine behind `node index.js` resolving installed packages.
 - **`process` shim** (`process-shim.js`) — a minimal Node `process` for guests:
   `argv`, `env`, `stdout.write` / `stderr.write`, and `exit()` (via a
   `ProcessExit` signal), backed by kernel syscalls.

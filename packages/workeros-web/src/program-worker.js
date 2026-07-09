@@ -13,6 +13,7 @@
 
 import { MSG } from "./protocol.js";
 import { createProcess, ProcessExit } from "../../workeros-node/src/process-shim.js";
+import { createNodeRuntime, usesCommonjs } from "../../workeros-node/src/require-runtime.js";
 
 const kernel = self; // the kernel worker created us; postMessage talks back to it.
 
@@ -65,6 +66,10 @@ function makeSys(start) {
     unlink: (path) => call("unlink", { path }),
     rmdir: (path) => call("rmdir", { path }),
     rename: (from, to) => call("rename", { from, to }),
+    // Run a command line as a sub-process (like system(3)); its stdout/stderr are
+    // routed to this process's streams. Resolves with the exit code. Used by `npm
+    // run`. The kernel worker services it with the shell driver.
+    exec: (line) => call("exec", { line }),
     exit: (code = 0) => {
       reportExit(code | 0);
       throw new ProcessExit(code | 0);
@@ -149,8 +154,19 @@ self.onmessage = async (ev) => {
   installGlobals(msg, sys);
 
   try {
-    const entryUrl = stitch(msg.graph);
-    await import(entryUrl);
+    const entry = msg.graph.modules.find((m) => m.path === msg.graph.entry);
+    // CommonJS entries (require/module.exports) run through the guest Node runtime,
+    // which resolves node_modules against the VFS (INV-1). Everything else — ES
+    // modules and plain async scripts (coreutils, npm) — keeps going through the
+    // kernel-resolved graph the program worker stitches into blob URLs and imports
+    // (that path permits top-level await).
+    if (msg.interpreter === "node" && entry && usesCommonjs(entry.source, entry.path)) {
+      const run = createNodeRuntime(sys);
+      await run(entry.path, entry.source);
+    } else {
+      const entryUrl = stitch(msg.graph);
+      await import(entryUrl);
+    }
     reportExit(0); // top-level completed without an explicit exit → success.
   } catch (err) {
     if (err instanceof ProcessExit) {
