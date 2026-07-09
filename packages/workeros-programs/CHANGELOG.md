@@ -11,6 +11,14 @@ guest runtime. Format:
 - **Program registry** (`src/index.js`) — one extensible list the kernel worker
   installs into the VFS at boot. Adding a program is a single entry (no package per
   program). Entries carry a `type` (`js` now, `wasm` later).
+- **`node`** (`src/node/node-program.js`) — the Node.js-compatibility runtime, now
+  a real user program at `/bin/node` instead of a kernel builtin. `node foo.js` asks
+  the kernel to resolve `foo.js`'s module graph (`sys.resolveGraph`, INV-2), installs
+  a `process` global, and evaluates the graph **in its own worker** — so the script
+  is one process (killable as a unit, stdio shared) rather than a subprocess. The
+  kernel has no `node` concept; replacing `/bin/node` swaps the whole compat layer.
+  Scope today is ESM + `process` (argv/env/cwd/stdout/stderr/exit); CommonJS
+  `require` (see `src/node/require-runtime.js`) is not wired in yet.
 - **`npm`** (`src/npm/`) — the package manager, installed at `/bin/npm` and run
   from `wsh` (INV-1 — npm is just a program). Commands: `init`, `install [pkg…]`
   (npm-registry packument fetch, semver resolution — `^`/`~`/x-ranges/dist-tags,
@@ -30,6 +38,11 @@ guest runtime. Format:
   - Verified with real rustc-built `wasm32-wasip1` binaries: reading a VFS file via
     `std::fs` (missing file → WASI `ENOENT`), blocking on `stdin` from a pipe
     (`echo … | prog.wasm`), `read_dir` of a directory, and `Seek`+read.
+- **`sh` / `bash`** (`src/sh/`) — run a wsh script: from `-c "…"`, a script-file
+  argument (with `$1…` positional params), or piped stdin. Runs it through the
+  shell driver via `sys.exec`, so the installer idiom `curl -fsSL … | bash` now has
+  a working entrypoint (subject to the wsh subset and the sandbox — no native
+  binaries or sockets). Pairs with the expanded wsh interpreter in workeros-web.
 - **`curl`** (`src/curl/`) — HTTP(S) transfer over the worker's `fetch` (ADR-008),
   streaming the response body through the `sys` ABI. Pairs with the WASI runtime:
   `curl` a wasm binary, then run it.

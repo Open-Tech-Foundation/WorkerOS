@@ -28,6 +28,15 @@ async function fetchText(rel) {
  */
 export const programs = [
   {
+    // `node` — the Node.js-compatibility runtime, a real user program (not a
+    // kernel builtin). It asks the kernel to resolve a script's module graph and
+    // evaluates it in-process with a `process` global. Swappable: replace this to
+    // grow Node coverage; the kernel keeps only the native `js` execution core.
+    bin: "/bin/node",
+    type: "js",
+    source: () => fetchText("./node/node-program.js"),
+  },
+  {
     bin: "/bin/npm",
     type: "js",
     source: () => fetchText("./npm/npm-program.js"),

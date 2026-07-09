@@ -34,4 +34,17 @@ a release yet, so everything lives under **Unreleased**.
   three-call `otf:*` kernel ABI ceiling).
 - Native unit tests (`cargo test`) covering the pure logic — no browser needed.
 
+### Added
+- **`Kernel::resolve_graph(cwd, path)`** — resolves a JS module graph without
+  spawning. The kernel's JS-resolution service (INV-2): a userland runtime like
+  `/bin/node` calls it to get a fully-resolved graph and then evaluates it itself.
+
+### Changed
+- **`node` is no longer a kernel concept.** The resolver keeps only `js` as the
+  native execution keyword (`js foo.js` runs `foo.js` with the bare `sys` surface —
+  the JS core the kernel owns). Every other command resolves through PATH and runs
+  in place under that same native surface. `node` is now an ordinary user program
+  (`/bin/node`) that resolves a script via `resolve_graph` and evaluates it with a
+  `process` global — the kernel has no builtin `process`/`require`/`node` handling.
+
 [Unreleased]: https://github.com/opentf/workeros/commits/main

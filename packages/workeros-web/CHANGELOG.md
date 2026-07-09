@@ -8,6 +8,9 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`resolveGraph` syscall** — the program worker's `sys` ABI can ask the kernel to
+  resolve a script's module graph, so the userland `/bin/node` runtime evaluates the
+  script in its own worker instead of the kernel special-casing a `node` interpreter.
 - **Synchronous syscall channel** (`sync-syscall.js`) — a per-process
   SharedArrayBuffer request/response slot (ADR-010/-016). A program worker writes a
   blocking syscall, signals the kernel worker, and parks in `Atomics.wait`; the
@@ -44,5 +47,12 @@ main-thread client API). Format:
 - **Worker message protocol** (`protocol`) shared by client and workers.
 - **Dev server** (`tools/serve.js`) that sets COOP/COEP for cross-origin
   isolation (ADR-010), plus headless boot/MVP/shell tests.
+
+### Changed
+- **The program worker no longer knows about `node`.** It installs one native surface
+  for every guest (`sys` + a routing `console`) and evaluates each JS program the same
+  way (stitch the kernel-resolved graph → import). The `process` global and the (host)
+  CommonJS path are gone from here — Node.js compatibility now lives entirely in the
+  `/bin/node` program, which installs `process` and loads its target itself.
 
 [Unreleased]: https://github.com/opentf/workeros/commits/main

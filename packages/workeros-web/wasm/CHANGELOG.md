@@ -11,6 +11,9 @@ No release cut yet — see **Unreleased**.
   the kernel worker instantiates in the browser.
 - **`sys_seek(pid, fd, offset, whence)`** binding (offset/result as JS numbers) for
   WASI `fd_seek`.
+- **`resolve_graph(cwd, path)`** binding — returns the kernel-resolved module graph
+  for a script without spawning, backing the `resolveGraph` syscall that the
+  userland `/bin/node` runtime uses to evaluate scripts.
 - **Boot handshake** — exposes the kernel `version` and `ABI`
   (`wasi-preview-1+otf-1`) so the host can verify it before use.
 - **VFS bridge** — `fs` read/write crossing the JS↔wasm boundary.

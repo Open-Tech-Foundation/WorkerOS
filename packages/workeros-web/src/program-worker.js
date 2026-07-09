@@ -3,17 +3,18 @@
 // kernel worker. It makes no resolution, filesystem, or capability decision —
 // the kernel already resolved the whole module graph and handed it over.
 //
-// It exposes two guest surfaces:
-//   • `globalThis.sys` — the WorkerOS-native syscall ABI (argv/env/cwd + fd ops),
-//     available to every guest; coreutils are written against it.
-//   • `globalThis.process` / `console` — the Node tenant sugar (workeros-programs/node),
-//     installed for the `node` interpreter, built on top of `sys`.
+// Every guest gets one native surface:
+//   • `globalThis.sys` — the WorkerOS syscall ABI (argv/env/cwd + fd ops + a
+//     `resolveGraph` call), plus a routing `console`. Coreutils and `/bin/node`
+//     alike are written against it.
+// Node.js compatibility (`process`, CommonJS `require`) is not a worker concern:
+// it lives in the userland `/bin/node` program, which installs `process` and
+// evaluates the target script itself. The kernel has no `node` interpreter.
 //
 // Isolation level: `Full` (bare dynamic import), ADR-009/§7.1.
 
 import { MSG } from "./protocol.js";
-import { createProcess, ProcessExit } from "../../workeros-programs/src/node/process-shim.js";
-import { createNodeRuntime, usesCommonjs } from "../../workeros-programs/src/node/require-runtime.js";
+import { ProcessExit } from "../../workeros-programs/src/node/process-shim.js";
 import { createWasiImports } from "../../workeros-programs/src/wasi/host.js";
 import { makeSyncCaller } from "./sync-syscall.js";
 
@@ -72,6 +73,10 @@ function makeSys(start) {
     // routed to this process's streams. Resolves with the exit code. Used by `npm
     // run`. The kernel worker services it with the shell driver.
     exec: (line) => call("exec", { line }),
+    // Ask the kernel to resolve a JS module graph (INV-2: the kernel owns every
+    // specifier→path decision). A userland runtime like /bin/node calls this to
+    // get the graph and then evaluates it itself, in this same worker.
+    resolveGraph: (path) => call("resolveGraph", { path, cwd: start.cwd }),
     exit: (code = 0) => {
       reportExit(code | 0);
       throw new ProcessExit(code | 0);
@@ -166,7 +171,7 @@ function installGlobals(start, sys) {
 
   const enc = new TextEncoder();
   const line = (fd, args) => sys.write(fd, enc.encode(args.map(stringify).join(" ") + "\n"));
-  // A routing console (a terminal concern → host-side, not the Node layer).
+  // A routing console — a terminal concern, given to every guest.
   globalThis.console = {
     log: (...a) => line(1, a),
     info: (...a) => line(1, a),
@@ -174,16 +179,6 @@ function installGlobals(start, sys) {
     warn: (...a) => line(2, a),
     error: (...a) => line(2, a),
   };
-
-  if (start.interpreter === "node") {
-    globalThis.process = createProcess({
-      argv: start.argv,
-      env: start.env,
-      cwd: start.cwd,
-      write: sys.write,
-      exit: (code) => reportExit(code),
-    });
-  }
 }
 
 self.onmessage = async (ev) => {
@@ -208,19 +203,12 @@ self.onmessage = async (ev) => {
       reportExit(0);
       return;
     }
-    const entry = msg.graph.modules.find((m) => m.path === msg.graph.entry);
-    // CommonJS entries (require/module.exports) run through the guest Node runtime,
-    // which resolves node_modules against the VFS (INV-1). Everything else — ES
-    // modules and plain async scripts (coreutils, npm) — keeps going through the
-    // kernel-resolved graph the program worker stitches into blob URLs and imports
-    // (that path permits top-level await).
-    if (msg.interpreter === "node" && entry && usesCommonjs(entry.source, entry.path)) {
-      const run = createNodeRuntime(sys);
-      await run(entry.path, entry.source);
-    } else {
-      const entryUrl = stitch(msg.graph);
-      await import(entryUrl);
-    }
+    // Every JS program — coreutils, npm, and /bin/node itself — is the same to the
+    // worker: stitch the kernel-resolved graph into blob URLs and import the entry
+    // (that path permits top-level await). A program that wants Node semantics
+    // (like /bin/node) installs them itself before loading its own target.
+    const entryUrl = stitch(msg.graph);
+    await import(entryUrl);
     reportExit(0); // top-level completed without an explicit exit → success.
   } catch (err) {
     if (err instanceof ProcessExit) {

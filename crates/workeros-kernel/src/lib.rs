@@ -235,6 +235,15 @@ impl Kernel {
         Ok(())
     }
 
+    /// Resolve the module graph rooted at `path` (relative to `cwd`), without
+    /// spawning anything. This is the kernel's JS-resolution service: a userland
+    /// runtime like `/bin/node` calls it to obtain a fully-resolved graph (INV-2 —
+    /// the kernel owns every specifier→path decision) and then evaluates it itself.
+    pub fn resolve_graph(&self, cwd: &str, path: &str) -> Result<ModuleGraph, ResolveError> {
+        let entry = path::normalize(cwd, path);
+        resolver::resolve_graph(&self.vfs, &entry)
+    }
+
     /// Open a fresh IPC pipe (`otf:ipc_open`); the returned id is referenced by a
     /// [`StdioPlan`] to wire two processes together.
     pub fn pipe_open(&mut self) -> PipeId {
@@ -501,7 +510,7 @@ mod tests {
     fn spawn_main(k: &mut Kernel, source: &str) -> Pid {
         k.fs_write("/main.js", source.as_bytes()).unwrap();
         k.spawn(
-            argv(&["node", "main.js"]),
+            argv(&["js", "main.js"]),
             vec![],
             "/".into(),
             0,
@@ -526,7 +535,7 @@ mod tests {
         k.fs_write("/proj/main.js", b"import './util.js'; console.log('x')").unwrap();
         k.fs_write("/proj/util.js", b"export const u = 1;").unwrap();
         let spawned = k
-            .spawn(argv(&["node", "main.js"]), vec![], "/proj".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
+            .spawn(argv(&["js", "main.js"]), vec![], "/proj".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
             .unwrap();
         assert_eq!(spawned.graph.entry, "/proj/main.js");
         assert_eq!(spawned.graph.modules.len(), 2);
@@ -537,7 +546,7 @@ mod tests {
     fn spawn_missing_entry_errors() {
         let mut k = boot();
         let err = k
-            .spawn(argv(&["node", "nope.js"]), vec![], "/".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
+            .spawn(argv(&["js", "nope.js"]), vec![], "/".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
             .unwrap_err();
         assert!(matches!(err, SpawnError::Resolve(ResolveError::NotFound(_))));
     }
@@ -590,7 +599,7 @@ mod tests {
         let mut k = boot();
         let a = spawn_main(&mut k, "");
         let b = k
-            .spawn(argv(&["node", "main.js"]), vec![], "/".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
+            .spawn(argv(&["js", "main.js"]), vec![], "/".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
             .unwrap()
             .pid;
         assert_ne!(a, b);
@@ -622,7 +631,7 @@ mod tests {
 
     fn spawn_with(k: &mut Kernel, name: &str, plan: StdioPlan) -> Pid {
         k.fs_write(&format!("/{name}"), b"").unwrap();
-        k.spawn(argv(&["node", name]), vec![], "/".into(), 0, CapabilitySet::default(), 0, plan)
+        k.spawn(argv(&["js", name]), vec![], "/".into(), 0, CapabilitySet::default(), 0, plan)
             .unwrap()
             .pid
     }

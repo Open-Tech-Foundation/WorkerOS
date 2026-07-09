@@ -277,6 +277,11 @@ function handleSyscall(pid, msg) {
         kernel.sys_rename(pid, args.from, args.to);
         reply(pid, id, true, null);
         break;
+      case "resolveGraph":
+        // The kernel's JS-resolution service: hand back the module graph rooted at
+        // `path` so a userland runtime (e.g. /bin/node) can evaluate it in-process.
+        reply(pid, id, true, kernel.resolve_graph(args.cwd, args.path));
+        break;
       case "exec": {
         // system(3)-style: run a command line via the shell driver and route its
         // output to the caller's process streams. Replies with the exit code when

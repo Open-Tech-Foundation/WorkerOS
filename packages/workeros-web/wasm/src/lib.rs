@@ -458,6 +458,18 @@ impl WebKernel {
         self.inner.resolve_dir(&cwd, &target).map_err(errno_to_js)
     }
 
+    /// Resolve the JS module graph rooted at `path` (relative to `cwd`) without
+    /// spawning. A userland runtime such as `/bin/node` calls this to get the
+    /// kernel-resolved graph (INV-2) and then evaluates it in its own worker.
+    #[wasm_bindgen]
+    pub fn resolve_graph(&self, cwd: String, path: String) -> Result<JsValue, JsError> {
+        let graph = self
+            .inner
+            .resolve_graph(&cwd, &path)
+            .map_err(|e| JsError::new(&format!("resolve_graph: {e:?}")))?;
+        to_js(&GraphDto::from(&graph))
+    }
+
     /// Parse + glob-expand a command line into an execution plan for the JS
     /// shell executor. Parsing and globbing stay kernel-authoritative (INV-2);
     /// the executor only drives async worker lifecycles over this plan.

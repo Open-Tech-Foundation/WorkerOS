@@ -103,7 +103,7 @@ impl Interpreter {
 }
 
 /// The directories searched for a bare command name, in order: `/bin` (OS and
-/// user programs, e.g. `npm`) then `/sbin` (system binaries — the coreutils,
+/// user programs, e.g. `npm` and `node`) then `/sbin` (system binaries — the coreutils,
 /// kept apart so they read as untouchable OS internals).
 pub const DEFAULT_PATH: &[&str] = &["/bin", "/sbin"];
 
@@ -112,20 +112,6 @@ pub const DEFAULT_PATH: &[&str] = &["/bin", "/sbin"];
 pub struct Invocation {
     pub interpreter: Interpreter,
     pub entry: String,
-}
-
-/// Given `argv` and `cwd`, determine the entry path to resolve.
-///
-/// `["node", "main.js"]` / `["js", "main.js"]` → the script is `argv[1]`;
-/// otherwise `argv[0]` is itself the program path. Returns the normalized
-/// absolute path, or `None` if there is nothing to run.
-pub fn entry_path(argv: &[String], cwd: &str) -> Option<String> {
-    let raw = match argv.first().map(String::as_str) {
-        Some("node") | Some("js") => argv.get(1)?,
-        Some(first) => first,
-        None => return None,
-    };
-    Some(path::normalize(cwd, raw))
 }
 
 /// Resolve a bare command `name` to an existing program file: a path containing
@@ -147,9 +133,13 @@ pub fn resolve_command(vfs: &dyn Vfs, cwd: &str, name: &str, path_dirs: &[&str])
 
 /// Resolve a full invocation (interpreter + entry) from `argv`.
 ///
-/// `node`/`js` are interpreter prefixes; any other leading word is a command
-/// resolved through `path_dirs` (bare commands run under the Node surface so
-/// ordinary scripts get `process`).
+/// `js` is the kernel's native execution keyword: `js foo.js` runs `foo.js` with
+/// the bare `sys` surface — the JS execution core the kernel owns. Every other
+/// leading word is a command resolved through `path_dirs` and run in place under
+/// that same native surface. Node.js compatibility is not special here: `node` is
+/// an ordinary user program (`/bin/node`) that, when it needs to run a script,
+/// asks the kernel to resolve the script's graph ([`Kernel::resolve_graph`]) and
+/// evaluates it itself — the kernel has no `node` concept.
 pub fn resolve_invocation(
     vfs: &dyn Vfs,
     cwd: &str,
@@ -158,10 +148,10 @@ pub fn resolve_invocation(
 ) -> Result<Invocation, ResolveError> {
     match argv.first().map(String::as_str) {
         None => Err(ResolveError::NotFound(String::new())),
-        Some(kw @ ("node" | "js")) => {
+        Some("js") => {
             let script = argv.get(1).ok_or(ResolveError::NotFound("<script>".into()))?;
             Ok(Invocation {
-                interpreter: if kw == "node" { Interpreter::Node } else { Interpreter::Js },
+                interpreter: Interpreter::Js,
                 entry: path::normalize(cwd, script),
             })
         }
@@ -169,7 +159,7 @@ pub fn resolve_invocation(
             let entry = resolve_command(vfs, cwd, name, path_dirs)
                 .ok_or_else(|| ResolveError::NotFound(name.to_string()))?;
             Ok(Invocation {
-                interpreter: Interpreter::Node,
+                interpreter: Interpreter::Js,
                 entry,
             })
         }
@@ -367,15 +357,6 @@ mod tests {
     }
 
     #[test]
-    fn entry_path_handles_interpreter_prefix() {
-        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(entry_path(&argv(&["node", "main.js"]), "/proj"), Some("/proj/main.js".into()));
-        assert_eq!(entry_path(&argv(&["js", "./a.js"]), "/proj"), Some("/proj/a.js".into()));
-        assert_eq!(entry_path(&argv(&["/bin/tool"]), "/proj"), Some("/bin/tool".into()));
-        assert_eq!(entry_path(&argv(&[]), "/proj"), None);
-    }
-
-    #[test]
     fn resolve_command_uses_path_then_relative() {
         let mut vfs = MemVfs::new();
         vfs.mkdir("/bin").unwrap();
@@ -396,14 +377,23 @@ mod tests {
         vfs.mkdir("/bin").unwrap();
         vfs.mkdir("/proj").unwrap();
         write(&mut vfs, "/bin/ls", "");
+        write(&mut vfs, "/bin/node", "");
         write(&mut vfs, "/proj/main.js", "");
+        // `js` is the kernel's native execution keyword: run argv[1] directly.
+        assert_eq!(
+            resolve_invocation(&vfs, "/proj", &["js".into(), "main.js".into()], DEFAULT_PATH).unwrap(),
+            Invocation { interpreter: Interpreter::Js, entry: "/proj/main.js".into() }
+        );
+        // `node` is just a user program: it resolves through PATH to /bin/node and
+        // runs in place. Loading `main.js` is /bin/node's own job at runtime.
         assert_eq!(
             resolve_invocation(&vfs, "/proj", &["node".into(), "main.js".into()], DEFAULT_PATH).unwrap(),
-            Invocation { interpreter: Interpreter::Node, entry: "/proj/main.js".into() }
+            Invocation { interpreter: Interpreter::Js, entry: "/bin/node".into() }
         );
+        // Any other bare program runs in place under the native surface too.
         assert_eq!(
             resolve_invocation(&vfs, "/proj", &["ls".into(), "-a".into()], DEFAULT_PATH).unwrap(),
-            Invocation { interpreter: Interpreter::Node, entry: "/bin/ls".into() }
+            Invocation { interpreter: Interpreter::Js, entry: "/bin/ls".into() }
         );
     }
 
