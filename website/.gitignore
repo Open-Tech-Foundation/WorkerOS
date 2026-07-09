@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.dev/
+# The WorkerOS runtime is copied in from ../packages by tools/sync-runtime.mjs
+# (runs automatically before dev/build). It is generated, not source.
+public/workeros/

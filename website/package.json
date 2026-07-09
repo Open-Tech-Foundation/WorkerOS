@@ -1,0 +1,20 @@
+{
+  "name": "workeros-website",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "WorkerOS website + live playground, built with the OTF Web framework.",
+  "scripts": {
+    "sync": "node tools/sync-runtime.mjs",
+    "dev": "node tools/sync-runtime.mjs && otfw dev",
+    "build": "node tools/sync-runtime.mjs && otfw build",
+    "build:ssg": "node tools/sync-runtime.mjs && otfw build --ssg",
+    "serve": "node tools/sync-runtime.mjs && otfw serve"
+  },
+  "dependencies": {
+    "@opentf/web": "^0.18.0"
+  },
+  "devDependencies": {
+    "@opentf/web-cli": "^1.14.0"
+  }
+}

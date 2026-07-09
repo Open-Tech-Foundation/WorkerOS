@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="WorkerOS — a language-agnostic operating-system personality that boots inside a Web Worker and runs JS/WASM programs as real processes. Try the live playground."
+    />
+    <title>WorkerOS — an OS that boots in a Web Worker</title>
+    <!--
+      Cross-origin isolation shim. WorkerOS uses SharedArrayBuffer (ADR-010) which
+      requires COOP/COEP. This service worker injects those headers client-side so the
+      playground boots on `otfw dev` and on any static host (GitHub Pages, etc.).
+    -->
+    <script src="/coi-serviceworker.js"></script>
+    <link rel="stylesheet" href="/app/global.css" />
+  </head>
+  <body>
+    <!-- The OTF Web toolchain mounts the app here and injects the bundle. -->
+    <div id="app"></div>
+  </body>
+</html>
