@@ -477,6 +477,17 @@ impl WebKernel {
             .collect();
         to_js(&PlanDto { statements })
     }
+
+    /// Parse a whole script into the rich (bash-subset) AST the JS interpreter
+    /// walks, returned as a JSON string (the kernel is dependency-free, so it
+    /// serializes itself; JS does `JSON.parse`). Grammar stays kernel-owned and
+    /// native-tested (ADR-012); the host only drives async execution over it.
+    #[wasm_bindgen]
+    pub fn shell_parse(&self, src: String) -> Result<String, JsError> {
+        shell::parse_script(&src)
+            .map(|ast| ast.to_json())
+            .map_err(|e| JsError::new(&e.0))
+    }
 }
 
 impl WebKernel {

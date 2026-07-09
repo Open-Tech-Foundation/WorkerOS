@@ -37,4 +37,14 @@ export const programs = [
     type: "js",
     source: () => fetchText("./curl/curl-program.js"),
   },
+  {
+    bin: "/bin/sh",
+    type: "js",
+    source: () => fetchText("./sh/sh-program.js"),
+  },
+  {
+    bin: "/bin/bash",
+    type: "js",
+    source: () => fetchText("./sh/sh-program.js"),
+  },
 ];

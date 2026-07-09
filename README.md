@@ -16,9 +16,20 @@ never part of the kernel. See [`ARCHITECTURE.md`](./ARCHITECTURE.md),
 ## Status
 
 **M3 — Usable shell reached.** On top of the MVP (spawn/run/kill/concurrent JS)
-there is now `wsh`, a bash-flavored shell with pipes, redirects, `&&`/`||`/`;`,
-globbing, background jobs, `cd`, and a set of coreutils (`echo cat ls cp mv rm
-mkdir pwd env true false`) that run as real, `ps`-visible, killable processes.
+there is now `wsh`, which has grown from a one-line planner into a real
+bash-subset **script interpreter** (`packages/workeros-web/src/shell/`): pipes,
+redirects (incl. `2>&1`), `&&`/`||`/`;`, background jobs, globbing, `#` comments,
+`$VAR`/`${…}`/`$(…)`/`$(( … ))` expansion, `if`/`for`/`while`/`until`/`case`,
+functions with `local`, and builtins that have no external (`test`/`[`, `read`,
+`export`, `set -e`, `trap`, `printf`, `cd`, …). It runs alongside the coreutils
+(`echo cat ls cp mv rm mkdir pwd env true false`) that execute as real,
+`ps`-visible, killable processes. So a script like
+`OS=$(uname -s); for f in *.txt; do echo "$f"; done` runs as written — though
+`curl … | bash` installers still fail on what they *do* (native binaries, no
+`fork`/`exec`), not on the shell grammar. The grammar stays in Rust (the kernel's
+`shell_parse` returns the AST; ADR-012); the JS evaluator only walks it and drives
+the async spawn/wait plumbing that wasm can't. The kernel owns VFS, process table,
+and glob.
 
 There is now also a real **`npm` + `node`** inside the OS (a Phase-5 slice):
 `npm install` fetches packages from the npm registry (semver + transitive deps),

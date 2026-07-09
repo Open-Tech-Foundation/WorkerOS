@@ -12,8 +12,15 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 
+// The rich (bash-subset) grammar used by the interpreter: expansion-aware words,
+// compound commands, functions. Serializes to a JSON AST the host evaluator walks.
+pub mod script_ast;
+pub mod script_lexer;
+pub mod script_parser;
+
 pub use ast::*;
 pub use parser::{parse, ParseError};
+pub use script_parser::parse_script;
 
 use crate::vfs::{path, Vfs};
 

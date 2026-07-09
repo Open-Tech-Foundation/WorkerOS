@@ -156,3 +156,50 @@ test("criterion 2 & 3: ps lists live processes; a backgrounded job survives and 
   assert.ok(result.sawLoop, "ps lists the backgrounded process");
   assert.ok(result.killedGone, "the background job is killable");
 });
+
+test("interpreter: expansion, control flow, functions, and $() end-to-end", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const sh = (l) => window.sh(os, l);
+      const r = {};
+      // parameter expansion + defaults + suffix strip
+      r.param = await sh('f=archive.tar.gz; echo "${f%.gz} ${MISSING:-none}"');
+      // command substitution feeding a for-loop, with a function + case
+      r.script = await sh([
+        'detect() { case "$1" in *.txt) echo text ;; *) echo other ;; esac; }',
+        'for f in a.txt b.log; do echo "$f is $(detect $f)"; done',
+      ].join("\n"));
+      // arithmetic + while
+      r.count = await sh('i=0; while [ $i -lt 3 ]; do echo $i; i=$((i+1)); done');
+      // pipe into a builtin consumer
+      r.readloop = await sh('printf "x\\ny\\n" | while read v; do echo "[$v]"; done');
+      return r;
+    }),
+  );
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.param.out, "archive.tar none\n");
+  assert.equal(result.script.out, "a.txt is text\nb.log is other\n");
+  assert.equal(result.count.out, "0\n1\n2\n");
+  assert.equal(result.readloop.out, "[x]\n[y]\n");
+});
+
+test("sh/bash program: -c, script file, and piped stdin (curl | bash idiom)", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const sh = (l) => window.sh(os, l);
+      const r = {};
+      r.dashC = await sh(`bash -c 'for i in 1 2 3; do echo $i; done'`);
+      await os.fs.write("/setup.sh", "#!/bin/bash\necho \"hello from $1\"\n");
+      r.file = await sh("sh /setup.sh world");
+      // The installer idiom: a producer piping a script into bash on stdin.
+      r.piped = await sh(`echo 'echo piped-ok' | bash`);
+      return r;
+    }),
+  );
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.dashC.out, "1\n2\n3\n");
+  assert.equal(result.file.out, "hello from world\n");
+  assert.equal(result.piped.out, "piped-ok\n");
+});

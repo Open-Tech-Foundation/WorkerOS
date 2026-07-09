@@ -1,13 +1,22 @@
 // The `wsh` execution driver (host side).
 //
-// Parsing and glob expansion are done by the Rust kernel (`kernel.shell_plan`);
-// this module only performs the parts that are inherently async host work:
-// spawning a program worker per command, wiring pipes, sequencing `&&`/`||`,
-// running the `cd` builtin, and backgrounding. Every *decision* it needs
-// (resolve a command, open a pipe, stat a directory) is a call back into the
-// kernel — INV-2 holds: the shell's logic is Rust; this is orchestration.
+// `wsh` is now a real (bash-subset) interpreter. Its grammar stays in Rust
+// (ADR-012): `./shell/interp.js` parses via the kernel's `shell_parse` wasm
+// binding and walks the resulting AST. This module is the host glue that builds
+// the `runtime` the interpreter delegates to — parsing (Rust/wasm), spawning a
+// program worker per external command, wiring stdio plans, capturing output for
+// `$(…)` and pipelines, and VFS/glob/dir lookups.
+//
+// The evaluator is JS by necessity, not preference: running a command means
+// spawning a program worker and awaiting it, and a wasm module can do neither —
+// so the kernel (Rust) decides *what* happens (parse, resolve, spawn, VFS) and
+// this driver performs the async plumbing between those kernel-owned steps.
+
+import { createInterpreter } from "./shell/interp.js";
 
 const enc = new TextEncoder();
+
+let tmpSeq = 0;
 
 /**
  * @param {object} deps
@@ -16,100 +25,111 @@ const enc = new TextEncoder();
  * @param {{cwd: string, env: Record<string,string>}} deps.session  mutable shell state
  */
 export function createShell({ kernel, startProcess, session }) {
-  /** Run a full command line; stream output to `sink`; resolve the exit code. */
-  async function exec(line, sink) {
-    let plan;
+  // Join a possibly-relative path against cwd (no symlinks; `.`/`..` collapsed).
+  function absPath(cwd, p) {
+    const base = p.startsWith("/") ? p : (cwd === "/" ? "" : cwd) + "/" + p;
+    const segs = [];
+    for (const part of base.split("/")) {
+      if (part === "" || part === ".") continue;
+      if (part === "..") segs.pop();
+      else segs.push(part);
+    }
+    return "/" + segs.join("/");
+  }
+
+  // Run one external program with a resolved stdio plan; returns its exit code.
+  async function runExternal({ argv, env, cwd, stdin, redirects, out, err }) {
+    const plan = { stdin: { kind: "inherit" }, stdout: { kind: "inherit" }, stderr: { kind: "inherit" } };
+    let outSink = out || (() => {});
+    let errSink = err || (() => {});
+    const temps = [];
+
+    // Provided stdin bytes (a pipe stage or `$()` feed) → a temp VFS file the
+    // process reads. Simple and reliable; avoids a live pipe from JS.
+    if (stdin && stdin.length) {
+      const p = "/tmp/.wsh-in-" + tmpSeq++;
+      try { kernel.fs_write(p, stdin); temps.push(p); plan.stdin = { kind: "file", path: p, mode: "read" }; } catch { /* /tmp missing */ }
+    }
+
+    for (const r of redirects) {
+      const fd = r.fd ?? (r.op.includes("<") ? 0 : 1);
+      const target = r.target;
+      if (r.op.endsWith("&")) {
+        // fd duplication: `2>&1` / `1>&2`.
+        if (target === "1" && fd === 2) { plan.stderr = { ...plan.stdout }; errSink = outSink; }
+        else if (target === "2" && fd === 1) { plan.stdout = { ...plan.stderr }; outSink = errSink; }
+        continue;
+      }
+      if (r.op === "<") { plan.stdin = { kind: "file", path: absPath(cwd, target), mode: "read" }; continue; }
+      if (r.op === ">" || r.op === ">>") {
+        const mode = r.op === ">>" ? "append" : "write";
+        if (target === "/dev/null") { if (fd === 2) errSink = () => {}; else outSink = () => {}; continue; }
+        const t = { kind: "file", path: absPath(cwd, target), mode };
+        if (fd === 2) plan.stderr = t; else plan.stdout = t;
+        continue;
+      }
+    }
+
+    const cleanup = () => { for (const p of temps) { try { kernel.sys_unlink?.(0, p); } catch {} } };
+
+    let handle;
     try {
-      plan = kernel.shell_plan(line, session.cwd);
+      handle = startProcess({ argv, env, cwd, plan, sink: { stdout: (b) => outSink(b), stderr: (b) => errSink(b) } });
     } catch (e) {
-      sink.stderr(enc.encode(String(e.message || e) + "\n"));
-      return 2;
+      errSink(enc.encode((argv[0] || "wsh") + ": " + (e.message || e) + "\n"));
+      cleanup();
+      return 127;
     }
-    let last = 0;
-    for (const stmt of plan.statements) {
-      if (stmt.background) {
-        // Detach: the job keeps running; its exit does not block the prompt.
-        runAndOr(stmt.steps, sink).catch(() => {});
-        last = 0;
-      } else {
-        last = await runAndOr(stmt.steps, sink);
-      }
-    }
-    return last;
+    const code = await handle.exited;
+    cleanup();
+    return code | 0;
   }
 
-  async function runAndOr(steps, sink) {
-    let code = await runPipeline(steps[0].commands, sink);
-    for (let i = 1; i < steps.length; i++) {
-      const step = steps[i];
-      if ((step.op === "and" && code === 0) || (step.op === "or" && code !== 0)) {
-        code = await runPipeline(step.commands, sink);
+  const runtime = {
+    // Parse in Rust (fast wasm), walk the AST in JS. Grammar stays kernel-owned
+    // (ADR-012); the kernel serializes the AST to JSON and we hydrate it here.
+    parse: (src) => JSON.parse(kernel.shell_parse(src)),
+    runExternal,
+    readFile: (path, cwd) => {
+      try { return kernel.fs_read(absPath(cwd, path)); } catch { return null; }
+    },
+    writeFile: (path, cwd, bytes, append) => {
+      const abs = absPath(cwd, path);
+      let data = bytes;
+      if (append) {
+        try { const prev = kernel.fs_read(abs); const m = new Uint8Array(prev.length + bytes.length); m.set(prev, 0); m.set(bytes, prev.length); data = m; } catch { /* new file */ }
       }
-    }
-    return code;
-  }
-
-  async function runPipeline(commands, sink) {
-    // A lone builtin (cd / bare assignment) runs in the shell itself — it must,
-    // since a child process cannot change the shell's cwd or env.
-    if (commands.length === 1) {
-      const handled = tryBuiltin(commands[0], sink);
-      if (handled !== null) return handled;
-    }
-
-    const n = commands.length;
-    const pipes = [];
-    for (let i = 0; i < n - 1; i++) pipes.push(kernel.pipe_open());
-
-    const exits = [];
-    for (let i = 0; i < n; i++) {
-      const cmd = commands[i];
-      const plan = buildStdioPlan(cmd, i, n, pipes);
-      const env = { ...session.env, ...Object.fromEntries(cmd.assignments) };
+      kernel.fs_write(abs, data);
+    },
+    statPathSync: (path, cwd) => {
+      try { kernel.resolve_dir(cwd, path); return { isFile: false, isDir: true }; } catch { /* not a dir */ }
+      try { kernel.fs_read(absPath(cwd, path)); return { isFile: true, isDir: false }; } catch { return null; }
+    },
+    // Reuse the Rust globber (ADR-012) via a throwaway plan; drop the command word.
+    glob: (pattern, cwd) => {
       try {
-        const { exited } = startProcess({ argv: cmd.argv, env, cwd: session.cwd, plan, sink });
-        exits.push(exited);
-      } catch (e) {
-        sink.stderr(enc.encode((cmd.argv[0] || "wsh") + ": " + (e.message || e) + "\n"));
-        exits.push(Promise.resolve(127));
-      }
-    }
-    const codes = await Promise.all(exits);
-    return codes[codes.length - 1];
-  }
+        const plan = kernel.shell_plan("wsh-glob " + pattern, cwd);
+        const cmd = plan.statements[0].steps[0].commands[0];
+        return cmd.argv.slice(1);
+      } catch { return []; }
+    },
+    resolveDir: (cwd, target) => kernel.resolve_dir(cwd, target),
+    // Interactive `read` from the terminal isn't plumbed through MSG.EXEC yet;
+    // piped `read` works fully. Return EOF so a prompt-read fails cleanly.
+    readLine: async () => null,
+  };
 
-  function buildStdioPlan(cmd, i, n, pipes) {
-    let stdin = i > 0 ? { kind: "pipe", id: pipes[i - 1], end: "read" } : { kind: "inherit" };
-    let stdout = i < n - 1 ? { kind: "pipe", id: pipes[i], end: "write" } : { kind: "inherit" };
-    let stderr = { kind: "inherit" };
-    // Explicit redirects win over the pipe defaults.
-    for (const r of cmd.redirects) {
-      const target = { kind: "file", path: r.target, mode: r.op };
-      if (r.fd === 0) stdin = target;
-      else if (r.fd === 1) stdout = target;
-      else if (r.fd === 2) stderr = target;
-    }
-    return { stdin, stdout, stderr };
-  }
+  const interp = createInterpreter({ runtime, session });
 
-  /** Handle shell builtins; returns an exit code, or null if not a builtin. */
-  function tryBuiltin(cmd, sink) {
-    // A command that is only `NAME=value` assignments sets the shell env.
-    if (cmd.argv.length === 0) {
-      for (const [k, v] of cmd.assignments) session.env[k] = v;
-      return 0;
+  /** Run a full command line / script; stream output to `sink`; resolve exit code. */
+  async function exec(line, sink) {
+    const io = { stdin: null, out: (b) => sink.stdout(b), err: (b) => sink.stderr(b) };
+    try {
+      return await interp.run(line, io);
+    } catch (e) {
+      sink.stderr(enc.encode("wsh: " + (e && e.message ? e.message : e) + "\n"));
+      return 1;
     }
-    if (cmd.argv[0] === "cd") {
-      const target = cmd.argv[1] || session.env.HOME || "/";
-      try {
-        session.cwd = kernel.resolve_dir(session.cwd, target);
-        return 0;
-      } catch {
-        sink.stderr(enc.encode("cd: " + target + ": No such file or directory\n"));
-        return 1;
-      }
-    }
-    return null;
   }
 
   return { exec };
