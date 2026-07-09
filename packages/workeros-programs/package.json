@@ -8,6 +8,7 @@
   "exports": {
     ".": "./src/index.js",
     "./node": "./src/node/index.js",
+    "./wasi": "./src/wasi/host.js",
     "./node/process-shim": "./src/node/process-shim.js",
     "./node/require-runtime": "./src/node/require-runtime.js"
   },

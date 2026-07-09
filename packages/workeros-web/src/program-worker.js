@@ -14,6 +14,7 @@
 import { MSG } from "./protocol.js";
 import { createProcess, ProcessExit } from "../../workeros-programs/src/node/process-shim.js";
 import { createNodeRuntime, usesCommonjs } from "../../workeros-programs/src/node/require-runtime.js";
+import { createWasiImports } from "../../workeros-programs/src/wasi/host.js";
 
 const kernel = self; // the kernel worker created us; postMessage talks back to it.
 
@@ -102,6 +103,48 @@ function stitch(graph) {
   return pathToBlob.get(graph.entry);
 }
 
+/** Read a whole VFS file into a Uint8Array via the syscall channel. */
+async function readAll(sys, path) {
+  const fd = await sys.open(path, {});
+  const chunks = [];
+  try {
+    for (;;) {
+      const b = await sys.read(fd, 1 << 16);
+      if (b.length === 0) break;
+      chunks.push(b);
+    }
+  } finally {
+    await sys.close(fd);
+  }
+  let len = 0;
+  for (const c of chunks) len += c.length;
+  const out = new Uint8Array(len);
+  let o = 0;
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.length;
+  }
+  return out;
+}
+
+/** Run a `wasm32-wasip1` binary: read it from the VFS, bind the WASI host to the
+ *  kernel syscalls, instantiate, and call its `_start`. */
+async function runWasm(start, sys) {
+  const bytes = await readAll(sys, start.graph.entry);
+  let memory = null;
+  const imports = createWasiImports({
+    sys,
+    argv: start.argv,
+    env: start.env,
+    getMemory: () => memory,
+  });
+  const { instance } = await WebAssembly.instantiate(bytes, imports);
+  memory = instance.exports.memory;
+  const startFn = instance.exports._start;
+  if (typeof startFn !== "function") throw new Error("wasm: no _start export");
+  startFn();
+}
+
 function stringify(v) {
   if (typeof v === "string") return v;
   if (v instanceof Error) return v.stack || String(v);
@@ -154,6 +197,12 @@ self.onmessage = async (ev) => {
   installGlobals(msg, sys);
 
   try {
+    // A wasm32-wasip1 binary: run it through the WASI host bound to the kernel.
+    if (msg.graph.kind === "wasm") {
+      await runWasm(msg, sys);
+      reportExit(0);
+      return;
+    }
     const entry = msg.graph.modules.find((m) => m.path === msg.graph.entry);
     // CommonJS entries (require/module.exports) run through the guest Node runtime,
     // which resolves node_modules against the VFS (INV-1). Everything else — ES

@@ -16,6 +16,14 @@ guest runtime. Format:
   (npm-registry packument fetch, semver resolution — `^`/`~`/x-ranges/dist-tags,
   tarball download → in-browser `DecompressionStream` gunzip → untar into
   `<cwd>/node_modules`, transitive deps), `run <script>` (via `sys.exec`), `ls`.
+- **WASI Preview 1 host** (`src/wasi/`) — `createWasiImports()` provides the
+  `wasi_snapshot_preview1` import module bound to the kernel's `sys` syscalls, so an
+  **unmodified `wasm32-wasip1` binary runs as a WorkerOS process** (the program
+  worker reads the `.wasm` from the VFS, instantiates it, and calls `_start`).
+  First slice: stdout/stderr, args, environ, clocks, random, and `proc_exit` work;
+  blocking reads and the filesystem (`fd_read`, `path_open`, …) return `ENOSYS`/EOF
+  until the SAB synchronous-syscall channel lands (ADR-010/-016) — the next WASI
+  increment. Verified with a real rustc-built binary (`println!` + compute → stdout).
 - **Node-compatible runtime** (`src/node/`) — the guest Node layer:
   - `process` shim (`argv`/`env`/`stdout`/`stderr`/`exit`).
   - CommonJS runtime (`createNodeRuntime`): a `require()` with relative +
