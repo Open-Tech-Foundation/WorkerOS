@@ -30,10 +30,22 @@ guest runtime. Format:
   - Verified with real rustc-built `wasm32-wasip1` binaries: reading a VFS file via
     `std::fs` (missing file → WASI `ENOENT`), blocking on `stdin` from a pipe
     (`echo … | prog.wasm`), `read_dir` of a directory, and `Seek`+read.
-- **`curl`** (`src/curl/`) — download a URL into the VFS or to stdout
-  (`curl -o /x.wasm <url>`, `curl -O <url>`, `curl <url>`). Uses the worker's
-  `fetch` (ADR-008); cross-origin URLs must send CORS. Pairs with the WASI runtime:
+- **`curl`** (`src/curl/`) — HTTP(S) transfer over the worker's `fetch` (ADR-008),
+  streaming the response body through the `sys` ABI. Pairs with the WASI runtime:
   `curl` a wasm binary, then run it.
+  - Download/output: `-o/--output` (`-` = stdout), `-O/--remote-name`, `-#` progress
+    bar, and streamed writes (no full-response buffering).
+  - Request shaping: `-X/--request`, `-H/--header` (repeatable), `-d/--data`,
+    `--data-raw`/`--data-binary`/`--data-urlencode` (incl. `@file`), `-F/--form`
+    multipart, `-G/--get`, `-T/--upload-file`, `-u/--user` (Basic auth),
+    `-b/--cookie`, `-m/--max-time` (abort → exit 28).
+  - Response: `-i/--include`, `-I/--head`, `-f/--fail` (exit 22 on ≥400),
+    `-w/--write-out` (`%{http_code}`, `%{size_download}`, `%{content_type}`,
+    `%{url_effective}`, `%{time_total}`, …), multiple URLs, `-s`/`-S`.
+  - Honest about the browser ceiling (INV-5): cross-origin URLs must send CORS;
+    forbidden request headers (Host/Cookie/User-Agent/…) are dropped with a warning;
+    `-k`/`--compressed`/`-L` are accepted no-ops (the browser owns TLS, encoding,
+    and redirect following). No raw sockets or non-HTTP protocols.
 - **Node-compatible runtime** (`src/node/`) — the guest Node layer:
   - `process` shim (`argv`/`env`/`stdout`/`stderr`/`exit`).
   - CommonJS runtime (`createNodeRuntime`): a `require()` with relative +

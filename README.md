@@ -33,12 +33,19 @@ Preview 1 host bound to the kernel's syscalls and calls `_start`. It does stdio,
 args/env, clocks, random, `proc_exit`, **and real blocking I/O**: a
 SharedArrayBuffer synchronous-syscall channel lets a wasm program open/read VFS
 files (`std::fs`), seek, `read_dir`, rename, and block on `stdin` from a pipe. A
-`curl` program downloads a wasm over HTTP so you can fetch and run one:
+`curl` program speaks HTTP(S) over the worker's `fetch` — downloads, headers,
+methods, `-d`/`-F` bodies, Basic auth, `-i`/`-I`, `-w`, `-f`, `--max-time` — so you
+can fetch and run a wasm, or hit a JSON API:
 
 ```sh
 curl -o /hello.wasm https://example.com/hello.wasm   # needs CORS on the host
 /hello.wasm
+curl -sS -H 'Accept: application/json' https://api.example.com/thing
+curl -X POST -d '{"a":1}' -H 'Content-Type: application/json' https://api.example.com/x
 ```
+
+The transport is browser `fetch`, so its rules apply: cross-origin URLs must send
+CORS headers, and forbidden request headers (Host/Cookie/User-Agent/…) are dropped.
 
 | Milestone | Phases | State |
 |-----------|--------|-------|
