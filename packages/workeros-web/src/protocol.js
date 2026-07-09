@@ -6,7 +6,7 @@
 //
 // This is the *control* transport. The synchronous syscall transport for WASI
 // guests is a separate SharedArrayBuffer ring buffer (ringbuffer.js); JS guests
-// (Phase 2) only need this async channel because JS stdio does not block.
+// (Phase 2/3) only need this async channel because JS stdio does not block.
 
 export const MSG = Object.freeze({
   // main → kernel
@@ -14,6 +14,8 @@ export const MSG = Object.freeze({
   FS_WRITE: "fs_write",
   FS_READ: "fs_read",
   SPAWN: "spawn",
+  EXEC: "exec",
+  PS: "ps",
   KILL: "kill",
   STDIN: "stdin",
   // kernel → main
@@ -22,6 +24,10 @@ export const MSG = Object.freeze({
   STDOUT: "stdout",
   STDERR: "stderr",
   EXIT: "exit",
+  EXEC_STDOUT: "exec_stdout",
+  EXEC_STDERR: "exec_stderr",
+  EXEC_DONE: "exec_done",
+  PS_RESULT: "ps_result",
   ERROR: "error",
 
   // kernel worker → program worker
@@ -29,4 +35,6 @@ export const MSG = Object.freeze({
   // program worker → kernel worker
   SYSCALL: "syscall",
   PROC_EXIT: "proc_exit",
+  // kernel worker → program worker (syscall reply)
+  SYSCALL_RESULT: "syscall_result",
 });

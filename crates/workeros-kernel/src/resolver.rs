@@ -84,6 +84,34 @@ pub enum ResolveError {
     Io(Errno),
 }
 
+/// Which global surface a program worker installs for a guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interpreter {
+    /// Node tenant layer: `process`/`console` on top of `sys`.
+    Node,
+    /// WorkerOS-native: `sys` only (coreutils, plain programs).
+    Js,
+}
+
+impl Interpreter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Interpreter::Node => "node",
+            Interpreter::Js => "js",
+        }
+    }
+}
+
+/// The directories searched for a bare command name, in order.
+pub const DEFAULT_PATH: &[&str] = &["/bin"];
+
+/// A resolved invocation: the interpreter to run under and the entry file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    pub interpreter: Interpreter,
+    pub entry: String,
+}
+
 /// Given `argv` and `cwd`, determine the entry path to resolve.
 ///
 /// `["node", "main.js"]` / `["js", "main.js"]` → the script is `argv[1]`;
@@ -96,6 +124,54 @@ pub fn entry_path(argv: &[String], cwd: &str) -> Option<String> {
         None => return None,
     };
     Some(path::normalize(cwd, raw))
+}
+
+/// Resolve a bare command `name` to an existing program file: a path containing
+/// `/` is taken relative to `cwd`; otherwise each `path_dirs` entry is searched.
+pub fn resolve_command(vfs: &dyn Vfs, cwd: &str, name: &str, path_dirs: &[&str]) -> Option<String> {
+    let exists_file = |p: &str| matches!(vfs.stat(p), Ok(m) if m.file_type == FileType::File);
+    if name.contains('/') {
+        let abs = path::normalize(cwd, name);
+        return exists_file(&abs).then_some(abs);
+    }
+    for dir in path_dirs {
+        let candidate = path::normalize(dir, name);
+        if exists_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Resolve a full invocation (interpreter + entry) from `argv`.
+///
+/// `node`/`js` are interpreter prefixes; any other leading word is a command
+/// resolved through `path_dirs` (bare commands run under the Node surface so
+/// ordinary scripts get `process`).
+pub fn resolve_invocation(
+    vfs: &dyn Vfs,
+    cwd: &str,
+    argv: &[String],
+    path_dirs: &[&str],
+) -> Result<Invocation, ResolveError> {
+    match argv.first().map(String::as_str) {
+        None => Err(ResolveError::NotFound(String::new())),
+        Some(kw @ ("node" | "js")) => {
+            let script = argv.get(1).ok_or(ResolveError::NotFound("<script>".into()))?;
+            Ok(Invocation {
+                interpreter: if kw == "node" { Interpreter::Node } else { Interpreter::Js },
+                entry: path::normalize(cwd, script),
+            })
+        }
+        Some(name) => {
+            let entry = resolve_command(vfs, cwd, name, path_dirs)
+                .ok_or_else(|| ResolveError::NotFound(name.to_string()))?;
+            Ok(Invocation {
+                interpreter: Interpreter::Node,
+                entry,
+            })
+        }
+    }
 }
 
 /// Resolve the full JS module graph rooted at `entry` (an absolute VFS path).
@@ -295,6 +371,38 @@ mod tests {
         assert_eq!(entry_path(&argv(&["js", "./a.js"]), "/proj"), Some("/proj/a.js".into()));
         assert_eq!(entry_path(&argv(&["/bin/tool"]), "/proj"), Some("/bin/tool".into()));
         assert_eq!(entry_path(&argv(&[]), "/proj"), None);
+    }
+
+    #[test]
+    fn resolve_command_uses_path_then_relative() {
+        let mut vfs = MemVfs::new();
+        vfs.mkdir("/bin").unwrap();
+        vfs.mkdir("/proj").unwrap();
+        write(&mut vfs, "/bin/echo", "");
+        write(&mut vfs, "/proj/tool.js", "");
+        // bare name → PATH
+        assert_eq!(resolve_command(&vfs, "/proj", "echo", DEFAULT_PATH), Some("/bin/echo".into()));
+        // name with slash → relative to cwd
+        assert_eq!(resolve_command(&vfs, "/proj", "./tool.js", DEFAULT_PATH), Some("/proj/tool.js".into()));
+        // missing
+        assert_eq!(resolve_command(&vfs, "/proj", "nope", DEFAULT_PATH), None);
+    }
+
+    #[test]
+    fn resolve_invocation_variants() {
+        let mut vfs = MemVfs::new();
+        vfs.mkdir("/bin").unwrap();
+        vfs.mkdir("/proj").unwrap();
+        write(&mut vfs, "/bin/ls", "");
+        write(&mut vfs, "/proj/main.js", "");
+        assert_eq!(
+            resolve_invocation(&vfs, "/proj", &["node".into(), "main.js".into()], DEFAULT_PATH).unwrap(),
+            Invocation { interpreter: Interpreter::Node, entry: "/proj/main.js".into() }
+        );
+        assert_eq!(
+            resolve_invocation(&vfs, "/proj", &["ls".into(), "-a".into()], DEFAULT_PATH).unwrap(),
+            Invocation { interpreter: Interpreter::Node, entry: "/bin/ls".into() }
+        );
     }
 
     #[test]

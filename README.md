@@ -15,23 +15,26 @@ never part of the kernel. See [`ARCHITECTURE.md`](./ARCHITECTURE.md),
 
 ## Status
 
-**M2 — Run JS (MVP) reached.** You can write a JS file into the VFS, `spawn` it,
-stream its stdout/stderr/exit, kill a runaway loop, and run several programs
-concurrently in separate workers — with a Rust-authoritative kernel.
+**M3 — Usable shell reached.** On top of the MVP (spawn/run/kill/concurrent JS)
+there is now `wsh`, a bash-flavored shell with pipes, redirects, `&&`/`||`/`;`,
+globbing, background jobs, `cd`, and a set of coreutils (`echo cat ls cp mv rm
+mkdir pwd env true false`) that run as real, `ps`-visible, killable processes.
 
 | Milestone | Phases | State |
 |-----------|--------|-------|
 | M1 — Boot | 0–1 | ✅ kernel boots, VFS + WASI-shaped syscall spine, fully native-tested |
 | M2 — Run JS (MVP) | 2 | ✅ spawn/run/kill JS, concurrent, `import` resolved by the kernel |
-| M3+ | 3–7 | ⏳ shell, WASI binaries, npm, preview, persistence |
+| M3 — Usable shell | 3 | ✅ `wsh` (pipes, redirects, `&&`/`\|\|`, glob, `&`), IPC pipes, coreutils, `ps` |
+| M4+ | 4–7 | ⏳ WASI binaries, npm, preview, persistence |
 
 ## Layout
 
 ```
-crates/workeros-kernel/   Rust core: VFS, process table, syscall dispatch, resolver (native-testable)
-packages/workeros-web/    wasm-bindgen bindings + host runtime (kernel/program workers + client API)
-packages/workeros-node/   guest-side Node-compat tenant layer (minimal `process` shim so far)
-examples/                 runnable demos
+crates/workeros-kernel/    Rust core: VFS, process table, syscall dispatch, resolver, wsh parser/glob (native-testable)
+packages/workeros-web/     wasm-bindgen bindings + host runtime (kernel/program workers, shell driver, client API)
+packages/workeros-node/    guest-side Node-compat tenant layer (minimal `process` shim so far)
+packages/workeros-coreutils/  coreutils as guest programs over the native `sys` ABI
+examples/                  runnable demos (run-js, shell)
 ```
 
 ## Develop
@@ -56,8 +59,9 @@ npm run serve                 # http://localhost:8080
 npm test
 ```
 
-Open the demo at
-`http://localhost:8080/examples/run-js/index.html`.
+Open a demo at
+`http://localhost:8080/examples/run-js/index.html` (run a JS program) or
+`http://localhost:8080/examples/shell/index.html` (the `wsh` terminal).
 
 Cross-origin isolation (COOP: `same-origin`, COEP: `require-corp`) is required
 for `SharedArrayBuffer`; the dev server sets these headers (ADR-010).

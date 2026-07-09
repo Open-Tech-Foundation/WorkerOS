@@ -155,6 +155,11 @@ impl ProcessTable {
         }
     }
 
+    /// Remove a process unconditionally (e.g. to roll back a failed spawn).
+    pub fn remove(&mut self, pid: Pid) -> Option<Process> {
+        self.procs.remove(&pid)
+    }
+
     /// Reap a zombie, removing it and returning its exit code. Returns `None` if
     /// the pid is unknown or not yet a zombie.
     pub fn reap(&mut self, pid: Pid) -> Option<i32> {

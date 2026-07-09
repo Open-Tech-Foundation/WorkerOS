@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WorkerOS — wsh shell (Phase 3)</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin: 0; height: 100vh; display: flex; flex-direction: column;
+        background: Canvas; color: CanvasText;
+      }
+      header { padding: 0.6rem 1rem; border-bottom: 1px solid color-mix(in srgb, CanvasText 20%, transparent); }
+      header b { font-weight: 600; }
+      header span { opacity: 0.6; }
+      #screen { flex: 1; overflow-y: auto; padding: 1rem; white-space: pre-wrap; word-break: break-word; }
+      .cmd { color: color-mix(in srgb, CanvasText 65%, transparent); }
+      .err { color: #d33; }
+      form { display: flex; gap: 0.5rem; padding: 0.5rem 1rem; border-top: 1px solid color-mix(in srgb, CanvasText 20%, transparent); }
+      #prompt { opacity: 0.7; white-space: pre; }
+      input { flex: 1; font: inherit; background: transparent; color: inherit; border: none; outline: none; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <b>wsh</b> — <span>bash-flavored WorkerOS shell. Try: <code>ls /bin</code>, <code>echo hi | cat</code>, <code>mkdir -p a/b &amp;&amp; ls a</code>, <code>ps</code></span>
+    </header>
+    <div id="screen"></div>
+    <form id="form">
+      <span id="prompt">/ $</span>
+      <input id="input" autofocus autocomplete="off" spellcheck="false" />
+    </form>
+
+    <script type="module">
+      import { boot } from "../../packages/workeros-web/src/index.js";
+
+      const screen = document.getElementById("screen");
+      const input = document.getElementById("input");
+      const promptEl = document.getElementById("prompt");
+      const dec = new TextDecoder();
+      let cwd = "/";
+
+      const write = (text, cls) => {
+        const span = document.createElement("span");
+        if (cls) span.className = cls;
+        span.textContent = text;
+        screen.appendChild(span);
+        screen.scrollTop = screen.scrollHeight;
+      };
+
+      const os = await boot();
+      write(`WorkerOS ${os.version} (${os.abi}) — wsh ready.\n\n`);
+
+      // Seed a couple of files so there is something to explore.
+      await os.fs.write("/readme.txt", "hello from the WorkerOS VFS\n");
+
+      document.getElementById("form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const line = input.value;
+        input.value = "";
+        write(`${cwd} $ ${line}\n`, "cmd");
+        if (!line.trim()) return;
+
+        if (line.trim() === "ps") {
+          const procs = await os.ps();
+          const rows = procs.map((p) => `${String(p.pid).padStart(4)} ${p.state.padEnd(8)} ${p.argv.join(" ")}`);
+          write((rows.join("\n") || "(no live processes)") + "\n");
+          return;
+        }
+
+        const { code, cwd: newCwd } = await os.exec(line, {
+          onStdout: (b) => write(dec.decode(b)),
+          onStderr: (b) => write(dec.decode(b), "err"),
+        });
+        cwd = newCwd || cwd;
+        promptEl.textContent = `${cwd} $`;
+        if (code !== 0) write(`[exit ${code}]\n`, "err");
+      });
+    </script>
+  </body>
+</html>

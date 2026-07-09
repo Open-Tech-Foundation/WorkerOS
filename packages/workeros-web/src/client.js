@@ -60,6 +60,7 @@ export class WorkerOS {
     this._nextId = 1;
     this._pending = new Map(); // request id → {resolve, reject}
     this._procs = new Map(); // pid → Process
+    this._execs = new Map(); // exec id → {onStdout, onStderr, resolve}
 
     /** @type {{ write: (path: string, data: Uint8Array|string) => Promise<void>,
      *           read: (path: string) => Promise<Uint8Array> }} */
@@ -84,13 +85,32 @@ export class WorkerOS {
     switch (msg.type) {
       case MSG.SPAWNED:
       case MSG.FS_WRITE:
-      case MSG.FS_READ: {
+      case MSG.FS_READ:
+      case MSG.PS_RESULT: {
         const p = this._pending.get(msg.id);
         if (p) {
           this._pending.delete(msg.id);
           if (msg.type === MSG.SPAWNED) p.resolve(msg.pid);
           else if (msg.type === MSG.FS_READ) p.resolve(msg.data);
+          else if (msg.type === MSG.PS_RESULT) p.resolve(msg.procs);
           else p.resolve();
+        }
+        break;
+      }
+      case MSG.EXEC_STDOUT:
+      case MSG.EXEC_STDERR: {
+        const e = this._execs.get(msg.execId);
+        if (e) {
+          const cb = msg.type === MSG.EXEC_STDOUT ? e.onStdout : e.onStderr;
+          if (cb) cb(msg.data);
+        }
+        break;
+      }
+      case MSG.EXEC_DONE: {
+        const e = this._execs.get(msg.execId);
+        if (e) {
+          this._execs.delete(msg.execId);
+          e.resolve({ code: msg.code, cwd: msg.cwd });
         }
         break;
       }
@@ -134,6 +154,30 @@ export class WorkerOS {
     const proc = new Process(this, pid);
     this._procs.set(pid, proc);
     return proc;
+  }
+
+  /**
+   * Run a `wsh` command line (pipes, redirects, `&&`/`||`/`;`, `&`, glob, `cd`).
+   * @param {string} line
+   * @param {object} [opts] { onStdout?, onStderr? } — receive Uint8Array chunks
+   * @returns {Promise<{code: number, cwd: string}>}
+   */
+  exec(line, opts = {}) {
+    const id = this._nextId++;
+    return new Promise((resolve) => {
+      this._execs.set(id, { onStdout: opts.onStdout, onStderr: opts.onStderr, resolve });
+      this._worker.postMessage({ type: MSG.EXEC, id, line });
+    });
+  }
+
+  /** `ps` — a snapshot of the live process table. */
+  ps() {
+    return this._request(MSG.PS, {});
+  }
+
+  /** Send a signal to a process by pid (defaults to SIGKILL). */
+  kill(pid, signal = 9) {
+    this._send({ type: MSG.KILL, pid, signal });
   }
 
   _send(msg, transfer) {

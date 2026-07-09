@@ -202,6 +202,7 @@ version = "0.0.0"
 name = "workeros-web-wasm"
 version = "0.0.0"
 dependencies = [
+ "js-sys",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",

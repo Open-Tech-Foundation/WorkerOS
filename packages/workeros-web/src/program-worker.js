@@ -3,30 +3,81 @@
 // kernel worker. It makes no resolution, filesystem, or capability decision —
 // the kernel already resolved the whole module graph and handed it over.
 //
-// Isolation level: `Full` (bare dynamic import), ADR-009/§7.1. Per-process worker
-// isolation (memory + terminate) applies regardless of level.
+// It exposes two guest surfaces:
+//   • `globalThis.sys` — the WorkerOS-native syscall ABI (argv/env/cwd + fd ops),
+//     available to every guest; coreutils are written against it.
+//   • `globalThis.process` / `console` — the Node tenant sugar (workeros-node),
+//     installed for the `node` interpreter, built on top of `sys`.
+//
+// Isolation level: `Full` (bare dynamic import), ADR-009/§7.1.
 
 import { MSG } from "./protocol.js";
 import { createProcess, ProcessExit } from "../../workeros-node/src/process-shim.js";
 
-// The kernel worker created us; `self.postMessage` talks back to it.
-const kernel = self;
+const kernel = self; // the kernel worker created us; postMessage talks back to it.
 
-/** Route an fd_write to the kernel (fire-and-forget; JS stdio does not block). */
-function sysWrite(fd, bytes) {
-  kernel.postMessage({ type: MSG.SYSCALL, call: "write", fd, data: bytes });
+let nextCallId = 1;
+const pendingCalls = new Map(); // id → { resolve, reject }
+
+/** A request/response syscall: posts to the kernel worker and awaits its reply. */
+function call(callName, args) {
+  return new Promise((resolve, reject) => {
+    const id = nextCallId++;
+    pendingCalls.set(id, { resolve, reject });
+    kernel.postMessage({ type: MSG.SYSCALL, id, call: callName, args });
+  });
 }
 
-/**
- * Stitch a kernel-resolved module graph into blob URLs and return the entry's
- * URL. Dependencies are built first so each module's import specifiers can be
- * rewritten to the blob URL of its (already-built) target. This is mechanical
- * assembly only — the kernel decided every specifier→path mapping (INV-2).
- */
+/** A fire-and-forget write. Ordering with later syscalls is preserved by the
+ *  message queue, so a write followed by exit lands before the process closes. */
+function writeBytes(fd, bytes) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  kernel.postMessage({ type: MSG.SYSCALL, call: "write", args: { fd, data: u8 } });
+  return u8.length;
+}
+
+let exited = false;
+function reportExit(code) {
+  if (exited) return;
+  exited = true;
+  kernel.postMessage({ type: MSG.PROC_EXIT, code: code | 0 });
+}
+
+/** Build the WorkerOS-native `sys` ABI for a guest. */
+function makeSys(start) {
+  return {
+    argv: start.argv,
+    env: start.env,
+    cwd: start.cwd,
+    pid: start.pid,
+    write: (fd, bytes) => writeBytes(fd, bytes),
+    // read resolves to a Uint8Array; empty means EOF (the kernel worker parks
+    // "would block" internally, so a guest never sees it).
+    read: async (fd, max = 65536) => {
+      const r = await call("read", { fd, max });
+      return r.status === "data" ? r.data : new Uint8Array(0);
+    },
+    open: (path, opts = {}) => call("open", { path, opts }),
+    close: (fd) => call("close", { fd }),
+    readdir: (path) => call("readdir", { path }),
+    stat: (path) => call("stat", { path }),
+    mkdir: (path) => call("mkdir", { path }),
+    unlink: (path) => call("unlink", { path }),
+    rmdir: (path) => call("rmdir", { path }),
+    rename: (from, to) => call("rename", { from, to }),
+    exit: (code = 0) => {
+      reportExit(code | 0);
+      throw new ProcessExit(code | 0);
+    },
+  };
+}
+
+/** Stitch a kernel-resolved module graph into blob URLs; return the entry URL.
+ *  Dependencies build first so specifiers can be rewritten to their blob URLs.
+ *  Mechanical assembly only — the kernel decided every specifier→path (INV-2). */
 function stitch(graph) {
   const pathToBlob = new Map();
   let remaining = [...graph.modules];
-
   while (remaining.length) {
     const built = [];
     for (const mod of remaining) {
@@ -37,31 +88,32 @@ function stitch(graph) {
         src = src.split(`"${imp.specifier}"`).join(`"${url}"`);
         src = src.split(`'${imp.specifier}'`).join(`"${url}"`);
       }
-      const blob = new Blob([src], { type: "text/javascript" });
-      pathToBlob.set(mod.path, URL.createObjectURL(blob));
+      pathToBlob.set(mod.path, URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
       built.push(mod.path);
     }
-    if (built.length === 0) {
-      // No module became buildable => an import cycle (unsupported in MVP) or a
-      // dangling edge. Fail honestly rather than hang.
-      throw new Error("unresolvable or cyclic module graph");
-    }
+    if (built.length === 0) throw new Error("unresolvable or cyclic module graph");
     remaining = remaining.filter((m) => !pathToBlob.has(m.path));
   }
   return pathToBlob.get(graph.entry);
 }
 
-/** Install the guest's ambient globals: a routing console, and (for node) process. */
-function installGlobals(start, exit) {
-  const encoder = new TextEncoder();
-  const line = (fd, args) =>
-    sysWrite(
-      fd,
-      encoder.encode(args.map((a) => stringify(a)).join(" ") + "\n"),
-    );
+function stringify(v) {
+  if (typeof v === "string") return v;
+  if (v instanceof Error) return v.stack || String(v);
+  try {
+    return typeof v === "object" ? JSON.stringify(v) : String(v);
+  } catch {
+    return String(v);
+  }
+}
 
-  // A console that routes to the kernel's stdout/stderr (a terminal concern, so
-  // it lives host-side, not in the Node tenant layer).
+/** Install the guest's ambient globals. */
+function installGlobals(start, sys) {
+  globalThis.sys = sys;
+
+  const enc = new TextEncoder();
+  const line = (fd, args) => sys.write(fd, enc.encode(args.map(stringify).join(" ") + "\n"));
+  // A routing console (a terminal concern → host-side, not the Node layer).
   globalThis.console = {
     log: (...a) => line(1, a),
     info: (...a) => line(1, a),
@@ -75,48 +127,37 @@ function installGlobals(start, exit) {
       argv: start.argv,
       env: start.env,
       cwd: start.cwd,
-      write: sysWrite,
-      exit,
+      write: sys.write,
+      exit: (code) => reportExit(code),
     });
   }
 }
 
-function stringify(v) {
-  if (typeof v === "string") return v;
-  if (v instanceof Error) return v.stack || String(v);
-  try {
-    return typeof v === "object" ? JSON.stringify(v) : String(v);
-  } catch {
-    return String(v);
-  }
-}
-
-let exited = false;
-function reportExit(code) {
-  if (exited) return;
-  exited = true;
-  kernel.postMessage({ type: MSG.PROC_EXIT, code: code | 0 });
-}
-
 self.onmessage = async (ev) => {
-  const start = ev.data;
-  if (start.type !== MSG.START) return;
+  const msg = ev.data;
+  if (msg.type === MSG.SYSCALL_RESULT) {
+    const p = pendingCalls.get(msg.id);
+    if (p) {
+      pendingCalls.delete(msg.id);
+      msg.ok ? p.resolve(msg.value) : p.reject(new Error(msg.error));
+    }
+    return;
+  }
+  if (msg.type !== MSG.START) return;
 
-  installGlobals(start, (code) => reportExit(code));
+  const sys = makeSys(msg);
+  installGlobals(msg, sys);
 
   try {
-    const entryUrl = stitch(start.graph);
+    const entryUrl = stitch(msg.graph);
     await import(entryUrl);
-    // Top-level completed without an explicit exit → success.
-    reportExit(0);
+    reportExit(0); // top-level completed without an explicit exit → success.
   } catch (err) {
     if (err instanceof ProcessExit) {
       reportExit(err.code);
       return;
     }
-    // Uncaught guest error: write it to stderr and exit non-zero (Node-ish).
-    const enc = new TextEncoder();
-    sysWrite(2, enc.encode(String(err && err.stack ? err.stack : err) + "\n"));
+    writeBytes(2, new TextEncoder().encode(String(err && err.stack ? err.stack : err) + "\n"));
     reportExit(1);
   }
 };

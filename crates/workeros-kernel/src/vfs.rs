@@ -108,6 +108,9 @@ pub trait Vfs {
     fn unlink(&mut self, path: &str) -> SysResult<()>;
     /// Remove an empty directory.
     fn rmdir(&mut self, path: &str) -> SysResult<()>;
+    /// Rename/move an entry from `from` to `to` within the same VFS. Overwrites
+    /// an existing regular file at `to`; refuses to overwrite a directory.
+    fn rename(&mut self, from: &str, to: &str) -> SysResult<()>;
 
     /// Open a file, optionally creating it. Returns its inode and bumps the
     /// open count; the caller must later [`Vfs::close`] it exactly once.
@@ -317,6 +320,37 @@ impl Vfs for MemVfs {
             entries.remove(name);
         }
         self.unlink_ino(child)
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> SysResult<()> {
+        let (from_parent, from_name) = self.resolve_parent(from)?;
+        let child = *self
+            .dir_entries(from_parent)?
+            .get(from_name)
+            .ok_or(Errno::Noent)?;
+        let (to_parent, to_name) = self.resolve_parent(to)?;
+        path::validate_component(to_name)?;
+        // If the destination exists, it must be a regular file we can replace.
+        if let Some(&existing) = self.dir_entries(to_parent)?.get(to_name) {
+            if existing == child {
+                return Ok(()); // renaming onto itself
+            }
+            if self.get(existing)?.is_dir() {
+                return Err(Errno::Isdir);
+            }
+            if let Kind::Dir { entries } = &mut self.get_mut(to_parent)?.kind {
+                entries.remove(to_name);
+            }
+            self.unlink_ino(existing)?;
+        }
+        // Detach from source, attach at destination.
+        if let Kind::Dir { entries } = &mut self.get_mut(from_parent)?.kind {
+            entries.remove(from_name);
+        }
+        if let Kind::Dir { entries } = &mut self.get_mut(to_parent)?.kind {
+            entries.insert(to_name.to_string(), child);
+        }
+        Ok(())
     }
 
     fn open(&mut self, path: &str, opts: OpenOptions) -> SysResult<Ino> {
@@ -535,6 +569,47 @@ mod tests {
         // Inode now reaped; the slot is reused by the next allocation.
         let ino2 = vfs.open("/g", OpenOptions { create: true, ..Default::default() }).unwrap();
         assert_eq!(ino2, ino, "freed inode slot is recycled");
+    }
+
+    #[test]
+    fn rename_moves_and_overwrites_file() {
+        let mut vfs = fs();
+        let a = vfs.open("/a", OpenOptions { create: true, ..Default::default() }).unwrap();
+        vfs.write_at(a, 0, b"content-a").unwrap();
+        vfs.close(a).unwrap();
+        vfs.open("/b", OpenOptions { create: true, ..Default::default() })
+            .and_then(|i| vfs.close(i))
+            .unwrap();
+        // Move /a to /b, overwriting the existing /b.
+        vfs.rename("/a", "/b").unwrap();
+        assert_eq!(vfs.resolve("/a").unwrap_err(), Errno::Noent);
+        let b = vfs.resolve("/b").unwrap();
+        let mut buf = [0u8; 9];
+        assert_eq!(vfs.read_at(b, 0, &mut buf).unwrap(), 9);
+        assert_eq!(&buf, b"content-a");
+    }
+
+    #[test]
+    fn rename_into_directory_across_dirs() {
+        let mut vfs = fs();
+        vfs.mkdir("/src").unwrap();
+        vfs.mkdir("/dst").unwrap();
+        vfs.open("/src/f", OpenOptions { create: true, ..Default::default() })
+            .and_then(|i| vfs.close(i))
+            .unwrap();
+        vfs.rename("/src/f", "/dst/g").unwrap();
+        assert_eq!(vfs.resolve("/src/f").unwrap_err(), Errno::Noent);
+        assert!(vfs.resolve("/dst/g").is_ok());
+    }
+
+    #[test]
+    fn rename_onto_directory_fails() {
+        let mut vfs = fs();
+        vfs.open("/f", OpenOptions { create: true, ..Default::default() })
+            .and_then(|i| vfs.close(i))
+            .unwrap();
+        vfs.mkdir("/d").unwrap();
+        assert_eq!(vfs.rename("/f", "/d").unwrap_err(), Errno::Isdir);
     }
 
     #[test]
