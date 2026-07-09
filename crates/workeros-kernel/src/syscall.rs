@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn stdin_reads_what_host_feeds() {
-        let mut vfs = MemVfs::new();
+        let vfs = MemVfs::new();
         let mut p = ctx();
         p.stdin.extend(b"hi".iter().copied());
         let mut buf = [0u8; 8];
@@ -466,8 +466,10 @@ mod tests {
         let mut vfs = MemVfs::new();
         vfs.mkdir("/home").unwrap();
         vfs.mkdir("/home/user").unwrap();
-        let mut caps = CapabilitySet::default();
-        caps.fs_root = "/home/user".into();
+        let caps = CapabilitySet {
+            fs_root: "/home/user".into(),
+            ..Default::default()
+        };
         let mut p = ProcessCtx::new(1, vec![], vec![], "/home/user".into(), caps);
         // Inside the root: ok.
         p.path_open(&mut vfs, "file", OpenOptions { create: true, ..Default::default() }).unwrap();

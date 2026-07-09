@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WorkerOS — run a JS program (Phase 2)</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font: 14px/1.5 ui-monospace, SFMono-Regular, monospace; margin: 2rem; max-width: 60rem; }
+      h1 { font-size: 1.2rem; }
+      textarea { width: 100%; height: 9rem; font: inherit; }
+      button { font: inherit; padding: 0.3rem 0.8rem; margin: 0.5rem 0.4rem 0.5rem 0; cursor: pointer; }
+      pre { background: color-mix(in srgb, currentColor 6%, transparent); padding: 1rem; border-radius: 6px; white-space: pre-wrap; min-height: 3rem; }
+      .muted { opacity: 0.7; }
+    </style>
+  </head>
+  <body>
+    <h1>WorkerOS — run a JS program</h1>
+    <p class="muted">
+      A Rust-authoritative kernel boots in a Web Worker; each program you run gets
+      its own worker (real, parallel, killable). Requires cross-origin isolation
+      (this page is served with COOP/COEP).
+    </p>
+
+    <textarea id="src">
+import { greet } from "./util.js";
+
+console.log(greet("WorkerOS"));
+for (let i = 0; i < 3; i++) console.log("tick", i);
+console.error("(this goes to stderr)");
+process.exit(0);
+</textarea>
+
+    <div>
+      <button id="run">▶ Run</button>
+      <button id="loop">∞ Spawn infinite loop</button>
+      <button id="kill" disabled>■ Kill loop</button>
+      <span id="status" class="muted"></span>
+    </div>
+
+    <pre id="out"></pre>
+
+    <script type="module">
+      import { boot } from "../../packages/workeros-web/src/index.js";
+
+      const out = document.getElementById("out");
+      const status = document.getElementById("status");
+      const dec = new TextDecoder();
+      const print = (s) => (out.textContent += s);
+
+      const os = await boot();
+      status.textContent = `booted kernel ${os.version} (${os.abi})`;
+
+      // A tiny dependency to demonstrate kernel-resolved relative imports.
+      await os.fs.write("/util.js", "export const greet = (n) => `hello, ${n}!`;");
+
+      document.getElementById("run").onclick = async () => {
+        out.textContent = "";
+        await os.fs.write("/main.js", document.getElementById("src").value);
+        const p = await os.spawn(["node", "main.js"]);
+        p.onStdout((b) => print(dec.decode(b)));
+        p.onStderr((b) => print(dec.decode(b)));
+        const code = await p.exited;
+        print(`\n[exit ${code}]`);
+      };
+
+      let loop = null;
+      document.getElementById("loop").onclick = async () => {
+        await os.fs.write("/loop.js", "let n=0; while (true) { n++; }");
+        loop = await os.spawn(["node", "loop.js"]);
+        document.getElementById("kill").disabled = false;
+        status.textContent = `spawned runaway loop as pid ${loop.pid} — kernel stays responsive`;
+        loop.exited.then((code) => {
+          status.textContent = `loop pid ${loop.pid} exited (${code})`;
+          document.getElementById("kill").disabled = true;
+        });
+      };
+      document.getElementById("kill").onclick = () => loop && loop.kill(9);
+    </script>
+  </body>
+</html>

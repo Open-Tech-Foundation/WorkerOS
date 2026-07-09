@@ -12,9 +12,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Node-ism grep gate (INV-1 / ADR-007)
         run: ./ci/grep-gate.sh
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --exclude workeros-web-wasm --all-targets -- -D warnings
       - name: cargo test (native)
         run: cargo test --workspace --exclude workeros-web-wasm
 

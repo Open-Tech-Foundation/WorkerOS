@@ -10,7 +10,9 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+// Serve from the repo root so both cross-package ESM imports (the program
+// worker loads the workeros-node tenant shim) and the examples/ demos resolve.
+const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -36,7 +38,7 @@ export function createDevServer() {
     crossOriginIsolationHeaders(res);
     try {
       let urlPath = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
-      if (urlPath === "/") urlPath = "/tools/harness.html";
+      if (urlPath === "/") urlPath = "/packages/workeros-web/tools/harness.html";
       // Prevent path traversal outside ROOT.
       const filePath = normalize(join(ROOT, urlPath));
       if (!filePath.startsWith(ROOT)) {

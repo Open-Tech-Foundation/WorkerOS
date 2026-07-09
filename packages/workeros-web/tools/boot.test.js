@@ -25,7 +25,7 @@ test("kernel boots and ring buffer round-trips in a real browser", { skip: chrom
     const page = await browser.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
-    await page.goto(`http://localhost:${port}/tools/harness.html`);
+    await page.goto(`http://localhost:${port}/packages/workeros-web/tools/harness.html`);
 
     await page.waitForFunction(() => window.__workeros_results && window.__workeros_results.done, {
       timeout: 15000,
