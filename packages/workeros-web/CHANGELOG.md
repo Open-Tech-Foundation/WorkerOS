@@ -11,6 +11,21 @@ main-thread client API). Format:
 - **`resolveGraph` syscall** — the program worker's `sys` ABI can ask the kernel to
   resolve a script's module graph, so the userland `/bin/node` runtime evaluates the
   script in its own worker instead of the kernel special-casing a `node` interpreter.
+- **`wsh` is now a real shell interpreter** (`src/shell/interp.js`), replacing the
+  one-line planner. The grammar stays in Rust (parsed via the kernel's `shell_parse`
+  wasm binding, ADR-012); JS walks the AST and drives execution — a wasm module can
+  neither spawn a worker nor await one, so the evaluator must be host-side.
+  - **Expansion:** `$VAR`/`${…}` operators (`:-` `:=` `:+` `#`/`##`/`%`/`%%` strip,
+    `/`//` replace, `${#x}`, substrings), command substitution `$(…)`/backticks,
+    arithmetic `$(( … ))`, quoting, IFS field-splitting, `*`/`?`/`[…]` globbing.
+  - **Control flow:** `if`/`elif`/`else`, `for`/`while`/`until`, `case`, brace groups,
+    subshells, functions with `local`, `&&`/`||`/`;`/`|`, background `&`, `#` comments.
+  - **Builtins with no external:** `test`/`[`, `read` (incl. `while read`), `export`,
+    `unset`, `local`, `set -e`, `shift`, `trap`, `printf`, `eval`, `source`, `cd`, `:`, …
+  - **Redirects:** `<`, `>`, `>>`, `2>&1`, `/dev/null` (externals stream via a kernel
+    stdio plan; builtins/compounds buffer in JS).
+  - Covered by `tools/shell-interp.test.js` (drives the interpreter through the real
+    Rust wasm parser) and browser cases in `tools/shell.test.js`.
 - **Synchronous syscall channel** (`sync-syscall.js`) — a per-process
   SharedArrayBuffer request/response slot (ADR-010/-016). A program worker writes a
   blocking syscall, signals the kernel worker, and parks in `Atomics.wait`; the

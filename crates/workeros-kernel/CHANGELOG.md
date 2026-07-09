@@ -27,6 +27,13 @@ a release yet, so everything lives under **Unreleased**.
 - **`wsh` planning** — the shell parser and glob expansion live here (the `shell`
   module): command lines lower to an execution plan the host merely orchestrates,
   keeping INV-2 (the shell's logic is Rust).
+- **`wsh` script grammar** (`shell/script_{ast,lexer,parser}.rs`) — the full
+  bash-subset parser behind the JS interpreter: expansion-aware words (`$x`,
+  `${…}`, `$(…)`, `$(( … ))`, quoting), compound commands (`if`/`for`/`while`/
+  `until`/`case`, brace groups, subshells), functions, and redirections incl.
+  `2>&1`. `parse_script` returns an AST that serializes itself to JSON (the crate
+  stays dependency-free); the host walks it. Keeps the grammar kernel-owned and
+  native-tested (ADR-012).
 - **Capability sets** — the kernel is the sole authority for granting
   capabilities to guests.
 - **Ring-buffer transport** (`ringbuf`) for host↔kernel byte streams.

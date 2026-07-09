@@ -22,6 +22,9 @@ No release cut yet — see **Unreleased**.
 - **`shell_plan`** — parse a `wsh` command line and expand globs in Rust,
   returning the execution plan (pipes, redirects, `&&`/`||`/`;`, background) for
   the host to orchestrate.
+- **`shell_parse(src)`** — parse a whole script into the rich bash-subset AST
+  (returned as a JSON string) that the JS interpreter walks; keeps the shell
+  grammar in Rust while the host drives the async execution it can't.
 - **Marshaling** via `serde-wasm-bindgen` for structured values across the
   boundary.
 - Built with `wasm-pack --target web`; `cdylib` + `rlib` crate types.
