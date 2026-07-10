@@ -1177,16 +1177,16 @@ function overlayBox(title, lines, footer) {
 // ^G: a two-column keybinding cheat-sheet, dismissed by any key.
 async function showShortcuts() {
   const SC = [
-    ["^O", "Write Out"], ["^R", "Insert File"],
-    ["^W", "Where Is"], ["^\\", "Replace"],
+    ["^O", "Write Out"], ["^P", "Open File"],
+    ["^R", "Insert File"], ["^W", "Where Is"],
+    ["^\\", "Replace"], ["^_", "Go To Line"],
     ["^6", "Mark"], ["M-6", "Copy"],
     ["^K", "Cut"], ["^U", "Paste"],
     ["M-U", "Undo"], ["M-E", "Redo"],
-    ["^_", "Go To Line"], ["^C", "Cursor Pos"],
-    ["M-y", "Syntax"], ["M-t", "Indent"],
+    ["^C", "Cursor Pos"], ["M-y", "Syntax"],
+    ["M-t", "Indent"], ["M-p", "Command Palette"],
     ["M-n", "Line Numbers"], ["M-i", "Auto-indent"],
-    ["M-$", "Soft Wrap"], ["M-p", "Command Palette"],
-    ["^X", "Exit"],
+    ["M-$", "Soft Wrap"], ["^X", "Exit"],
   ];
   const cell = ([k, l]) => (k ? fit(k, 4) + l : "");
   const lines = [];
@@ -1200,6 +1200,7 @@ async function showShortcuts() {
 function paletteCommands() {
   return [
     { name: "Save", run: () => writeOut() },
+    { name: "Open File…", run: async () => { const p = await fileFinder(); if (p) await openPath(p); } },
     { name: "Insert File", run: () => insertFile() },
     { name: "Find", run: () => search() },
     { name: "Replace", run: () => replace() },
@@ -1229,6 +1230,101 @@ function fuzzyFilter(items, q) {
     return true;
   });
 }
+// Subsequence match score for the file finder: the span (last−first match index)
+// so more contiguous matches rank first; -1 when `q` isn't a subsequence of `s`.
+export function subseqScore(s, q) {
+  let i = 0, first = -1, last = -1;
+  for (const ch of q) {
+    i = s.indexOf(ch, i);
+    if (i < 0) return -1;
+    if (first < 0) first = i;
+    last = i;
+    i += 1;
+  }
+  return last - first;
+}
+// Rank paths against a query: basename matches beat full-path matches, then more
+// contiguous, then shorter. Empty query keeps input order. Pure (for unit tests).
+export function rankPaths(paths, q) {
+  if (!q) return paths.slice();
+  const ql = q.toLowerCase();
+  const scored = [];
+  for (const p of paths) {
+    const base = p.slice(p.lastIndexOf("/") + 1).toLowerCase();
+    const b = subseqScore(base, ql);
+    const f = subseqScore(p.toLowerCase(), ql);
+    if (b < 0 && f < 0) continue;
+    const score = b >= 0 ? b : f + 10000; // strong bonus for basename hits
+    scored.push([score, p]);
+  }
+  scored.sort((a, z) => a[0] - z[0] || a[1].length - z[1].length);
+  return scored.map((x) => x[1]);
+}
+
+// Recursively collect file paths under `root` for the finder, skipping heavy dirs
+// and capping the count so a huge tree can't stall the (single-threaded) browser.
+async function collectFiles(root) {
+  const SKIP = new Set(["node_modules", ".git"]);
+  const LIMIT = 4000;
+  const out = [];
+  const stack = [root];
+  while (stack.length && out.length < LIMIT) {
+    const dir = stack.pop();
+    let entries;
+    try { entries = await sys.readdir(dir); } catch { continue; }
+    for (const e of entries) {
+      if (e.name === "." || e.name === "..") continue;
+      const full = joinPath(dir, e.name);
+      if (e.is_dir) { if (!SKIP.has(e.name)) stack.push(full); }
+      else if (out.push(full) >= LIMIT) break;
+    }
+  }
+  return out;
+}
+
+// ^P: fuzzy "go to file" from the cwd. Returns the chosen absolute path, or null.
+async function fileFinder() {
+  const root = abs(sys.cwd || "/");
+  const prefix = root === "/" ? "/" : root + "/";
+  const files = (await collectFiles(root)).map((f) => (f.startsWith(prefix) ? f.slice(prefix.length) : f));
+  if (files.length === 0) { setMsg("No files found"); return null; }
+  let q = "", sel = 0;
+  const matchesNow = () => rankPaths(files, q);
+  const draw = () => {
+    const m = matchesNow();
+    if (sel >= m.length) sel = Math.max(0, m.length - 1);
+    const rows = m.slice(0, 8).map((p, i) => (i === sel ? "› " : "  ") + p);
+    refresh();
+    write(overlayBox("Open File", [`> ${q}`].concat(rows.length ? rows : ["  (no matches)"])));
+  };
+  promptRedraw = draw;
+  try {
+    for (;;) {
+      draw();
+      const k = await nextKey();
+      if (k.key === "esc" || k.ctrl === "C") return null;
+      if (k.key === "enter") { const p = matchesNow()[sel]; return p ? prefix + p : null; }
+      else if (k.key === "up") sel = Math.max(0, sel - 1);
+      else if (k.key === "down") sel += 1;
+      else if (k.key === "backspace") { q = q.slice(0, -1); sel = 0; }
+      else if (k.char && k.char !== "\t") { q += k.char; sel = 0; }
+    }
+  } finally {
+    promptRedraw = null;
+  }
+}
+
+// Open a file into the (single) buffer, prompting to save unsaved changes first.
+async function openPath(path) {
+  if (dirty) {
+    const ans = await promptYesNo("Save modified buffer?");
+    if (ans === null) { setMsg("Cancelled"); return; }
+    if (ans === true && !(await saveFile(filename))) return;
+  }
+  await loadFile(path); // re-detects language + indentation, resets the hl cache
+  cy = 0; cx = 0; rowoff = 0; coloff = 0; mark = null; dirty = false;
+}
+
 // M-p: a fuzzy command palette. Returns the chosen command, or null if cancelled.
 async function commandPalette() {
   const all = paletteCommands();
@@ -1551,6 +1647,7 @@ async function main() {
           case "X": if (await tryExit()) return; break; // finally restores the TTY
           case "O": await writeOut(); break;
           case "R": await insertFile(); break; // read a file into the buffer
+          case "P": { const p = await fileFinder(); if (p) await openPath(p); break; } // fuzzy go-to-file
           case "W": await search(); break;
           case "\\": await replace(); break; // ^\ : search & replace
           case "^": toggleMark(); break; // ^6 : set/clear the selection mark

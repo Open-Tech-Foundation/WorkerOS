@@ -8,6 +8,12 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`nano` fuzzy file finder** (`^P`, Ctrl-P "go to file"). Recursively scans the
+  cwd (skipping `node_modules`/`.git`, capped at 4k files) and offers a fuzzy-ranked
+  picker — basename matches beat path matches, more contiguous and shorter paths
+  first. Picking a file loads it into the (single) buffer, prompting to save first if
+  there are unsaved changes, and re-runs language + indentation detection. Reuses the
+  command-palette overlay/loop; also available as "Open File…" in the palette.
 - **`nano` modernized chrome** (VSCode-style). The two always-on shortcut bars and
   the separate message bar are replaced by a **single status bar** on the last row:
   a transient message / discoverability hint on the left, and `Ln, Col` · indent ·

@@ -27,6 +27,8 @@ import {
   detectLang,
   tokenizeLine,
   detectIndent,
+  rankPaths,
+  subseqScore,
 } from "../src/nano/nano-program.js";
 
 const cp = (s) => s.codePointAt(0);
@@ -234,4 +236,29 @@ test("detectIndent: spaces (size), tabs, and no-evidence", () => {
   assert.deepEqual(detectIndent(["func f() {", "\treturn 1", "\tif x {", "\t\ty()"]), { expandTab: false, size: null });
   assert.equal(detectIndent(["no", "indent", "here"]), null); // no evidence → caller keeps default
   assert.equal(detectIndent([""]), null);
+});
+
+test("subseqScore: contiguous matches score lower; non-match is -1", () => {
+  assert.equal(subseqScore("nano-program", "nano"), 3); // n..o span 0→3
+  assert.equal(subseqScore("n-a-n-o", "nano"), 6); // same chars, more spread out
+  assert.equal(subseqScore("readme", "xyz"), -1); // not a subsequence
+});
+
+test("rankPaths: basename hits beat path hits; contiguous & shorter first", () => {
+  const files = [
+    "src/nano/nano-program.js",
+    "src/node/node-program.js",
+    "tools/nano.test.js",
+    "src/other/nano/x.js", // only the directory matches "nano"
+    "README.md",
+  ];
+  // Both basename hits rank above the path-only hit; shorter path breaks the tie.
+  assert.deepEqual(rankPaths(files, "nano"), [
+    "tools/nano.test.js",
+    "src/nano/nano-program.js",
+    "src/other/nano/x.js",
+  ]);
+  assert.deepEqual(rankPaths(files, "nanoprog"), ["src/nano/nano-program.js"]);
+  assert.deepEqual(rankPaths(files, "zzz"), []); // no matches
+  assert.deepEqual(rankPaths(files, ""), files); // empty query keeps order
 });

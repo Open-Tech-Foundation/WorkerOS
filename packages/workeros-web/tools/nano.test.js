@@ -372,6 +372,45 @@ test("nano: mark (^6) + copy (M-6) + paste (^U) duplicates a selection", opts, a
   assert.equal(buf.saved, "hello world\nhello world\n", "the copied selection was pasted on the new line");
 });
 
+test("nano: ^P fuzzy file finder opens the picked file into the buffer", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    // A few files in the cwd tree for the finder to discover.
+    await os.fs.write("/proj/alpha.txt", "ALPHA CONTENTS\n");
+    await os.fs.write("/proj/sub/beta.js", "const beta = 1;\n");
+    await os.fs.write("/proj/readme.md", "# readme\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("cd /proj\r");
+    await sleep(120);
+    os.input("nano alpha.txt\r"); // start on alpha.txt
+    await waitFor("ALPHA CONTENTS");
+    os.input("\x10"); // ^P open the finder
+    await waitFor("Open File");
+    os.input("beta"); // fuzzy → proj/sub/beta.js
+    await sleep(150);
+    const listedBeta = out.includes("beta.js");
+    os.input("\r"); // open it
+    await waitFor("beta = "); // beta.js content now in the buffer (plain span, survives highlighting)
+    await sleep(80);
+    const openedBeta = out.includes("beta = ");
+    os.input("\x18"); await sleep(100); // clean buffer → exits
+    return { listedBeta, openedBeta };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.listedBeta, true, "the finder listed the fuzzy-matched file");
+  assert.equal(buf.openedBeta, true, "picking it loaded that file into the buffer");
+});
+
 test("nano: status bar shows Ln/Col, language, and EOL segments", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();
