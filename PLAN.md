@@ -162,6 +162,25 @@ The goal is that **real npm packages and their bins run on the host JS engine** 
 
 ---
 
+## Phase 8 — Resource limits & fault isolation · [post-MVP] · [INV-6, ADR-020] · 🚧 accounting caps done
+
+**Goal:** No guest can exhaust or wedge the instance. Bound every resource; contain every fault. This is the quantitative half of the sandbox (§7.2) that the **embedding** and **untrusted / AI-generated code** use cases (§2) depend on — the `Membrane` level (Phase 7) denies *capabilities*, this caps *consumption*. Orderable independently and **worth pulling ahead of Phases 4–7 for any deployment that runs untrusted code**, since the accounting guards are cheap and the DoS surface is live today.
+
+- **`ResourceLimits` in the kernel** (`workeros-kernel/limits.rs`, Rust, natively tested) **✅** — a policy set on the `Kernel`, granted per instance; `Kernel::boot_with_limits` is the seam the host-override API (below) will call. Hardcoded to `RECOMMENDED` in v1. Per-process-tree inheritance (a `ResourceUsage` rollup a child charges to its ancestors) is the additive next step.
+- **Accounting caps (kernel-authoritative) — ✅ implemented with recommended v1 values:**
+  - Process count — cap on *live* (non-zombie) processes in `Kernel::spawn` → `SpawnError::LimitExceeded` (`EAGAIN`). **Default 128.** Fork-bomb guard; also keeps spawns under the browser's real concurrent-worker ceiling.
+  - Open fds/pipes — per-process cap in `ProcessCtx::alloc_fd` → `EMFILE`. **Default 256** (incl. stdio). fd/pipe-bomb guard.
+  - VFS storage — total-byte + inode quota in `MemVfs::write_at` / `alloc` (released on truncate/unlink/rmdir) → `ENOSPC`. **Defaults 256 MiB / 100k inodes.** Disk-fill guard; bounds the eventual IndexedDB footprint (Phase 7).
+- **Temporal caps (kernel-worker watchdog, host-side — the only agent with a clock + `terminate()`) — ⏳ pending.** Recommended values are declared kernel-side (`limits::WATCHDOG`) as the single source of truth the watchdog mirrors:
+  - CPU/wall-time budget (**30s**) + idle timeout per process; on breach, cooperative signal → grace → `worker.terminate()` (generalizes the existing `Ctrl-C` two-phase hard-kill).
+  - Memory high-water ceiling (**512 MiB**) via `performance.measureUserAgentSpecificMemory()` sampling (available under the ADR-010 cross-origin isolation) → `terminate()`, exit `137`. **Soft/sampled, documented as such** (INV-5).
+- **Fault containment (all stop-paths reap through one seam) — ⏳ partly (ordinary exit + cooperative kill already close IO + restore TTY):** guest crash (`worker.onerror`) reaps + unblocks downstream pipes + restores TTY like an exit; **kill reason** recorded on the process record (`Killed (out of memory)` / `Killed (CPU time)`) so `ps`/`wait`/the shell report an honest *why*; bounded `Atomics.wait` on the SAB path so a lost kernel reply can't hang a WASI guest; kernel-worker crash surfaced to the client as fatal (reboot).
+- **Host-override API — ⏳ post-v1.** Expose `boot_with_limits` (and later a per-process override inherited by children) through the wasm bindings + client API so an embedder can raise/lower any cap; ship a generous `Full`-level default and a tight untrusted/AI-agent profile.
+
+**Exit criteria:** a fork-bomb (`while true; do spawn & done`-shaped) hits the process cap with `EAGAIN` instead of killing the tab **✅**; filling the VFS past quota returns `ENOSPC` **✅**; a process exhausting its fd budget gets `EMFILE` **✅**; a synchronous infinite-loop process is reaped by the time watchdog with a `Killed (CPU time)` reason and does not freeze the kernel or siblings ⏳; a runaway allocator is `terminate()`d at the memory ceiling and reaps as `137` ⏳; a crashing guest reaps deterministically and its downstream pipe reader sees EOF ⏳. Accounting caps proven in native `cargo test` **✅** (`process_count_cap_refuses_forkbomb`, `open_fd_cap_returns_emfile_and_frees_on_close`, `byte_quota_*`/`inode_quota_*`); the two watchdog limits to be proven in a headless-browser test.
+
+---
+
 ## Deferred / explicitly out of scope
 
 - Raw TCP/UDP, real DNS, `net`/`dgram` (ADR-008).
@@ -183,3 +202,4 @@ The goal is that **real npm packages and their bins run on the host JS engine** 
 | **M4 — WASM apps** | 4 | Unmodified WASI binaries + WASM-library build step + PGlite as processes — 🚧 wasm32-wasip1 runs with stdio/exit + VFS reads + blocking stdin (sync-syscall channel done); esbuild-wasm build step proven as a spike but deferred to the `npm`+`node` path (Node compat); PGlite + off-the-shelf CLI pending |
 | **M5 — Ecosystem** | 5–6 | npm install + Vite dev preview — 🚧 `npm` registry install + `node` CommonJS `require` done; Node-compat pending (sync `fs` / `node:` builtins / ESM `node_modules` / bin-linking+PATH — see Phase 5), preview + lockfiles pending |
 | **M6 — Durable & hardened** | 7 | Persistence + membrane isolation |
+| **M7 — Bounded & contained** | 8 | Resource limits + deterministic fault reaping — INV-6/ADR-020 (pull ahead of M4–M6 for untrusted-code deployments) — 🚧 kernel accounting caps done (proc 128 / fd 256 / VFS 256 MiB · 100k inodes, native-tested); host memory/CPU-time watchdog + fault-path reaping + host-override API pending |

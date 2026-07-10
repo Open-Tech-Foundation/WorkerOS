@@ -7,6 +7,9 @@ No release cut yet — see **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **`SpawnError::LimitExceeded` → JS** — `spawn_err_to_js` maps the kernel's new
+  process-count-cap refusal (INV-6/ADR-020) to an `EAGAIN`-shaped error, so a host
+  that hits the fork-bomb guard surfaces it honestly.
 - **TTY bindings** — expose the kernel's terminal device to the host:
   `tty_input(data)` (returns `{ echo, signal? }`), `tty_read_line()`,
   `isatty(pid, fd)`, `tty_get_attr`/`tty_set_attr` (termios: `canonical`/`echo`/

@@ -121,6 +121,16 @@ impl ProcessTable {
         self.procs.len()
     }
 
+    /// Number of *live* (non-zombie) processes — the figure the process-count cap
+    /// checks (ADR-020). A zombie awaiting reap holds no worker, so it does not
+    /// count against the fork-bomb budget.
+    pub fn live_count(&self) -> usize {
+        self.procs
+            .values()
+            .filter(|p| p.state != ProcState::Zombie)
+            .count()
+    }
+
     /// Whether the table is empty.
     pub fn is_empty(&self) -> bool {
         self.procs.is_empty()

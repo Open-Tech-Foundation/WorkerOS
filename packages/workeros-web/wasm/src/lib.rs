@@ -664,5 +664,9 @@ fn spawn_err_to_js(e: SpawnError) -> JsError {
     match e {
         SpawnError::NoEntry => JsError::new("spawn: argv names no runnable entry"),
         SpawnError::Resolve(re) => JsError::new(&format!("spawn: {re:?}")),
+        // EAGAIN (6): the process-count cap is exhausted (ADR-020).
+        SpawnError::LimitExceeded => {
+            JsError::new("spawn: resource limit reached (errno EAGAIN (6))")
+        }
     }
 }

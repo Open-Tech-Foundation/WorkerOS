@@ -6,6 +6,20 @@ a release yet, so everything lives under **Unreleased**.
 
 ## [Unreleased]
 
+### Added
+- **Resource limits — kernel accounting caps (`limits` module; INV-6/ADR-020).**
+  Bounds the runaway cases that would take down the tab. A **live-process cap**
+  (default 128, excludes zombies) refuses fork-bombs in `Kernel::spawn`
+  (`SpawnError::LimitExceeded`, guest-ABI `EAGAIN`); a **per-process open-fd cap**
+  (default 256, incl. stdio) returns `EMFILE` from `ProcessCtx::alloc_fd`; a **VFS
+  storage quota** (default 256 MiB + 100k inodes, released on truncate/unlink/rmdir)
+  returns `ENOSPC` from `MemVfs::write_at`/`alloc`. The caps are a generous safety
+  ceiling, not a tight quota, and are hardcoded to `ResourceLimits::RECOMMENDED` for
+  v1; `Kernel::boot_with_limits` is the seam a post-v1 host-override API will call.
+  Recommended temporal caps (30s wall-time, 512 MiB memory) are declared in
+  `limits::WATCHDOG` for the pending host-side watchdog. New errnos `Again` (6) and
+  `Nospc` (51); `ProcessTable::live_count`.
+
 ### Fixed
 - **TTY line discipline drops stray control bytes.** In canonical mode the cooked
   line now ignores unhandled control characters (`< 0x20`, DEL) and swallows whole

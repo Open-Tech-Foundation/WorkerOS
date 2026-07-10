@@ -11,6 +11,9 @@
 pub enum Errno {
     /// No error occurred.
     Success = 0,
+    /// Resource temporarily unavailable — e.g. a spawn refused by the
+    /// process-count cap (POSIX `fork` under `RLIMIT_NPROC`). (ADR-020)
+    Again = 6,
     /// Bad file descriptor.
     Badf = 8,
     /// File exists.
@@ -25,6 +28,8 @@ pub enum Errno {
     Nametoolong = 37,
     /// No such file or directory.
     Noent = 44,
+    /// No space left on device — the VFS byte or inode quota is exhausted. (ADR-020)
+    Nospc = 51,
     /// Not a directory or a symbolic link to a directory.
     Notdir = 54,
     /// Directory not empty.

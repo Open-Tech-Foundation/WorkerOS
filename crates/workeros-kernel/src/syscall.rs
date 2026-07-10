@@ -182,6 +182,9 @@ pub struct ProcessCtx {
     pub caps: CapabilitySet,
     fds: BTreeMap<Fd, Handle>,
     next_fd: Fd,
+    /// Cap on concurrently-open fds (incl. stdio), the `RLIMIT_NOFILE` analog
+    /// (ADR-020). Set from the kernel's [`ResourceLimits`](crate::limits) at spawn.
+    max_open_fds: usize,
     /// Bytes the guest wrote to a *terminal* stdout; the host drains these.
     pub stdout: Vec<u8>,
     /// Bytes the guest wrote to a *terminal* stderr.
@@ -200,6 +203,7 @@ impl ProcessCtx {
         env: Vec<(String, String)>,
         cwd: String,
         caps: CapabilitySet,
+        max_open_fds: usize,
     ) -> Self {
         let mut fds = BTreeMap::new();
         fds.insert(FD_STDIN, Handle::Stdin);
@@ -213,6 +217,7 @@ impl ProcessCtx {
             caps,
             fds,
             next_fd: FIRST_FILE_FD,
+            max_open_fds,
             stdout: Vec::new(),
             stderr: Vec::new(),
             stdin: VecDeque::new(),
@@ -220,11 +225,17 @@ impl ProcessCtx {
         }
     }
 
-    fn alloc_fd(&mut self, handle: Handle) -> Fd {
+    /// Allocate the next fd for `handle`, enforcing the per-process open-fd cap
+    /// (ADR-020). Returns `EMFILE` when the process already holds `max_open_fds`
+    /// descriptors (stdio included).
+    fn alloc_fd(&mut self, handle: Handle) -> SysResult<Fd> {
+        if self.fds.len() >= self.max_open_fds {
+            return Err(Errno::Mfile);
+        }
         let fd = self.next_fd;
         self.next_fd += 1;
         self.fds.insert(fd, handle);
-        fd
+        Ok(fd)
     }
 
     /// Resolve a guest path against cwd, normalize, and confine to `fs_root`.
@@ -282,7 +293,7 @@ impl ProcessCtx {
             FileType::Dir => Handle::Dir { ino },
             FileType::File => Handle::File { ino, cursor: 0 },
         };
-        Ok(self.alloc_fd(handle))
+        self.alloc_fd(handle)
     }
 
     pub fn path_create_directory(&mut self, vfs: &mut dyn Vfs, path_arg: &str) -> SysResult<()> {
@@ -544,6 +555,7 @@ mod tests {
             vec![("HOME".into(), "/home".into())],
             "/".into(),
             CapabilitySet::default(),
+            crate::limits::RECOMMENDED.max_open_fds,
         )
     }
 
@@ -567,6 +579,24 @@ mod tests {
         p.fd_close(&mut vfs, &mut pipes, fd).unwrap();
 
         assert_eq!(vfs.stat("/notes.txt").unwrap().size, 11);
+    }
+
+    #[test]
+    fn open_fd_cap_returns_emfile_and_frees_on_close() {
+        let mut vfs = MemVfs::new();
+        let mut pipes = PipeTable::new();
+        // Cap = 5: the three stdio fds + two files. The third open must fail.
+        let mut p =
+            ProcessCtx::new(1, vec![], vec![], "/".into(), CapabilitySet::default(), 5);
+        let open = |p: &mut ProcessCtx, vfs: &mut MemVfs, name: &str| {
+            p.path_open(vfs, name, OpenOptions { create: true, ..Default::default() })
+        };
+        let fd_a = open(&mut p, &mut vfs, "/a").unwrap();
+        let _fd_b = open(&mut p, &mut vfs, "/b").unwrap();
+        assert_eq!(open(&mut p, &mut vfs, "/c").unwrap_err(), Errno::Mfile);
+        // Closing a descriptor frees a slot, so the next open succeeds.
+        p.fd_close(&mut vfs, &mut pipes, fd_a).unwrap();
+        assert!(open(&mut p, &mut vfs, "/c").is_ok());
     }
 
     #[test]
@@ -620,9 +650,11 @@ mod tests {
         let mut pipes = PipeTable::new();
         let id = pipes.open();
 
-        let mut writer = ProcessCtx::new(1, vec![], vec![], "/".into(), CapabilitySet::default());
+        let mut writer =
+            ProcessCtx::new(1, vec![], vec![], "/".into(), CapabilitySet::default(), 256);
         writer.bind_stdio_pipe(&mut pipes, FD_STDOUT, id, PipeEnd::Write);
-        let mut reader = ProcessCtx::new(2, vec![], vec![], "/".into(), CapabilitySet::default());
+        let mut reader =
+            ProcessCtx::new(2, vec![], vec![], "/".into(), CapabilitySet::default(), 256);
         reader.bind_stdio_pipe(&mut pipes, FD_STDIN, id, PipeEnd::Read);
 
         let mut buf = [0u8; 16];
@@ -749,7 +781,7 @@ mod tests {
             fs_root: "/home/user".into(),
             ..Default::default()
         };
-        let mut p = ProcessCtx::new(1, vec![], vec![], "/home/user".into(), caps);
+        let mut p = ProcessCtx::new(1, vec![], vec![], "/home/user".into(), caps, 256);
         p.path_open(&mut vfs, "file", OpenOptions { create: true, ..Default::default() }).unwrap();
         assert_eq!(
             p.path_open(&mut vfs, "../../etc", OpenOptions::default()).unwrap_err(),

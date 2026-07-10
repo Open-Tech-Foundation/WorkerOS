@@ -56,6 +56,7 @@ These constraints are load-bearing. Violating any of them collapses WorkerOS bac
 - **INV-3 — WASI is the floor, `otf:*` is the ceiling.** Anything WASI Preview 1 can express is done with WASI (so unmodified `wasm32-wasi` binaries run). Custom `otf:*` calls exist **only** where WASI has no primitive.
 - **INV-4 — Every process is a real, killable process.** A process is backed by its own worker; it can run in parallel and be terminated externally. No "fake" cooperative-only processes in the core model.
 - **INV-5 — Honest surface.** Where a capability cannot be truly provided (sockets, native addons), it is either absent or explicitly a documented simulation — never a silent lie.
+- **INV-6 — Bounded & contained.** Every process runs under an explicit resource budget (processes, fds, memory, CPU-time, storage), and every fault (guest crash, kill, lost syscall reply) reaps deterministically without wedging the kernel or leaking the resource. A guest can fail; it cannot take down the instance. (§7.2, ADR-020.)
 
 ---
 
@@ -189,6 +190,33 @@ Execution sits behind one trait with a selectable trust level (implementation- o
 
 Per-process worker isolation (memory + `terminate()`) applies at **all** levels. The membrane adds capability denial (no ambient `fetch`, `postMessage`, prototypes); the future WASM engine adds true linear-memory containment. None of these defend against Spectre-class side channels — that requires native/server-tier V8 isolates, which is a *different product* (see §12).
 
+### 7.2 Resource limits & fault isolation (INV-6)
+
+Isolation (§7.1) is *qualitative* — which capabilities a guest holds. Limits are the *quantitative* half: how much of each resource it may consume, and what happens when a process faults. Together they are the "safe sandbox" the AI-agent and embedding use cases (§2) depend on. A guest with no ambient `fetch` that can still fork-bomb the tab is not sandboxed.
+
+**The ownership split (the load-bearing decision, ADR-020).** Limits divide by what the wasm kernel *can* do. The kernel has no wall clock and no handle on the workers, so it owns the **accounting** limits (pure bookkeeping, natively `cargo test`-able) while the **kernel worker** (JS, ADR-016) — the only agent with a clock and `worker.terminate()` — owns the two **temporal** ones. The host still decides no policy: the kernel owns the numbers; the host reports breaches back.
+
+| Resource | Cap (v1 default) | Owner | On breach | Enforcement seam | Status |
+|----------|-----|-------|-----------|------------------|--------|
+| Processes (fork-bomb) | 128 live procs | **kernel** (Rust) | `EAGAIN` | `Kernel::spawn` | ✅ |
+| Open fds / pipes | 256 / process | **kernel** (Rust) | `EMFILE` | `ProcessCtx::alloc_fd` | ✅ |
+| VFS storage | 256 MiB · 100k inodes | **kernel** (Rust) | `ENOSPC` | `MemVfs::write_at`/`alloc` | ✅ |
+| CPU / wall time | 30s + idle | **kernel worker** (JS watchdog) | cooperative signal → `terminate()` | liveness heartbeat sampling | ⏳ |
+| Memory | 512 MiB high-water | **kernel worker** (JS watchdog) | `terminate()`, exit `137` | `measureUserAgentSpecificMemory()` sampling | ⏳ |
+
+The recommended values live in one place — `workeros-kernel/limits.rs` (`RECOMMENDED` for the kernel-enforced caps, `WATCHDOG` for the temporal ones the host mirrors). They are hardcoded in v1; `Kernel::boot_with_limits` is the seam a post-v1 host-override API calls. The three kernel-authoritative caps are implemented and native-tested; the two host-side watchdog limits and the fault-path kill-reason plumbing are pending (PLAN Phase 8).
+
+**Policy object.** A `ResourceLimits` set is granted at spawn alongside the `CapabilitySet` (§7.1 is *what*; this is *how much*) and is **inherited by children** — a descendant's usage counts against its ancestors' budgets, so a whole process tree is bounded, not just a single pid. A `ResourceUsage` counter set is maintained on every spawn / reap / fd-alloc / VFS write. Two default profiles: a generous one for the trusted `Full` level, and a tight one for the untrusted / AI-agent profile (paired with the `Membrane` level).
+
+**Fault paths.** Every way a process can stop reaps through one seam so nothing wedges or leaks:
+- **Ordinary exit / cooperative kill** — already handled: `mark_exited` closes IO fds (EOF downstream) and the host restores the TTY.
+- **Guest crash** (`worker.onerror` / uncaught throw) — reaps with a distinguished fault code, unblocks downstream pipe readers, restores the TTY, same as an exit.
+- **Limit kill** — the watchdog delivers a cooperative signal first, then hard-`terminate()`s after a grace period (the two-phase the `Ctrl-C` path already uses), recording a **kill reason** (`Killed (out of memory)` / `Killed (CPU time)`) so `ps`/`wait`/the shell report an honest *why*.
+- **Lost syscall reply** — a WASI guest blocked in `Atomics.wait` on the SAB path (§6.3) uses a bounded wait so a dead kernel-side reply can't hang it forever; a dead program worker is detected by the watchdog and reaped.
+- **Kernel-worker crash** — the one unrecoverable fault (the authoritative wasm state is gone): surfaced to the main-thread client as fatal, which may reboot the instance.
+
+**Honest surface (INV-5).** The memory ceiling is a *soft, sampled* high-water mark, not a hard allocator limit — a single synchronous huge allocation can still OOM the tab between samples; a hard cap arrives only with the future `Wasm`/Boa level (§7.1). Time enforcement is cooperative-first, not preemptive time-slicing (the browser schedules workers; WorkerOS caps *concurrency*, it does not time-slice). Quotas are per-session until persistence (§9) gives them a durable home. See ADR-020.
+
 ---
 
 ## 8. Networking model (load-bearing section)
@@ -247,5 +275,6 @@ Named e.g. `wsh`. Documented explicitly as **not** bash-compatible, only bash-fl
 5. Node is a guest layer, kernel is Node-agnostic.
 6. Servers are Service-Worker simulations; no raw sockets.
 7. Isolation is a policy knob (Full / Membrane / Wasm-later); never claimed Spectre-proof.
+8. Every process is bounded and every fault is contained (INV-6): the kernel accounts proc/fd/storage caps (Rust, natively tested), the kernel worker enforces memory/CPU-time via a sampling watchdog + `terminate()`.
 
 See `DECISIONS.md` for the rationale trail behind each.

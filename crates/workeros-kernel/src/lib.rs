@@ -17,6 +17,7 @@
 
 pub mod caps;
 pub mod errno;
+pub mod limits;
 pub mod process;
 pub mod resolver;
 pub mod ringbuf;
@@ -27,6 +28,7 @@ pub mod vfs;
 
 use caps::CapabilitySet;
 use errno::{Errno, SysResult};
+use limits::ResourceLimits;
 use process::{Pid, ProcState, SpawnRequest};
 use resolver::{Interpreter, ModuleGraph, ResolveError, DEFAULT_PATH};
 use std::collections::BTreeMap;
@@ -84,6 +86,10 @@ pub enum SpawnError {
     NoEntry,
     /// The entry or one of its imports could not be resolved.
     Resolve(ResolveError),
+    /// The process-count cap ([`ResourceLimits::max_procs`]) is exhausted; the
+    /// guest ABI equivalent is `EAGAIN` (POSIX `fork` under `RLIMIT_NPROC`,
+    /// ADR-020).
+    LimitExceeded,
 }
 
 /// Where one of a process's stdio descriptors is connected at spawn time.
@@ -155,18 +161,30 @@ pub struct Kernel {
     /// The single controlling terminal: line discipline, termios, and winsize.
     /// Every process whose stdin is the terminal (`Inherit`) reads from here.
     tty: Tty,
+    /// The resource caps this instance enforces (INV-6, ADR-020). Hardcoded to
+    /// [`ResourceLimits::default`] in v1; a host-override API is post-v1.
+    limits: ResourceLimits,
 }
 
 impl Kernel {
-    /// Boot the kernel and produce the version handshake.
+    /// Boot the kernel (recommended resource caps) and produce the version
+    /// handshake.
     pub fn boot() -> (Self, Handshake) {
+        Self::boot_with_limits(ResourceLimits::default())
+    }
+
+    /// Boot with explicit resource caps (INV-6, ADR-020). `boot()` uses the
+    /// recommended defaults; this is the seam the post-v1 host-override API will
+    /// call to raise or lower the caps per instance.
+    pub fn boot_with_limits(limits: ResourceLimits) -> (Self, Handshake) {
         (
             Kernel {
-                vfs: vfs::MemVfs::new(),
+                vfs: vfs::MemVfs::with_limits(limits.vfs_max_bytes, limits.vfs_max_inodes),
                 processes: process::ProcessTable::new(),
                 contexts: BTreeMap::new(),
                 pipes: PipeTable::new(),
                 tty: Tty::new(),
+                limits,
             },
             Handshake {
                 version: VERSION,
@@ -191,6 +209,12 @@ impl Kernel {
         ppid: Pid,
         plan: StdioPlan,
     ) -> Result<Spawned, SpawnError> {
+        // Fork-bomb guard (INV-6/ADR-020): refuse once the live-process cap is
+        // reached, before doing any resolution work. `EAGAIN`-shaped, like POSIX
+        // `fork` under `RLIMIT_NPROC`.
+        if self.processes.live_count() >= self.limits.max_procs {
+            return Err(SpawnError::LimitExceeded);
+        }
         let inv = resolver::resolve_invocation(&self.vfs, &cwd, &argv, DEFAULT_PATH)
             .map_err(SpawnError::Resolve)?;
         let graph = resolver::resolve_graph(&self.vfs, &inv.entry).map_err(SpawnError::Resolve)?;
@@ -202,7 +226,7 @@ impl Kernel {
             start_time,
             caps: caps.clone(),
         });
-        let mut ctx = ProcessCtx::new(pid, argv, env, cwd, caps);
+        let mut ctx = ProcessCtx::new(pid, argv, env, cwd, caps, self.limits.max_open_fds);
         // Apply the stdio plan (redirects / pipe ends). A binding failure (e.g. a
         // missing input file) fails the spawn cleanly.
         if let Err(e) = Self::apply_stdio(&mut ctx, &mut self.vfs, &mut self.pipes, &plan) {
@@ -605,6 +629,38 @@ mod tests {
         assert_eq!(spawned.graph.entry, "/proj/main.js");
         assert_eq!(spawned.graph.modules.len(), 2);
         assert!(k.processes.contains(spawned.pid));
+    }
+
+    fn try_spawn_main(k: &mut Kernel) -> Result<Spawned, SpawnError> {
+        k.spawn(
+            argv(&["js", "main.js"]),
+            vec![],
+            "/".into(),
+            0,
+            CapabilitySet::default(),
+            0,
+            StdioPlan::default(),
+        )
+    }
+
+    #[test]
+    fn process_count_cap_refuses_forkbomb() {
+        // Boot with a tiny cap so the fork-bomb guard is reachable in a unit test.
+        let (mut k, _) = Kernel::boot_with_limits(limits::ResourceLimits {
+            max_procs: 2,
+            ..Default::default()
+        });
+        k.fs_write("/main.js", b"console.log('x')").unwrap();
+
+        let p1 = try_spawn_main(&mut k).unwrap().pid;
+        let _p2 = try_spawn_main(&mut k).unwrap().pid;
+        // Third spawn is over the cap → EAGAIN-shaped refusal, before resolution.
+        assert_eq!(try_spawn_main(&mut k).unwrap_err(), SpawnError::LimitExceeded);
+
+        // A zombie holds no worker, so it must not count against the cap: exiting
+        // p1 (now a zombie, not yet reaped) frees a slot for a new spawn.
+        k.mark_exited(p1, 0);
+        assert!(try_spawn_main(&mut k).is_ok(), "zombie must not count as live");
     }
 
     #[test]

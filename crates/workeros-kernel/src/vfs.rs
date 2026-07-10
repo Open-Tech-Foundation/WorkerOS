@@ -144,6 +144,13 @@ pub struct OpenOptions {
 pub struct MemVfs {
     slots: Vec<Option<Inode>>,
     free: Vec<Ino>,
+    /// Total bytes stored across all files (the `vfs_max_bytes` accounting, ADR-020).
+    used_bytes: u64,
+    /// Live inode count (files + dirs, incl. root) — the `vfs_max_inodes` accounting.
+    inode_count: usize,
+    /// Storage quota: byte and inode ceilings. Breach → `ENOSPC`.
+    max_bytes: u64,
+    max_inodes: usize,
 }
 
 impl Default for MemVfs {
@@ -153,11 +160,24 @@ impl Default for MemVfs {
 }
 
 impl MemVfs {
-    /// A fresh filesystem containing only the root directory `/`.
+    /// A fresh filesystem containing only the root directory `/`, under the
+    /// recommended storage quota ([`crate::limits::RECOMMENDED`]).
     pub fn new() -> Self {
+        let r = crate::limits::RECOMMENDED;
+        Self::with_limits(r.vfs_max_bytes, r.vfs_max_inodes)
+    }
+
+    /// A fresh filesystem with explicit storage caps (ADR-020). The host-override
+    /// path (post-v1) constructs the VFS through here.
+    pub fn with_limits(max_bytes: u64, max_inodes: usize) -> Self {
         MemVfs {
+            // Root is inode 0 and counts against the inode budget.
             slots: vec![Some(Inode::new_dir())],
             free: Vec::new(),
+            used_bytes: 0,
+            inode_count: 1,
+            max_bytes,
+            max_inodes,
         }
     }
 
@@ -174,14 +194,21 @@ impl MemVfs {
             .ok_or(Errno::Badf)
     }
 
-    fn alloc(&mut self, inode: Inode) -> Ino {
-        if let Some(ino) = self.free.pop() {
+    /// Allocate an inode, enforcing the inode quota (ADR-020). Returns `ENOSPC`
+    /// when the filesystem already holds `max_inodes` live inodes.
+    fn alloc(&mut self, inode: Inode) -> SysResult<Ino> {
+        if self.inode_count >= self.max_inodes {
+            return Err(Errno::Nospc);
+        }
+        self.inode_count += 1;
+        let ino = if let Some(ino) = self.free.pop() {
             self.slots[ino] = Some(inode);
             ino
         } else {
             self.slots.push(Some(inode));
             self.slots.len() - 1
-        }
+        };
+        Ok(ino)
     }
 
     /// Resolve a normalized absolute path to an inode, walking from root.
@@ -227,6 +254,11 @@ impl MemVfs {
     fn maybe_reap(&mut self, ino: Ino) {
         if let Some(Some(inode)) = self.slots.get(ino) {
             if inode.nlink == 0 && inode.open_count == 0 && ino != ROOT_INO {
+                // Release this inode's storage from the quota accounting.
+                if let Kind::File { data } = &inode.kind {
+                    self.used_bytes = self.used_bytes.saturating_sub(data.len() as u64);
+                }
+                self.inode_count = self.inode_count.saturating_sub(1);
                 self.slots[ino] = None;
                 self.free.push(ino);
             }
@@ -259,7 +291,7 @@ impl Vfs for MemVfs {
         if self.dir_entries(parent_ino)?.contains_key(name) {
             return Err(Errno::Exist);
         }
-        let ino = self.alloc(Inode::new_dir());
+        let ino = self.alloc(Inode::new_dir())?;
         match &mut self.get_mut(parent_ino)?.kind {
             Kind::Dir { entries } => {
                 entries.insert(name.to_string(), ino);
@@ -364,7 +396,7 @@ impl Vfs for MemVfs {
             Err(Errno::Noent) if opts.create => {
                 let (parent_ino, name) = self.resolve_parent(path)?;
                 path::validate_component(name)?;
-                let ino = self.alloc(Inode::new_file());
+                let ino = self.alloc(Inode::new_file())?;
                 if let Kind::Dir { entries } = &mut self.get_mut(parent_ino)?.kind {
                     entries.insert(name.to_string(), ino);
                 }
@@ -377,12 +409,16 @@ impl Vfs for MemVfs {
         if opts.directory && !inode.is_dir() {
             return Err(Errno::Notdir);
         }
+        let mut freed = 0u64;
         if opts.truncate {
             if let Kind::File { data } = &mut inode.kind {
+                freed = data.len() as u64;
                 data.clear();
             }
         }
         inode.open_count += 1;
+        // Borrow of `inode` ends here; release the truncated bytes from the quota.
+        self.used_bytes = self.used_bytes.saturating_sub(freed);
         Ok(ino)
     }
 
@@ -406,18 +442,31 @@ impl Vfs for MemVfs {
     }
 
     fn write_at(&mut self, ino: Ino, offset: u64, src: &[u8]) -> SysResult<usize> {
-        match &mut self.get_mut(ino)?.kind {
-            Kind::File { data } => {
-                let start = offset as usize;
-                let end = start + src.len();
-                if data.len() < end {
-                    data.resize(end, 0);
+        let used = self.used_bytes;
+        let max = self.max_bytes;
+        // Do the sized write inside a scope so the inode borrow ends before we
+        // update the byte accounting (ADR-020). A write that would push total
+        // storage past the quota is refused whole with `ENOSPC`.
+        let growth = {
+            match &mut self.get_mut(ino)?.kind {
+                Kind::File { data } => {
+                    let start = offset as usize;
+                    let end = start + src.len();
+                    let growth = (end as u64).saturating_sub(data.len() as u64);
+                    if used + growth > max {
+                        return Err(Errno::Nospc);
+                    }
+                    if data.len() < end {
+                        data.resize(end, 0);
+                    }
+                    data[start..end].copy_from_slice(src);
+                    growth
                 }
-                data[start..end].copy_from_slice(src);
-                Ok(src.len())
+                Kind::Dir { .. } => return Err(Errno::Isdir),
             }
-            Kind::Dir { .. } => Err(Errno::Isdir),
-        }
+        };
+        self.used_bytes += growth;
+        Ok(src.len())
     }
 
     fn size(&self, ino: Ino) -> SysResult<u64> {
@@ -468,6 +517,48 @@ mod tests {
         let mut buf = [0xFFu8; 6];
         assert_eq!(vfs.read_at(ino, 0, &mut buf).unwrap(), 6);
         assert_eq!(&buf, &[0, 0, 0, 0, b'A', b'B']);
+    }
+
+    #[test]
+    fn byte_quota_returns_nospc_and_frees_on_unlink() {
+        let mut vfs = MemVfs::with_limits(10, 1000);
+        let ino = vfs.open("/f", OpenOptions { create: true, ..Default::default() }).unwrap();
+        // Exactly the quota fits.
+        assert_eq!(vfs.write_at(ino, 0, b"0123456789").unwrap(), 10);
+        // One more byte would exceed it — the whole write is refused.
+        assert_eq!(vfs.write_at(ino, 10, b"x").unwrap_err(), Errno::Nospc);
+        // Deleting the file releases its bytes back to the budget.
+        vfs.close(ino).unwrap();
+        vfs.unlink("/f").unwrap();
+        let ino2 = vfs.open("/g", OpenOptions { create: true, ..Default::default() }).unwrap();
+        assert_eq!(vfs.write_at(ino2, 0, b"abcde").unwrap(), 5);
+    }
+
+    #[test]
+    fn truncate_releases_bytes_to_quota() {
+        let mut vfs = MemVfs::with_limits(10, 1000);
+        let ino = vfs.open("/f", OpenOptions { create: true, ..Default::default() }).unwrap();
+        vfs.write_at(ino, 0, b"0123456789").unwrap(); // fills the quota
+        vfs.close(ino).unwrap();
+        // Re-open truncating frees the 10 bytes, so a fresh full write fits again.
+        let ino = vfs.open("/f", OpenOptions { create: true, truncate: true, ..Default::default() }).unwrap();
+        assert_eq!(vfs.write_at(ino, 0, b"ABCDEFGHIJ").unwrap(), 10);
+    }
+
+    #[test]
+    fn inode_quota_returns_nospc_and_frees_on_rmdir() {
+        // Root already holds 1 inode; a cap of 2 leaves room for exactly one more.
+        let mut vfs = MemVfs::with_limits(1 << 20, 2);
+        vfs.mkdir("/a").unwrap();
+        assert_eq!(vfs.mkdir("/b").unwrap_err(), Errno::Nospc);
+        // open(create) allocates an inode too, so it hits the same cap.
+        let err = vfs
+            .open("/f", OpenOptions { create: true, ..Default::default() })
+            .unwrap_err();
+        assert_eq!(err, Errno::Nospc);
+        // Freeing an inode makes room again.
+        vfs.rmdir("/a").unwrap();
+        assert!(vfs.mkdir("/b").is_ok());
     }
 
     #[test]
