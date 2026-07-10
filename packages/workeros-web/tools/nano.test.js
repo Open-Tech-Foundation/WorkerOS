@@ -334,3 +334,192 @@ test("nano: a CRLF (DOS) file round-trips and doesn't corrupt the display", opts
   assert.deepEqual(pageErrors, []);
   assert.equal(buf.saved, "one!\r\ntwo\r\n", "CRLF endings are preserved and the edit landed at real EOL");
 });
+
+// Shared boilerplate can't be a closure (page.evaluate serializes the fn), so
+// each case inlines boot + waitFor. These cover the Commit-2 editing features.
+
+test("nano: mark (^6) + copy (M-6) + paste (^U) duplicates a selection", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /sel.txt\r");
+    await waitFor("nano");
+    os.input("hello world");
+    await sleep(100);
+    os.input("\x01");   // ^A home → set mark here
+    os.input("\x1e");   // ^6 set mark
+    os.input("\x05");   // ^E end → selection = whole line
+    os.input("\x1b6");  // M-6 copy
+    await sleep(80);
+    os.input("\r");     // newline → cursor on the new empty line 2
+    os.input("\x15");   // ^U paste the copied text there
+    await sleep(120);
+    os.input("\x0f"); await waitFor("File Name to Write"); os.input("\r"); await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/sel.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "hello world\nhello world\n", "the copied selection was pasted on the new line");
+});
+
+test("nano: M-Backspace deletes the word before the cursor", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /wd.txt\r");
+    await waitFor("nano");
+    os.input("foo bar baz");
+    await sleep(100);
+    os.input("\x1b\x7f"); // M-Backspace (ESC DEL): delete "baz"
+    await sleep(120);
+    os.input("\x0f"); await waitFor("File Name to Write"); os.input("\r"); await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/wd.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "foo bar \n", "the last word was deleted, leaving the trailing space");
+});
+
+test("nano: ^R inserts another file at the cursor", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/inc.txt", "INCLUDED\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /main.txt\r");
+    await waitFor("nano");
+    os.input("start ");
+    await sleep(80);
+    os.input("\x12"); // ^R insert file
+    await waitFor("File to insert");
+    os.input("inc.txt\r");
+    await waitFor("Inserted");
+    os.input("\x0f"); await waitFor("File Name to Write"); os.input("\r"); await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/main.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "start INCLUDED\n", "the file contents were inserted at the cursor");
+});
+
+test("nano: Enter auto-indents to match the current line", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /ai.txt\r");
+    await waitFor("nano");
+    os.input("  foo"); // two leading spaces
+    os.input("\r");    // Enter → new line should inherit "  "
+    os.input("bar");
+    await sleep(120);
+    os.input("\x0f"); await waitFor("File Name to Write"); os.input("\r"); await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/ai.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "  foo\n  bar\n", "the new line inherited the leading whitespace");
+});
+
+test("nano: in-prompt editing (←) inserts mid-filename for Save-As", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/orig.txt", "data\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /orig.txt\r");
+    await waitFor("Read 1 line");
+    os.input("\x0f"); // ^O — prompt prefilled with "/orig.txt", cursor at end
+    await waitFor("File Name to Write");
+    // Move left 4 (past ".txt") and insert "2" → "/orig2.txt".
+    os.input("\x1b[D\x1b[D\x1b[D\x1b[D");
+    os.input("2");
+    os.input("\r");
+    await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/orig2.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "data\n", "the mid-prompt insert produced /orig2.txt");
+});
+
+test("nano: Tab completes a filename in the write-out prompt", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/complete-me.txt", "old\n"); // the completion target
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano\r"); // no filename → a New Buffer, so ^O starts with an empty field
+    await waitFor("New Buffer");
+    os.input("x");
+    await sleep(80);
+    os.input("\x0f"); // ^O
+    await waitFor("File Name to Write");
+    os.input("/complete"); // type a prefix, then Tab-complete
+
+    os.input("\t"); // Tab → completes to /complete-me.txt
+    await sleep(120);
+    os.input("\r");
+    await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/complete-me.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "x\n", "Tab completed the name and the buffer saved over it");
+});

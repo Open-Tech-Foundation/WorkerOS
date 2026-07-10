@@ -49,6 +49,22 @@ guest runtime. Format:
     message, prompts) now measure and pad by **display columns** (`dispWidth`/
     `fitCols`), so a wide-character filename no longer misaligns them. A `SIGWINCH`
     while a prompt is open repaints the prompt instead of clobbering it.
+  - **Selection, copy & paste** — `^6` sets/clears a mark; the region between the
+    mark and cursor is highlighted (inverse) and can be cut (`^K`) or copied
+    (`M-6`); `^K` with no mark still cuts whole lines. The cut buffer is now text
+    (may span lines) and `^U` re-inserts it at the cursor, so copy/paste works
+    across the file.
+  - **In-prompt line editing & completion** — message-bar prompts gain `←`/`→`,
+    `Home`/`End`, and `Del` (surrogate-safe), and `Tab` completes a filename to
+    the longest common prefix of the directory (appending `/` for a lone dir).
+  - **Word motion & deletion** — `Ctrl-←`/`Ctrl-→` move by word; `M-Backspace`
+    and `M-Del` delete the word before/after the cursor.
+  - **Auto-indent** (on by default, `M-I` toggles) carries a line's leading
+    whitespace onto the next line at `Enter`.
+  - **Insert file** (`^R`) reads another file and inserts it at the cursor.
+  - `wordLeftIndex`/`wordRightIndex` are exported and unit-tested; selection,
+    word-delete, insert-file, auto-indent, in-prompt editing, and Tab-completion
+    are covered by the browser e2e.
 - **`process` signal handling.** The node runtime gains a minimal EventEmitter on
   `process` (and its streams): `process.on('SIGINT'|'SIGWINCH'|'SIGTSTP'…, cb)`,
   `once`/`off`/`emit`/`listenerCount`. Registering a signal handler tells the

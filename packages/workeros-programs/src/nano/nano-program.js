@@ -43,9 +43,11 @@ let statusmsg = ""; // the message-bar text
 let screenRows = 24;
 let screenCols = 80;
 let textRows = 20; // editable rows = screenRows - 4 chrome rows
-let cutBuffer = []; // lines held by ^K, pasted by ^U
-let lastWasCut = false; // consecutive ^K accumulate into cutBuffer
+let cutBuffer = ""; // text held by ^K / copy, re-inserted by ^U (may span lines)
+let lastWasCut = false; // consecutive line ^K accumulate into cutBuffer
+let mark = null; // selection anchor { cy, cx }, or null (^6 sets/clears)
 let showLineNumbers = true; // left gutter with line numbers (toggle: M-N)
+let autoIndent = true; // carry leading whitespace onto a new line (toggle: M-I)
 let lineEnding = "\n"; // detected on load ("\n" unix, "\r\n" dos, "\r" mac)
 
 // Undo/redo: whole-document snapshots. `coalesceKey` groups a run of like edits
@@ -64,7 +66,7 @@ function pushUndo(key = null) {
   redoStack.length = 0;
   coalesceKey = key;
 }
-function restore(s) { rows = s.rows.slice(); cy = s.cy; cx = s.cx; dirty = s.dirty; clampToDoc(); }
+function restore(s) { rows = s.rows.slice(); cy = s.cy; cx = s.cx; dirty = s.dirty; mark = null; clampToDoc(); }
 function clampToDoc() {
   if (cy > rows.length - 1) cy = rows.length - 1;
   if (cy < 0) cy = 0;
@@ -227,6 +229,23 @@ export function gutterWidthFor(n) {
   return Math.max(String(n).length, 2) + 1;
 }
 
+// Word boundaries (readline-style): left skips spaces then the word before the
+// cursor; right skips the word then trailing spaces. Used by Ctrl-←/→ and the
+// word-delete chords. Surrogate pairs are all non-space, so they never split.
+const isSpace = (ch) => ch === " " || ch === "\t";
+export function wordLeftIndex(line, cx) {
+  let i = cx;
+  while (i > 0 && isSpace(line[i - 1])) i--;
+  while (i > 0 && !isSpace(line[i - 1])) i--;
+  return i;
+}
+export function wordRightIndex(line, cx) {
+  let i = cx;
+  while (i < line.length && !isSpace(line[i])) i++;
+  while (i < line.length && isSpace(line[i])) i++;
+  return i;
+}
+
 // Decode an SGR mouse report (`ESC [ < b ; x ; y M|m`) into a mouse event, or
 // null if it isn't one. `press` is true for a button-press (`M`), false for
 // release (`m`); x/y are 1-based cell coordinates.
@@ -266,6 +285,30 @@ function shortcut(key, label) {
   return `${INVERSE}${key}${RESET} ${label}`;
 }
 
+// The selected render-column span [lo, hi) on document row `r`, or null. Built
+// from the mark→cursor range; whole spanned lines highlight to their end.
+function selColsFor(r) {
+  const sel = selRange();
+  if (!sel || r < sel.a.cy || r > sel.b.cy) return null;
+  const line = rows[r];
+  const lo = r === sel.a.cy ? cxToRx(line, Math.min(sel.a.cx, line.length)) : 0;
+  const hi = r === sel.b.cy ? cxToRx(line, Math.min(sel.b.cx, line.length)) : cxToRx(line, line.length);
+  return lo < hi ? [lo, hi] : null;
+}
+// Render one line's visible window, inverting the selected columns. Reuses the
+// (tested) `visibleSlice` by splitting the window into pre / selected / post.
+function renderRowVisible(line, off, tw, sel) {
+  if (!sel) return visibleSlice(line, off, tw);
+  const winHi = off + tw;
+  const sLo = Math.max(sel[0], off), sHi = Math.min(sel[1], winHi);
+  if (sLo >= sHi) return visibleSlice(line, off, tw);
+  return (
+    visibleSlice(line, off, sLo - off) +
+    "\x1b[7m" + visibleSlice(line, sLo, sHi - sLo) + "\x1b[0m" +
+    visibleSlice(line, sHi, winHi - sHi)
+  );
+}
+
 // Build one full frame and emit it in a single write (no flicker).
 function refresh() {
   let out = "\x1b[?25l\x1b[H"; // hide cursor, home
@@ -285,7 +328,7 @@ function refresh() {
         const num = String(docRow + 1).padStart(gw - 1);
         out += (docRow === cy ? GUTTER_CUR : GUTTER_DIM) + num + " " + RESET;
       }
-      out += visibleSlice(rows[docRow], coloff, tw);
+      out += renderRowVisible(rows[docRow], coloff, tw, selColsFor(docRow));
     }
     out += "\x1b[K\r\n";
   }
@@ -364,6 +407,7 @@ async function nextKey() {
 async function parseEsc() {
   const c = await nextByte();
   if (c === -1) return { key: "esc" };
+  if (c === 0x7f || c === 0x08) return { key: "wdelback" }; // M-Backspace: del word
   // A printable byte right after ESC is Alt-<char> (nano's M- bindings).
   if (c !== 0x5b && c !== 0x4f) {
     if (c >= 0x20 && c < 0x7f) return { alt: String.fromCharCode(c).toLowerCase() };
@@ -383,11 +427,14 @@ function decodeCsi(final, params) {
     const m = parseMouse(params, final);
     return m ? { mouse: m } : { key: "esc" };
   }
+  // A modifier param (`1;5C` = Ctrl-Right) turns arrow motion into word motion.
+  const mod = params.includes(";") ? params.split(";")[1] : "";
+  const ctrl = mod === "5" || mod === "3"; // Ctrl or Alt → word-wise
   switch (final) {
     case "A": return { key: "up" };
     case "B": return { key: "down" };
-    case "C": return { key: "right" };
-    case "D": return { key: "left" };
+    case "C": return { key: ctrl ? "wordright" : "right" };
+    case "D": return { key: ctrl ? "wordleft" : "left" };
     case "H": return { key: "home" };
     case "F": return { key: "end" };
     case "~":
@@ -410,11 +457,18 @@ function insertChar(ch) {
 }
 function insertNewline() {
   pushUndo(null);
-  const after = rows[cy].slice(cx);
-  rows[cy] = rows[cy].slice(0, cx);
-  rows.splice(cy + 1, 0, after);
+  const line = rows[cy];
+  const after = line.slice(cx);
+  // Auto-indent: carry the current line's leading whitespace (up to the cursor).
+  let indent = "";
+  if (autoIndent) {
+    const lead = (line.match(/^[ \t]*/) || [""])[0];
+    indent = lead.slice(0, Math.min(lead.length, cx));
+  }
+  rows[cy] = line.slice(0, cx);
+  rows.splice(cy + 1, 0, indent + after);
   cy++;
-  cx = 0;
+  cx = indent.length;
   markDirty();
 }
 function backspace() {
@@ -445,23 +499,83 @@ function deleteForward() {
     markDirty();
   }
 }
+// Insert a possibly multi-line string at the cursor (paste / insert-file).
+function insertText(text) {
+  pushUndo(null);
+  const parts = text.split("\n");
+  if (parts.length === 1) {
+    rows[cy] = rows[cy].slice(0, cx) + parts[0] + rows[cy].slice(cx);
+    cx += parts[0].length;
+  } else {
+    const tail = rows[cy].slice(cx);
+    rows[cy] = rows[cy].slice(0, cx) + parts[0];
+    const last = parts[parts.length - 1];
+    rows.splice(cy + 1, 0, ...parts.slice(1, -1), last + tail);
+    cy += parts.length - 1;
+    cx = last.length;
+  }
+  markDirty();
+}
+
+// ---- selection (mark) ------------------------------------------------------
+function toggleMark() {
+  if (mark) { mark = null; setMsg("Mark unset"); }
+  else { mark = { cy, cx }; setMsg("Mark set"); }
+}
+// The selection as normalized endpoints { a, b } (a before b), or null.
+function selRange() {
+  if (!mark) return null;
+  const a = { cy: mark.cy, cx: Math.min(mark.cx, rows[mark.cy] ? rows[mark.cy].length : 0) };
+  const b = { cy, cx };
+  return a.cy > b.cy || (a.cy === b.cy && a.cx > b.cx) ? { a: b, b: a } : { a, b };
+}
+function selText(a, b) {
+  if (a.cy === b.cy) return rows[a.cy].slice(a.cx, b.cx);
+  let s = rows[a.cy].slice(a.cx);
+  for (let r = a.cy + 1; r < b.cy; r++) s += "\n" + rows[r];
+  return s + "\n" + rows[b.cy].slice(0, b.cx);
+}
+function deleteRange(a, b) {
+  if (a.cy === b.cy) {
+    rows[a.cy] = rows[a.cy].slice(0, a.cx) + rows[a.cy].slice(b.cx);
+  } else {
+    rows[a.cy] = rows[a.cy].slice(0, a.cx) + rows[b.cy].slice(b.cx);
+    rows.splice(a.cy + 1, b.cy - a.cy);
+  }
+  cy = a.cy; cx = a.cx;
+}
+
+// ^K: with a mark, cut the selection; otherwise cut whole lines (a run of ^K
+// accumulates). Returns true for a line-cut so consecutive cuts can accumulate.
 function cutLine() {
-  pushUndo(lastWasCut ? "cut" : null); // a run of ^K is one undo step
-  if (!lastWasCut) cutBuffer = [];
-  cutBuffer.push(rows[cy]);
+  const sel = selRange();
+  if (sel) {
+    pushUndo(null);
+    cutBuffer = selText(sel.a, sel.b);
+    deleteRange(sel.a, sel.b);
+    mark = null;
+    markDirty();
+    return false;
+  }
+  pushUndo(lastWasCut ? "cut" : null);
+  if (!lastWasCut) cutBuffer = "";
+  cutBuffer += rows[cy] + "\n";
   rows.splice(cy, 1);
   if (rows.length === 0) rows = [""];
   if (cy >= rows.length) cy = rows.length - 1;
   cx = 0;
   markDirty();
+  return true;
+}
+// M-6: copy the selection (or the current line if there's no mark).
+function copySelection() {
+  const sel = selRange();
+  if (sel) { cutBuffer = selText(sel.a, sel.b); mark = null; setMsg("Copied selection"); }
+  else { cutBuffer = rows[cy] + "\n"; setMsg("Copied line"); }
 }
 function pasteCut() {
-  if (cutBuffer.length === 0) { setMsg("Cut buffer is empty"); return; }
-  pushUndo(null);
-  rows.splice(cy, 0, ...cutBuffer);
-  cy += cutBuffer.length;
-  cx = 0;
-  markDirty();
+  if (!cutBuffer) { setMsg("Cut buffer is empty"); return; }
+  insertText(cutBuffer);
 }
 
 // ---- cursor movement -------------------------------------------------------
@@ -490,6 +604,32 @@ function pageUp() { coalesceKey = null; cy = Math.max(0, cy - textRows); clampCx
 function pageDown() { coalesceKey = null; cy = Math.min(rows.length - 1, cy + textRows); clampCx(); }
 const gotoHome = () => { coalesceKey = null; cx = 0; };
 const gotoEnd = () => { coalesceKey = null; cx = rows[cy].length; };
+// Word-wise motion (Ctrl-←/→) and word deletion (M-Backspace / M-Del).
+function wordLeft() {
+  coalesceKey = null;
+  if (cx > 0) cx = wordLeftIndex(rows[cy], cx);
+  else if (cy > 0) { cy--; cx = rows[cy].length; }
+}
+function wordRight() {
+  coalesceKey = null;
+  if (cx < rows[cy].length) cx = wordRightIndex(rows[cy], cx);
+  else if (cy < rows.length - 1) { cy++; cx = 0; }
+}
+function deleteWordLeft() {
+  if (cx === 0) { backspace(); return; }
+  pushUndo(null);
+  const to = wordLeftIndex(rows[cy], cx);
+  rows[cy] = rows[cy].slice(0, to) + rows[cy].slice(cx);
+  cx = to;
+  markDirty();
+}
+function deleteWordRight() {
+  if (cx >= rows[cy].length) { deleteForward(); return; }
+  pushUndo(null);
+  const to = wordRightIndex(rows[cy], cx);
+  rows[cy] = rows[cy].slice(0, cx) + rows[cy].slice(to);
+  markDirty();
+}
 
 // A mouse report: left-click positions the cursor; the wheel scrolls the view.
 function handleMouse(m) {
@@ -511,14 +651,14 @@ function handleMouse(m) {
 }
 
 // ---- message-bar prompts ---------------------------------------------------
-// A one-line prompt on the message bar. Returns the entered string, or null if
-// cancelled (^C / ESC). Handles printable input, backspace, and Enter.
-async function promptLine(label, initial = "") {
-  let s = initial;
+// A one-line prompt on the message bar with in-line editing (←/→, Home/End,
+// Backspace/Del). Returns the entered string, or null if cancelled (^C / ESC).
+// `complete` (optional) is an async `(text) => text|null` run on Tab.
+async function promptLine(label, initial = "", complete = null) {
+  let s = initial, p = s.length; // text and cursor index (code units)
   const draw = () => {
-    const shown = label + s;
-    write(`\x1b[${screenRows - 2};1H${INVERSE}${fit(shown, screenCols)}${RESET}` +
-      `\x1b[${screenRows - 2};${Math.min(dispWidth(shown) + 1, screenCols)}H\x1b[?25h`);
+    write(`\x1b[${screenRows - 2};1H${INVERSE}${fit(label + s, screenCols)}${RESET}` +
+      `\x1b[${screenRows - 2};${Math.min(dispWidth(label + s.slice(0, p)) + 1, screenCols)}H\x1b[?25h`);
   };
   promptRedraw = draw;
   try {
@@ -526,13 +666,42 @@ async function promptLine(label, initial = "") {
       draw();
       const k = await nextKey();
       if (k.key === "enter") return s;
-      if (k.key === "esc" || (k.ctrl === "C")) return null;
-      if (k.key === "backspace") s = s.slice(0, -1);
-      else if (k.char) s += k.char;
+      if (k.key === "esc" || k.ctrl === "C") return null;
+      else if (k.char === "\t" && complete) {
+        const c = await complete(s);
+        if (c != null) { s = c; p = s.length; }
+      } else if (k.char && k.char !== "\t") { s = s.slice(0, p) + k.char + s.slice(p); p += k.char.length; }
+      else if (k.key === "backspace") { if (p > 0) { const l = prevLen(s, p); s = s.slice(0, p - l) + s.slice(p); p -= l; } }
+      else if (k.key === "del") { if (p < s.length) s = s.slice(0, p) + s.slice(p + nextLen(s, p)); }
+      else if (k.key === "left") { if (p > 0) p -= prevLen(s, p); }
+      else if (k.key === "right") { if (p < s.length) p += nextLen(s, p); }
+      else if (k.key === "home" || k.ctrl === "A") p = 0;
+      else if (k.key === "end" || k.ctrl === "E") p = s.length;
     }
   } finally {
     promptRedraw = null;
   }
+}
+
+// Tab-completion for a filename prompt: complete to the longest common prefix of
+// the matching directory entries, adding "/" when it resolves to a lone dir.
+async function completeFilename(s) {
+  const slash = s.lastIndexOf("/");
+  const dirPart = slash >= 0 ? s.slice(0, slash + 1) : "";
+  const base = slash >= 0 ? s.slice(slash + 1) : s;
+  let entries;
+  try { entries = await sys.readdir(abs(dirPart || ".")); } catch { return null; }
+  const names = entries.map((e) => e.name).filter((n) => n.startsWith(base));
+  if (names.length === 0) { setMsg("No match"); return null; }
+  let lcp = names[0];
+  for (const n of names) while (!n.startsWith(lcp)) lcp = lcp.slice(0, -1);
+  let out = dirPart + lcp;
+  if (names.length === 1) {
+    try { const st = await sys.stat(abs(out)); if (st && st.kind === "dir") out += "/"; } catch {}
+  } else {
+    setMsg(names.slice(0, 8).join("  "));
+  }
+  return out;
 }
 // A yes/no/cancel prompt. Returns true (yes), false (no), or null (cancel).
 async function promptYesNo(label) {
@@ -552,26 +721,31 @@ async function promptYesNo(label) {
 }
 
 // ---- file I/O --------------------------------------------------------------
+// Read a whole VFS file into a Uint8Array (throws if it can't be opened/read).
+async function readFileBytes(path) {
+  const fd = await sys.open(abs(path), {});
+  const chunks = [];
+  try {
+    for (;;) {
+      const b = await sys.read(fd, 1 << 16);
+      if (!b || b.length === 0) break;
+      chunks.push(b);
+    }
+  } finally {
+    await sys.close(fd);
+  }
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const buf = new Uint8Array(n);
+  let o = 0;
+  for (const c of chunks) { buf.set(c, o); o += c.length; }
+  return buf;
+}
+
 async function loadFile(path) {
   filename = path;
   try {
-    const fd = await sys.open(abs(path), {});
-    const chunks = [];
-    try {
-      for (;;) {
-        const b = await sys.read(fd, 1 << 16);
-        if (!b || b.length === 0) break;
-        chunks.push(b);
-      }
-    } finally {
-      await sys.close(fd);
-    }
-    let n = 0;
-    for (const c of chunks) n += c.length;
-    const buf = new Uint8Array(n);
-    let o = 0;
-    for (const c of chunks) { buf.set(c, o); o += c.length; }
-    const text = dec.decode(buf);
+    const text = dec.decode(await readFileBytes(path));
     // Detect the line ending so we round-trip DOS/Mac files unchanged, and strip
     // it from the buffer so a stray CR can't corrupt the on-screen rendering.
     lineEnding = /\r\n/.test(text) ? "\r\n" : /\r/.test(text) ? "\r" : "\n";
@@ -615,9 +789,22 @@ async function saveFile(path) {
 // ^O: always confirm the name (pre-filled with the current one) before writing,
 // like real nano — this is also how you "Save As" to a different path.
 async function writeOut() {
-  const name = await promptLine("File Name to Write: ", filename || "");
+  const name = await promptLine("File Name to Write: ", filename || "", completeFilename);
   if (name === null || name === "") { setMsg("Cancelled"); return; }
   await saveFile(name);
+}
+
+// ^R: read another file and insert its contents at the cursor.
+async function insertFile() {
+  const name = await promptLine("File to insert: ", "", completeFilename);
+  if (name === null || name === "") { setMsg("Cancelled"); return; }
+  try {
+    const text = dec.decode(await readFileBytes(name)).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    insertText(text.endsWith("\n") ? text.slice(0, -1) : text);
+    setMsg(`Inserted ${name}`);
+  } catch (e) {
+    setMsg(`Error reading ${name}: ${e && e.message ? e.message : e}`);
+  }
 }
 
 // ---- commands --------------------------------------------------------------
@@ -759,22 +946,29 @@ async function main() {
       if (k.key === "eof") break; // terminal closed
       else if (k.mouse) handleMouse(k.mouse);
       else if (k.alt) {
-        // Meta/Alt chords: M-U undo, M-E redo, M-N toggle line numbers.
+        // Meta/Alt chords.
         if (k.alt === "u") undo();
         else if (k.alt === "e") redo();
+        else if (k.alt === "6" || k.alt === "^") copySelection();
+        else if (k.alt === "d") deleteWordRight();
         else if (k.alt === "n") {
           showLineNumbers = !showLineNumbers;
           setMsg(showLineNumbers ? "Line numbers on" : "Line numbers off");
+        } else if (k.alt === "i") {
+          autoIndent = !autoIndent;
+          setMsg(autoIndent ? "Auto-indent on" : "Auto-indent off");
         }
       } else if (k.ctrl) {
         switch (k.ctrl) {
           case "X": if (await tryExit()) return; break; // finally restores the TTY
           case "O": await writeOut(); break;
+          case "R": await insertFile(); break; // read a file into the buffer
           case "W": await search(); break;
           case "\\": await replace(); break; // ^\ : search & replace
-          case "K": cutLine(); isCut = true; break;
+          case "^": toggleMark(); break; // ^6 : set/clear the selection mark
+          case "K": isCut = cutLine(); break;
           case "U": pasteCut(); break;
-          case "G": setMsg("^O save  ^W find  ^\\ replace  M-U/M-E undo/redo  M-N line#s  mouse: click/scroll  ^X exit"); break;
+          case "G": setMsg("^O save ^R insert ^W find ^\\ replace ^6 mark M-6 copy M-U/M-E undo/redo ^X exit"); break;
           case "C": cursorPosition(); break;
           case "A": gotoHome(); break;
           case "E": gotoEnd(); break;
@@ -791,10 +985,13 @@ async function main() {
           case "enter": insertNewline(); break;
           case "backspace": backspace(); break;
           case "del": deleteForward(); break;
+          case "wdelback": deleteWordLeft(); break;
           case "up": moveUp(); break;
           case "down": moveDown(); break;
           case "left": moveLeft(); break;
           case "right": moveRight(); break;
+          case "wordleft": wordLeft(); break;
+          case "wordright": wordRight(); break;
           case "home": gotoHome(); break;
           case "end": gotoEnd(); break;
           case "pgup": pageUp(); break;
@@ -813,6 +1010,7 @@ async function main() {
   }
 }
 
-// Run only as a guest program (the worker installs `sys`). Importing this file
-// in plain Node — e.g. to unit-test the exported pure text helpers — is a no-op.
-if (typeof sys !== "undefined") await main();
+// Run only as a guest program (the worker installs the WorkerOS `sys` ABI).
+// Importing this file in plain Node — to unit-test the exported pure helpers — is
+// a no-op. (Guard on the ABI shape: Node has an unrelated legacy global `sys`.)
+if (typeof sys !== "undefined" && sys && typeof sys.write === "function") await main();

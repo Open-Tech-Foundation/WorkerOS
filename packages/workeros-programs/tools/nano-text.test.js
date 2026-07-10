@@ -19,6 +19,8 @@ import {
   parseMouse,
   dispWidth,
   fitCols,
+  wordLeftIndex,
+  wordRightIndex,
 } from "../src/nano/nano-program.js";
 
 const cp = (s) => s.codePointAt(0);
@@ -112,4 +114,16 @@ test("dispWidth / fitCols measure and pad by display columns (wide + ctrl)", () 
   assert.equal(fitCols("abc", 5), "abc  "); // pad to 5
   assert.equal(fitCols("日本", 3), "日 "); // truncate: the second wide glyph won't fit
   assert.equal(fitCols("日本", 4), "日本"); // exact fit
+});
+
+test("word boundaries: left skips spaces+word, right skips word+spaces", () => {
+  //           0123456789
+  const line = "foo  bar baz";
+  assert.equal(wordLeftIndex(line, 12), 9); // from end → start of "baz"
+  assert.equal(wordLeftIndex(line, 9), 5); // → start of "bar"
+  assert.equal(wordLeftIndex(line, 5), 0); // across the double space → "foo"
+  assert.equal(wordLeftIndex(line, 0), 0); // clamp at start
+  assert.equal(wordRightIndex(line, 0), 5); // over "foo" + spaces → start of "bar"
+  assert.equal(wordRightIndex(line, 5), 9); // → start of "baz"
+  assert.equal(wordRightIndex(line, 12), 12); // clamp at end
 });
