@@ -164,6 +164,32 @@ test("Ctrl-C cancels the current line without running it", opts, async () => {
   assert.doesNotMatch(buf, /nonexistent-cmd-xyz: /, "the cancelled line was never executed");
 });
 
+test("node sees process.stdout.isTTY on a terminal, false when redirected", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    const run = async (line) => {
+      let out = "";
+      await os.exec(line, { onStdout: (b) => (out += dec.decode(b)), onStderr: (b) => (out += dec.decode(b)) });
+      return out;
+    };
+    await os.fs.write(
+      "/tty.js",
+      'process.stdout.write(process.stdout.isTTY + " " + process.stdout.columns + "x" + process.stdout.rows);',
+    );
+    const term = await run("node /tty.js");
+    // A redirect binds fd 1 to a file, so isatty(1) is false there.
+    await run("node /tty.js > /out.txt");
+    const redirected = new TextDecoder().decode(await os.fs.read("/out.txt"));
+    return { term, redirected };
+  });
+  assert.deepEqual(pageErrors, []);
+  // Directly on the terminal: a TTY, with the kernel's window size (default 80x24).
+  assert.match(buf.term, /^true 80x24/, `expected TTY on terminal, got ${JSON.stringify(buf.term)}`);
+  // Redirected to a file, stdout is not a terminal and has no columns.
+  assert.match(buf.redirected, /^false /, `expected non-TTY when redirected, got ${JSON.stringify(buf.redirected)}`);
+});
+
 test("echo -e emits real ANSI escapes to the terminal stream", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();
