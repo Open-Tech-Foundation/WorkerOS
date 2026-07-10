@@ -140,10 +140,17 @@ if (typeof window === "undefined") {
           headers: [...req.headers],
           body,
         });
-        const client =
-          (await self.clients.get(event.clientId)) ||
-          (await self.clients.matchAll({ type: "window" }))[0];
-        if (!client) return new Response("preview: no controlling page", { status: 502 });
+        // Relay to the *app* page that installed the bridge — never the preview
+        // iframe itself. A subresource (e.g. style.css) has event.clientId set to
+        // the iframe, which has no bridge; only the top page under a non-preview
+        // URL can drive the kernel injector. (This is why the iframe navigation
+        // worked but its subresources 502'd.)
+        const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        const client = wins.find((c) => {
+          try { return !new URL(c.url).pathname.startsWith("/__preview__/"); }
+          catch { return false; }
+        });
+        if (!client) return new Response("preview: no app page to route through", { status: 502 });
         let respBytes;
         try {
           respBytes = await relayToClient(client, port, reqBytes);
