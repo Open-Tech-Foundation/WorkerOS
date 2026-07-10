@@ -18,6 +18,19 @@ guest runtime. Format:
   search, `^_` go-to-line, and `^C` cursor position. Honors `SIGWINCH` to
   re-layout, and restores the terminal on exit. Files round-trip with a trailing
   newline; tabs render on 8-column stops.
+  - **Undo/redo** (`M-U`/`M-E`) — whole-document snapshots with a bounded
+    history; a burst of typing (or a run of backspaces / of `^K` cuts) folds into
+    one step, and a cursor move ends the run.
+  - **Search & replace** (`^\`) — prompts for the needle and replacement, then
+    walks matches from the cursor (wrapping), asking per instance or `A` for all;
+    the whole replace is a single undo step.
+  - **Wide-character & astral support** — East Asian wide / fullwidth glyphs and
+    emoji render as two columns (a small `wcwidth`), with a horizontal-scroll
+    slice that renders a clipped wide glyph as a space for its shown half, so
+    columns line up. Cursor motion and deletion step by whole code points, so an
+    emoji (surrogate pair) is never split. The pure width/slice helpers are
+    exported and unit-tested (`tools/nano-text.test.js`); the `M-U`/`M-E`/`^\`
+    flows and a wide-glyph round-trip are covered by the browser e2e.
 - **`process` signal handling.** The node runtime gains a minimal EventEmitter on
   `process` (and its streams): `process.on('SIGINT'|'SIGWINCH'|'SIGTSTP'…, cb)`,
   `once`/`off`/`emit`/`listenerCount`. Registering a signal handler tells the

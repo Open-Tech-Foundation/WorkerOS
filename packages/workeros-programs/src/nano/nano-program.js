@@ -46,6 +46,43 @@ let textRows = 20; // editable rows = screenRows - 4 chrome rows
 let cutBuffer = []; // lines held by ^K, pasted by ^U
 let lastWasCut = false; // consecutive ^K accumulate into cutBuffer
 
+// Undo/redo: whole-document snapshots. `coalesceKey` groups a run of like edits
+// (a burst of typing, a run of backspaces) into one undo step; any other action
+// or a cursor move resets it so the next edit starts a fresh step.
+const undoStack = [];
+const redoStack = [];
+let coalesceKey = null;
+const UNDO_LIMIT = 500;
+
+const snap = () => ({ rows: rows.slice(), cx, cy, dirty });
+function pushUndo(key = null) {
+  if (key !== null && key === coalesceKey) return; // fold into the current step
+  undoStack.push(snap());
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  redoStack.length = 0;
+  coalesceKey = key;
+}
+function restore(s) { rows = s.rows.slice(); cy = s.cy; cx = s.cx; dirty = s.dirty; clampToDoc(); }
+function clampToDoc() {
+  if (cy > rows.length - 1) cy = rows.length - 1;
+  if (cy < 0) cy = 0;
+  clampCx();
+}
+function undo() {
+  if (!undoStack.length) { setMsg("Nothing to undo"); return; }
+  redoStack.push(snap());
+  restore(undoStack.pop());
+  coalesceKey = null;
+  setMsg("Undid change");
+}
+function redo() {
+  if (!redoStack.length) { setMsg("Nothing to redo"); return; }
+  undoStack.push(snap());
+  restore(redoStack.pop());
+  coalesceKey = null;
+  setMsg("Redid change");
+}
+
 const setMsg = (m) => { statusmsg = m; };
 const markDirty = () => { dirty = true; };
 
@@ -56,24 +93,78 @@ async function updateSize() {
   textRows = Math.max(screenRows - 4, 1);
 }
 
-// ---- rendering helpers -----------------------------------------------------
-// Expand tabs to the next tab stop; returns the on-screen form of a line.
-function renderRow(line) {
-  let out = "";
-  for (let i = 0; i < line.length; i++) {
-    if (line[i] === "\t") out += " ".repeat(TABSTOP - (out.length % TABSTOP));
-    else out += line[i];
-  }
-  return out;
+// ---- width + rendering helpers ---------------------------------------------
+// Display width of a code point: East Asian wide / fullwidth glyphs and emoji
+// occupy two terminal columns, everything else one. (A pragmatic wcwidth — no
+// zero-width combining handling, which xterm composes onto the base cell anyway.)
+export function isWide(cp) {
+  return (
+    (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+    cp === 0x2329 || cp === 0x232a ||
+    (cp >= 0x2e80 && cp <= 0x303e) || // CJK radicals … Kangxi
+    (cp >= 0x3041 && cp <= 0x33ff) || // Hiragana/Katakana … CJK symbols
+    (cp >= 0x3400 && cp <= 0x4dbf) || // CJK Ext-A
+    (cp >= 0x4e00 && cp <= 0x9fff) || // CJK Unified
+    (cp >= 0xa000 && cp <= 0xa4cf) || // Yi
+    (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
+    (cp >= 0xf900 && cp <= 0xfaff) || // CJK compatibility
+    (cp >= 0xfe10 && cp <= 0xfe19) || // vertical forms
+    (cp >= 0xfe30 && cp <= 0xfe6f) || // CJK compat / small forms
+    (cp >= 0xff00 && cp <= 0xff60) || // fullwidth forms
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1faff) || // emoji & pictographs
+    (cp >= 0x20000 && cp <= 0x3fffd) // CJK Ext-B and beyond
+  );
 }
-// Map a cursor column (in chars) to a render column (accounting for tabs).
-function cxToRx(line, col) {
-  let rx = 0;
-  for (let i = 0; i < col && i < line.length; i++) {
-    if (line[i] === "\t") rx += TABSTOP - (rx % TABSTOP);
-    else rx++;
+export const charWidth = (cp) => (isWide(cp) ? 2 : 1);
+
+// Code-unit length of the character starting at / ending at index i, so cursor
+// motion and deletion never split an astral code point (a surrogate pair).
+export function nextLen(line, i) {
+  const c = line.charCodeAt(i);
+  return c >= 0xd800 && c <= 0xdbff && i + 1 < line.length ? 2 : 1;
+}
+export function prevLen(line, i) {
+  const c = line.charCodeAt(i - 1);
+  return c >= 0xdc00 && c <= 0xdfff && i - 2 >= 0 ? 2 : 1;
+}
+
+// Map a cursor column (in UTF-16 code units) to its render column (tabs expand
+// to the next stop; wide glyphs count as two).
+export function cxToRx(line, col) {
+  let rx = 0, i = 0;
+  while (i < col && i < line.length) {
+    if (line[i] === "\t") { rx += TABSTOP - (rx % TABSTOP); i += 1; continue; }
+    const cp = line.codePointAt(i);
+    rx += charWidth(cp);
+    i += cp > 0xffff ? 2 : 1;
   }
   return rx;
+}
+
+// The visible slice of a line for a horizontal window [startCol, startCol+width):
+// tabs expand to spaces and a wide glyph clipped by either edge renders as a
+// space for its visible half, so columns line up exactly.
+export function visibleSlice(line, startCol, width) {
+  let col = 0, out = "", i = 0;
+  const end = startCol + width;
+  while (i < line.length) {
+    const isTab = line[i] === "\t";
+    let cp = 0, adv = 1, w;
+    if (isTab) w = TABSTOP - (col % TABSTOP);
+    else { cp = line.codePointAt(i); w = charWidth(cp); adv = cp > 0xffff ? 2 : 1; }
+    const cellStart = col, cellEnd = col + w;
+    if (cellEnd <= startCol) { col = cellEnd; i += adv; continue; }
+    if (cellStart >= end) break;
+    if (isTab || cellStart < startCol || cellEnd > end) {
+      out += " ".repeat(Math.min(cellEnd, end) - Math.max(cellStart, startCol));
+    } else {
+      out += String.fromCodePoint(cp);
+    }
+    col = cellEnd;
+    i += adv;
+  }
+  return out;
 }
 
 function scroll() {
@@ -107,8 +198,7 @@ function refresh() {
   for (let i = 0; i < textRows; i++) {
     const docRow = rowoff + i;
     if (docRow < rows.length) {
-      const rendered = renderRow(rows[docRow]);
-      out += rendered.slice(coloff, coloff + screenCols);
+      out += visibleSlice(rows[docRow], coloff, screenCols);
     }
     out += "\x1b[K\r\n";
   }
@@ -121,13 +211,15 @@ function refresh() {
     shortcut("^G", "Help"),
     shortcut("^O", "Write Out"),
     shortcut("^W", "Where Is"),
+    shortcut("^\\", "Replace"),
     shortcut("^K", "Cut"),
     shortcut("^C", "Cur Pos"),
   ].join("  ");
   const bar2 = [
     shortcut("^X", "Exit"),
     shortcut("^U", "Paste"),
-    shortcut("^A", "Home"),
+    shortcut("M-U", "Undo"),
+    shortcut("M-E", "Redo"),
     shortcut("^E", "End"),
     shortcut("^_", "Go To Line"),
   ].join("  ");
@@ -176,10 +268,16 @@ async function nextKey() {
   return { char: dec.decode(new Uint8Array(seq)) };
 }
 
-// After ESC: recognize CSI (ESC [ …) and SS3 (ESC O …) navigation sequences.
+// After ESC: recognize CSI (ESC [ …) and SS3 (ESC O …) navigation sequences,
+// and Meta/Alt chords (ESC <char>, e.g. M-U undo / M-E redo).
 async function parseEsc() {
   const c = await nextByte();
-  if (c !== 0x5b && c !== 0x4f) return { key: "esc" }; // lone ESC / Alt-key
+  if (c === -1) return { key: "esc" };
+  // A printable byte right after ESC is Alt-<char> (nano's M- bindings).
+  if (c !== 0x5b && c !== 0x4f) {
+    if (c >= 0x20 && c < 0x7f) return { alt: String.fromCharCode(c).toLowerCase() };
+    return { key: "esc" }; // lone ESC / unhandled chord
+  }
   let params = "";
   for (;;) {
     const d = await nextByte();
@@ -209,11 +307,13 @@ function decodeCsi(final, params) {
 
 // ---- editing operations ----------------------------------------------------
 function insertChar(ch) {
+  pushUndo("insert"); // fold a burst of typing into one undo step
   rows[cy] = rows[cy].slice(0, cx) + ch + rows[cy].slice(cx);
   cx += ch.length;
   markDirty();
 }
 function insertNewline() {
+  pushUndo(null);
   const after = rows[cy].slice(cx);
   rows[cy] = rows[cy].slice(0, cx);
   rows.splice(cy + 1, 0, after);
@@ -222,22 +322,26 @@ function insertNewline() {
   markDirty();
 }
 function backspace() {
+  if (cx > 0 || cy > 0) pushUndo("delete");
   if (cx > 0) {
-    rows[cy] = rows[cy].slice(0, cx - 1) + rows[cy].slice(cx);
-    cx--;
+    const l = prevLen(rows[cy], cx); // whole char (2 units for a surrogate pair)
+    rows[cy] = rows[cy].slice(0, cx - l) + rows[cy].slice(cx);
+    cx -= l;
     markDirty();
   } else if (cy > 0) {
-    const prevLen = rows[cy - 1].length;
+    const prevEnd = rows[cy - 1].length;
     rows[cy - 1] += rows[cy];
     rows.splice(cy, 1);
     cy--;
-    cx = prevLen;
+    cx = prevEnd;
     markDirty();
   }
 }
 function deleteForward() {
+  if (cx < rows[cy].length || cy < rows.length - 1) pushUndo("delete");
   if (cx < rows[cy].length) {
-    rows[cy] = rows[cy].slice(0, cx) + rows[cy].slice(cx + 1);
+    const l = nextLen(rows[cy], cx);
+    rows[cy] = rows[cy].slice(0, cx) + rows[cy].slice(cx + l);
     markDirty();
   } else if (cy < rows.length - 1) {
     rows[cy] += rows[cy + 1];
@@ -246,6 +350,7 @@ function deleteForward() {
   }
 }
 function cutLine() {
+  pushUndo(lastWasCut ? "cut" : null); // a run of ^K is one undo step
   if (!lastWasCut) cutBuffer = [];
   cutBuffer.push(rows[cy]);
   rows.splice(cy, 1);
@@ -256,6 +361,7 @@ function cutLine() {
 }
 function pasteCut() {
   if (cutBuffer.length === 0) { setMsg("Cut buffer is empty"); return; }
+  pushUndo(null);
   rows.splice(cy, 0, ...cutBuffer);
   cy += cutBuffer.length;
   cx = 0;
@@ -263,19 +369,31 @@ function pasteCut() {
 }
 
 // ---- cursor movement -------------------------------------------------------
-function clampCx() { if (cx > rows[cy].length) cx = rows[cy].length; }
+// Keep the cursor on a character boundary: clamp to the line end and never let
+// it rest inside a surrogate pair (which a plain vertical move could do).
+function clampCx() {
+  const line = rows[cy];
+  if (cx > line.length) cx = line.length;
+  const c = line.charCodeAt(cx);
+  if (cx > 0 && c >= 0xdc00 && c <= 0xdfff) cx--;
+}
+// Any deliberate cursor move ends the current undo-coalescing run.
 function moveLeft() {
-  if (cx > 0) cx--;
+  coalesceKey = null;
+  if (cx > 0) cx -= prevLen(rows[cy], cx);
   else if (cy > 0) { cy--; cx = rows[cy].length; }
 }
 function moveRight() {
-  if (cx < rows[cy].length) cx++;
+  coalesceKey = null;
+  if (cx < rows[cy].length) cx += nextLen(rows[cy], cx);
   else if (cy < rows.length - 1) { cy++; cx = 0; }
 }
-function moveUp() { if (cy > 0) { cy--; clampCx(); } }
-function moveDown() { if (cy < rows.length - 1) { cy++; clampCx(); } }
-function pageUp() { cy = Math.max(0, cy - textRows); clampCx(); }
-function pageDown() { cy = Math.min(rows.length - 1, cy + textRows); clampCx(); }
+function moveUp() { coalesceKey = null; if (cy > 0) { cy--; clampCx(); } }
+function moveDown() { coalesceKey = null; if (cy < rows.length - 1) { cy++; clampCx(); } }
+function pageUp() { coalesceKey = null; cy = Math.max(0, cy - textRows); clampCx(); }
+function pageDown() { coalesceKey = null; cy = Math.min(rows.length - 1, cy + textRows); clampCx(); }
+const gotoHome = () => { coalesceKey = null; cx = 0; };
+const gotoEnd = () => { coalesceKey = null; cx = rows[cy].length; };
 
 // ---- message-bar prompts ---------------------------------------------------
 // A one-line prompt on the message bar. Returns the entered string, or null if
@@ -381,6 +499,64 @@ async function search() {
   }
   setMsg(`"${q}" not found`);
 }
+// A yes/no/all/cancel prompt for the replace loop.
+async function promptReplace() {
+  write(`\x1b[${screenRows - 2};1H${INVERSE}${fit("Replace this instance? [Y/N/A]", screenCols)}${RESET}`);
+  for (;;) {
+    const k = await nextKey();
+    if (k.char === "y" || k.char === "Y" || k.key === "enter") return "y";
+    if (k.char === "n" || k.char === "N") return "n";
+    if (k.char === "a" || k.char === "A") return "a";
+    if (k.key === "esc" || k.ctrl === "C") return "cancel";
+  }
+}
+
+// ^\ — search & replace. Prompts for the needle and replacement, then walks
+// matches from the cursor (wrapping), asking per instance unless "All" is chosen.
+// The whole operation is a single undo step.
+async function replace() {
+  const q = await promptLine("Search (to replace): ");
+  if (!q) { setMsg("Cancelled"); return; }
+  const rep = await promptLine(`Replace "${q}" with: `);
+  if (rep === null) { setMsg("Cancelled"); return; }
+
+  const pre = snap(); // capture once; commit to the undo stack only if we change
+  let count = 0, all = false, cancelled = false;
+  const n = rows.length;
+  for (let step = 0; step < n && !cancelled; step++) {
+    const r = (cy + step) % n;
+    let c = step === 0 ? cx : 0;
+    for (;;) {
+      const hit = rows[r].indexOf(q, c);
+      if (hit === -1) break;
+      cy = r; cx = hit; scroll(); refresh();
+      let doIt = all;
+      if (!all) {
+        const ans = await promptReplace();
+        if (ans === "cancel") { cancelled = true; break; }
+        if (ans === "a") { all = doIt = true; }
+        else doIt = ans === "y";
+      }
+      if (doIt) {
+        rows[r] = rows[r].slice(0, hit) + rep + rows[r].slice(hit + q.length);
+        c = hit + rep.length; // resume past the replacement (no re-match loop)
+        count++;
+      } else {
+        c = hit + q.length;
+      }
+    }
+  }
+  if (count > 0) {
+    undoStack.push(pre);
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack.length = 0;
+    coalesceKey = null;
+    markDirty();
+  }
+  clampToDoc();
+  setMsg(count ? `Replaced ${count} instance${count === 1 ? "" : "s"}` : `"${q}" not found`);
+}
+
 async function gotoLine() {
   const s = await promptLine("Enter line number: ");
   if (!s) { setMsg("Cancelled"); return; }
@@ -428,17 +604,22 @@ async function main() {
       let isCut = false;
 
       if (k.key === "eof") break; // terminal closed
-      else if (k.ctrl) {
+      else if (k.alt) {
+        // Meta/Alt chords: M-U undo, M-E redo (as in GNU nano).
+        if (k.alt === "u") undo();
+        else if (k.alt === "e") redo();
+      } else if (k.ctrl) {
         switch (k.ctrl) {
           case "X": if (await tryExit()) return; break; // finally restores the TTY
           case "O": await writeOut(); break;
           case "W": await search(); break;
+          case "\\": await replace(); break; // ^\ : search & replace
           case "K": cutLine(); isCut = true; break;
           case "U": pasteCut(); break;
-          case "G": setMsg("nano: type to edit; ^O write out, ^X exit"); break;
+          case "G": setMsg("^O save  ^W find  ^\\ replace  M-U undo  M-E redo  ^K/^U cut/paste  ^X exit"); break;
           case "C": cursorPosition(); break;
-          case "A": cx = 0; break;
-          case "E": cx = rows[cy].length; break;
+          case "A": gotoHome(); break;
+          case "E": gotoEnd(); break;
           case "Y": pageUp(); break;
           case "V": pageDown(); break;
           case "D": deleteForward(); break;
@@ -456,8 +637,8 @@ async function main() {
           case "down": moveDown(); break;
           case "left": moveLeft(); break;
           case "right": moveRight(); break;
-          case "home": cx = 0; break;
-          case "end": cx = rows[cy].length; break;
+          case "home": gotoHome(); break;
+          case "end": gotoEnd(); break;
           case "pgup": pageUp(); break;
           case "pgdn": pageDown(); break;
           default: break; // bare ESC and unknowns: ignore
@@ -473,4 +654,6 @@ async function main() {
   }
 }
 
-await main();
+// Run only as a guest program (the worker installs `sys`). Importing this file
+// in plain Node — e.g. to unit-test the exported pure text helpers — is a no-op.
+if (typeof sys !== "undefined") await main();
