@@ -19,6 +19,8 @@ export const NODE_BUILTINS = new Set([
   "process",
   "tty",
   "buffer",
+  "events",
+  "util",
 ]);
 
 export const isBuiltinSpec = (spec) => spec.startsWith("node:") || NODE_BUILTINS.has(spec);

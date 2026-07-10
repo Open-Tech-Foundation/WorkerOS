@@ -8,6 +8,19 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:events` + `node:util`** (`src/node/events.js`, `src/node/util.js`). Two
+  pure builtins depended on transitively by much of npm. `events.js` is a real
+  `EventEmitter` (the class packages extend): the full listener surface
+  (on/once/off, prepend variants, removeAllListeners, listeners/rawListeners,
+  listenerCount, eventNames), the `newListener`/`removeListener`/`error` special
+  events, max-listeners tracking, and the statics `EventEmitter.once`/`on`/
+  `getEventListeners` — and, like Node, the module *is* the constructor. `util.js`
+  covers `promisify`/`callbackify` (with the custom-promisify symbol), a real
+  recursive `inspect` (depth limit, circular detection, custom-symbol hook,
+  Map/Set/Date/RegExp/Error/typed-array) and `format`/`formatWithOptions`,
+  `deprecate`, `inherits`, `isDeepStrictEqual`, `types.*`, `debuglog`, the legacy
+  `is*` predicates, and the `TextEncoder`/`TextDecoder` re-exports. Registered in
+  `makeBuiltins`; unit-tested against Node's own `util`/`EventEmitter` as oracle.
 - **`Buffer` (global + `node:buffer`) and the `global` alias** (`src/node/buffer.js`,
   `node-program.js`). A browser worker has neither, and a huge share of npm expects
   `Buffer` ambient (`Buffer.from(...)` at module top level), so both are now
