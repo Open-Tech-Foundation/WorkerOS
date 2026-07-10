@@ -139,24 +139,75 @@ sys.exit(code);
 
   "/sbin/ls": util(`
 const showAll = has("a");
-const targets = operands.length ? operands : ["."];
+const long = has("l");
+const human = has("h");
+const reverse = has("r");
+const recursive = has("R");
 let code = 0;
-const many = targets.length > 1;
-for (const t of targets) {
+
+const formatSize = (bytes) => {
+  if (!human) return String(bytes);
+  const units = ['B', 'K', 'M', 'G', 'T'];
+  let u = 0;
+  while (bytes >= 1024 && u < units.length - 1) { bytes /= 1024; u++; }
+  return (u === 0 ? String(bytes) : bytes.toFixed(1)) + units[u];
+};
+
+async function listDir(t, many) {
   try {
     const st = await sys.stat(t);
-    if (st.kind === "dir") {
-      const entries = await sys.readdir(t);
-      const names = entries.map((e) => e.name).filter((n) => showAll || !n.startsWith("."));
-      if (many) out(t + ":\\n");
-      out(names.join("\\n") + (names.length ? "\\n" : ""));
+    if (st.kind !== "dir") {
+      if (long) out((st.kind === "dir" ? "d" : "-") + "rw-r--r-- " + formatSize(st.size).padStart(8) + " " + t + "\\n");
+      else out(t + "\\n");
+      return;
+    }
+    const entries = await sys.readdir(t);
+    let names = entries.map((e) => e.name).filter((n) => showAll || !n.startsWith("."));
+    names.sort();
+    if (reverse) names.reverse();
+
+    if (many) out(t + ":\\n");
+    
+    if (long) {
+      for (const n of names) {
+        const path = t.replace(/\\/+$/, "") + "/" + n;
+        try {
+          const cst = await sys.stat(path);
+          const mode = (cst.kind === "dir" ? "d" : "-") + "rw-r--r--";
+          out(mode + " " + formatSize(cst.size).padStart(8) + " " + n + "\\n");
+        } catch(e) {
+          out("????????? ???????? " + n + "\\n");
+        }
+      }
     } else {
-      out(t + "\\n");
+      out(names.join("\\n") + (names.length ? "\\n" : ""));
+    }
+
+    if (recursive) {
+      for (const n of names) {
+        if (n === "." || n === "..") continue;
+        const path = t.replace(/\\/+$/, "") + "/" + n;
+        const cst = await sys.stat(path).catch(() => null);
+        if (cst && cst.kind === "dir") {
+          out("\\n");
+          await listDir(path, true);
+        }
+      }
     }
   } catch (e) {
     err("ls: " + t + ": No such file or directory\\n");
     code = 1;
   }
+}
+
+const targets = operands.length ? operands : ["."];
+targets.sort();
+if (reverse) targets.reverse();
+const many = targets.length > 1 || recursive;
+
+for (let i = 0; i < targets.length; i++) {
+  if (i > 0 && many && !recursive) out("\\n");
+  await listDir(targets[i], many);
 }
 sys.exit(code);
 `),

@@ -74,5 +74,36 @@ test("tr", async () => {
   assert.equal((await run("tr", { argv: ["-d", "aeiou"], stdin: "hello world\n" })).out, "hll wrld\n");
 });
 
+test("ls", async () => {
+  const vfs = { "/dir/.hidden": "", "/dir/a.txt": "123", "/dir/b.txt": "1234567" };
+  const st = {
+    argv: ["-a", "/dir"], files: vfs,
+    sysOverrides: {
+      stat: async (p) => ({ kind: Object.keys(vfs).some(k => k.startsWith(p + "/")) ? "dir" : "file", size: vfs[p] ? vfs[p].length : 0 }),
+      readdir: async (p) => Object.keys(vfs).filter(k => k.startsWith(p + "/") && k.slice(p.length + 1).indexOf("/") === -1).map(k => ({ name: k.slice(p.length + 1) }))
+    }
+  };
+  
+  // Custom run for ls because it needs readdir mock
+  async function runLs(args) {
+    const body = coreutils["/sbin/ls"];
+    let out = "";
+    const sys = {
+      argv: ["ls", ...args], cwd: "/",
+      write: (fd, bytes) => { if(fd===1) out += dec.decode(bytes); },
+      stat: st.sysOverrides.stat,
+      readdir: st.sysOverrides.readdir,
+      exit: (code) => { const e = new Error(); e.code = code; throw e; }
+    };
+    try { await new Function("sys", "return (async () => { " + body + "})();")(sys); } catch(e) {}
+    return out;
+  }
+  
+  assert.equal(await runLs(["/dir"]), "a.txt\\nb.txt\\n");
+  assert.equal(await runLs(["-a", "/dir"]), ".hidden\\na.txt\\nb.txt\\n");
+  assert.equal(await runLs(["-r", "/dir"]), "b.txt\\na.txt\\n");
+  assert.equal(await runLs(["-l", "/dir"]), "-rw-r--r--        0 a.txt\\n-rw-r--r--        0 b.txt\\n");
+});
+
 // grep is a Rust `wasm32-wasip1` binary (crates/wsh-grep), not a JS coreutil —
 // tested in that crate and in the browser pipeline suite.
