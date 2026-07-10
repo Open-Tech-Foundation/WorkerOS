@@ -7,6 +7,12 @@ a release yet, so everything lives under **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **`node_modules/.bin` on the command search path (PLAN Phase 5·E).**
+  `resolve_invocation` now searches `node_modules/.bin` for a bare command,
+  nearest first (`<cwd>/node_modules/.bin` climbing to `/`), **ahead of** the
+  system PATH (`/bin:/sbin`) — npm's convention, so an installed package's `bin`
+  runs as a bare name from anywhere in the project. The kernel just searches a
+  path; `npm` writes the launcher file (no OS-specific shim in core, INV-1).
 - **ESM `node_modules` + `node:` builtin resolution in the resolver (PLAN Phase
   5·C-ESM / D).** `resolve_graph` no longer rejects every non-relative specifier
   (INV-2, the kernel owns resolution). It now handles three kinds:

@@ -177,7 +177,14 @@ pub fn resolve_invocation(
             })
         }
         Some(name) => {
-            let entry = resolve_command(vfs, cwd, name, path_dirs)
+            // Search `node_modules/.bin` (nearest first, npm's convention) ahead
+            // of the system PATH, so an installed package's `bin` runs as a bare
+            // name from anywhere in the project (PLAN Phase 5·E). A name with a
+            // slash is a path (handled inside `resolve_command`), not a bin.
+            let bin_dirs = node_bin_dirs(cwd);
+            let mut dirs: Vec<&str> = bin_dirs.iter().map(String::as_str).collect();
+            dirs.extend_from_slice(path_dirs);
+            let entry = resolve_command(vfs, cwd, name, &dirs)
                 .ok_or_else(|| ResolveError::NotFound(name.to_string()))?;
             Ok(Invocation {
                 interpreter: Interpreter::Js,
@@ -185,6 +192,23 @@ pub fn resolve_invocation(
             })
         }
     }
+}
+
+/// The `node_modules/.bin` directories to search for a bare command, nearest
+/// first: `<cwd>/node_modules/.bin`, then each ancestor up to `/`. npm's PATH
+/// convention — the VFS has no symlinks, so `npm install` writes a generated
+/// launcher there (PLAN Phase 5·E).
+fn node_bin_dirs(cwd: &str) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let mut dir = cwd.to_string();
+    loop {
+        dirs.push(path::normalize(&dir, "node_modules/.bin"));
+        if dir == "/" {
+            break;
+        }
+        dir = path::split(&dir).map(|(p, _)| p).unwrap_or("/").to_string();
+    }
+    dirs
 }
 
 /// Resolve the full JS module graph rooted at `entry` (an absolute VFS path).
@@ -617,6 +641,34 @@ mod tests {
         assert_eq!(
             resolve_invocation(&vfs, "/proj", &["ls".into(), "-a".into()], DEFAULT_PATH).unwrap(),
             Invocation { interpreter: Interpreter::Js, entry: "/bin/ls".into() }
+        );
+    }
+
+    #[test]
+    fn command_resolves_node_modules_bin_before_path() {
+        let mut vfs = MemVfs::new();
+        vfs.mkdir("/bin").unwrap();
+        vfs.mkdir("/proj").unwrap();
+        for d in ["/proj/node_modules", "/proj/node_modules/.bin", "/proj/src"] {
+            vfs.mkdir(d).unwrap();
+        }
+        write(&mut vfs, "/bin/esbuild", "// a different one on PATH");
+        write(&mut vfs, "/bin/node", "");
+        write(&mut vfs, "/proj/node_modules/.bin/esbuild", "// the installed launcher");
+        // From the project root, the local .bin wins over /bin.
+        assert_eq!(
+            resolve_invocation(&vfs, "/proj", &["esbuild".into()], DEFAULT_PATH).unwrap().entry,
+            "/proj/node_modules/.bin/esbuild"
+        );
+        // From a subdirectory, the walk climbs to the project's .bin.
+        assert_eq!(
+            resolve_invocation(&vfs, "/proj/src", &["esbuild".into()], DEFAULT_PATH).unwrap().entry,
+            "/proj/node_modules/.bin/esbuild"
+        );
+        // With no local .bin entry, resolution still falls through to PATH.
+        assert_eq!(
+            resolve_invocation(&vfs, "/proj", &["node".into()], DEFAULT_PATH).unwrap().entry,
+            "/bin/node"
         );
     }
 

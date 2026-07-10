@@ -168,6 +168,7 @@ export function createModule({ fs, path, url, builtins }) {
     builtinModules: [...builtins.keys()],
     isBuiltin,
     syncRequire: makeRequire, // internal: a require rooted at an arbitrary dir
+    _load: load, // internal: load a CJS module by absolute path (ESM-graph interop)
     wrap: (src) =>
       "(function (exports, require, module, __filename, __dirname) { " + src + "\n});",
     _cache: cacheProxy,

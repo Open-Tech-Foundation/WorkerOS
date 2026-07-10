@@ -163,24 +163,58 @@ const pathToBlob = new Map();
 // `import fs from 'node:fs'` and `import { readFileSync } from 'fs'` work.
 const builtins = makeBuiltins(sys);
 globalThis.__workerosBuiltins = builtins;
+// Load a CommonJS module (and, on demand, its `require` subtree) via the
+// synchronous CJS loader — backed by the sync `fs`, so a CJS dep reached from
+// ESM resolves its own `require`s at load time. Cached, so a stitch-time probe
+// and the runtime import share one instance.
+globalThis.__workerosLoadCjs = (p) => builtins.get("module")._load(p);
+
 const isIdent = (k) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k);
-const builtinModuleSource = (key) => {
-  const b = builtins.get(key);
-  const names = b && typeof b === "object" ? Object.keys(b).filter((k) => k !== "default" && isIdent(k)) : [];
-  let src = `const m = globalThis.__workerosBuiltins.get(${JSON.stringify(key)});\nexport default m;\n`;
-  for (const n of names) src += `export const ${n} = m[${JSON.stringify(n)}];\n`;
+// A synthetic ES module that re-exports a live runtime object `m`: `export
+// default m` plus a named export per own key (interop for `import { x } from …`).
+const reexportSource = (getter, keys) => {
+  let src = `const m = ${getter};\nexport default m;\n`;
+  for (const n of keys) src += `export const ${n} = m[${JSON.stringify(n)}];\n`;
   return src;
 };
+const ownKeys = (m) =>
+  m && typeof m === "object" && !Array.isArray(m)
+    ? Object.keys(m).filter((k) => k !== "default" && isIdent(k))
+    : [];
+
+// `node:` builtin edges (Phase 5·C-ESM): the kernel marked these `builtin`, so
+// there is no VFS file — synthesize a re-export module wired to the guest runtime
+// (`import fs from 'node:fs'` and `import { readFileSync } from 'fs'` both work).
 for (const mod of graph.modules) {
   for (const imp of mod.imports) {
     if (imp.builtin && !pathToBlob.has(imp.resolved)) {
-      const blob = new Blob([builtinModuleSource(imp.resolved)], { type: "text/javascript" });
-      pathToBlob.set(imp.resolved, URL.createObjectURL(blob));
+      const getter = `globalThis.__workerosBuiltins.get(${JSON.stringify(imp.resolved)})`;
+      const src = reexportSource(getter, ownKeys(builtins.get(imp.resolved)));
+      pathToBlob.set(imp.resolved, URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
     }
   }
 }
 
-let remaining = [...graph.modules];
+// CommonJS modules the kernel resolved into an ESM graph (Phase 5·D follow-up):
+// they use `module.exports`/`require`, so they can't be evaluated as ES modules.
+// Stand each one up with a synthetic ES module that hands off to the synchronous
+// CJS loader, and skip stitching the CJS source as ESM. (The entry itself is ESM
+// here — a CJS entry goes through the runtime branch above.)
+const cjsPaths = new Set(
+  graph.modules.filter((m) => m.path !== graph.entry && usesCommonjs(m.source, m.path)).map((m) => m.path),
+);
+for (const p of cjsPaths) {
+  let keys = [];
+  try {
+    keys = ownKeys(globalThis.__workerosLoadCjs(p)); // cached; probes named exports
+  } catch {
+    // A load failure surfaces at runtime (the real import below), not here.
+  }
+  const src = reexportSource(`globalThis.__workerosLoadCjs(${JSON.stringify(p)})`, keys);
+  pathToBlob.set(p, URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+}
+
+let remaining = graph.modules.filter((m) => !cjsPaths.has(m.path));
 while (remaining.length) {
   const built = [];
   for (const mod of remaining) {

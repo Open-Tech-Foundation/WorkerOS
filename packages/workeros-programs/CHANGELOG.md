@@ -8,6 +8,21 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **npm bin-linking + PATH** (`npm/npm-program.js`, PLAN Phase 5·E). `npm install`
+  now writes a generated launcher to `node_modules/.bin/<name>` for each package
+  `bin` (a string, named after the package, or a `{ name: path }` map). The VFS
+  has no symlinks, so the launcher is a tiny native program that re-execs
+  `node <target>` via `sys.exec`, forwarding argv and the exit code; paired with
+  the kernel searching `node_modules/.bin` ahead of PATH, an installed package's
+  command runs as a bare name (`esbuild …`). Honest limit (INV-5): `sys.exec`
+  doesn't forward stdin to the bin yet.
+- **CJS-in-an-ESM-graph interop** (`node-program.js`, `module.js`). A CommonJS
+  dependency reached via an ESM `import` (the kernel resolves it into the graph
+  as a leaf) can't be evaluated as an ES module. `/bin/node`'s ESM stitch now
+  stands each such module up with a synthetic ES module — `export default
+  module.exports` plus a named export per own key (interop for `import { x }`) —
+  backed by the synchronous CJS loader (`module.js` `_load`), which resolves the
+  dep's own `require` subtree on demand over the sync `fs`. End-to-end tested.
 - **ESM `import` of `node:` builtins and installed packages** (PLAN Phase
   5·C-ESM / D). With the kernel resolver now resolving `node_modules` and marking
   `node:` imports as builtin edges, `/bin/node`'s ESM stitch (`node-program.js`)
