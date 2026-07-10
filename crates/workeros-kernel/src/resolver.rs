@@ -8,10 +8,19 @@
 //! *stitches* it (blob URLs); it never decides what a specifier points at. That
 //! division is the whole point of INV-2.
 //!
-//! Scope (Phase 2): **relative** specifiers only (`./`, `../`, `/`). Bare
-//! specifiers (`import "foo"`) need the package-folder resolution walk, which is
-//! a guest-side `workeros-programs/node` concern for Phase 5 — here they are an explicit,
-//! honest error, never a silent stub (INV-5).
+//! Scope: three kinds of specifier (PLAN Phase 5·C-ESM / D):
+//!   * **relative** (`./`, `../`, `/`) — resolved against the VFS (Phase 2).
+//!   * **`node:` builtins** (`node:fs`, or a bare core name like `fs`/`path`) —
+//!     resolved to a *runtime-provided external*: the guest node layer supplies
+//!     the module, so the kernel records the edge as `builtin` with no VFS file
+//!     (INV-1). The `node:` scheme is always a builtin; bare names are matched
+//!     against [`NODE_BUILTINS`], kept in sync with the JS registry.
+//!   * **bare packages** (`import _ from "lodash"`, `"@scope/pkg/sub"`) — the
+//!     `node_modules` resolution walk: nearest `node_modules/<name>`, then the
+//!     package's `exports`(".")/`module`/`main` (ESM conditions), subpath
+//!     `exports`, and `.js`/`.mjs`/`.cjs`/`.json` + `index` fallbacks.
+//! A bare specifier that is neither a builtin nor an installed package is an
+//! explicit, honest error, never a silent stub (INV-5).
 //!
 //! The import scanner recognizes static `import`/`export … from "spec"`,
 //! side-effect `import "spec"`, and dynamic `import("spec")` with string-literal
@@ -20,7 +29,15 @@
 //! documented rather than hidden.
 
 use crate::errno::Errno;
+use crate::json::Json;
 use crate::vfs::{path, FileType, Vfs};
+
+/// Node core modules the guest runtime provides at runtime (mirrors
+/// `workeros-programs/src/node/require-runtime.js` `makeBuiltins`). An `import`
+/// of one of these — or of any `node:`-schemed specifier — resolves to a
+/// runtime-provided external rather than a VFS file. Keep in sync with the JS.
+pub const NODE_BUILTINS: &[&str] =
+    &["fs", "fs/promises", "path", "path/posix", "os", "url", "module"];
 
 /// The executable kind of a resolved module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,12 +59,16 @@ impl ModuleKind {
     }
 }
 
-/// One import edge inside a module: the specifier as written, and the absolute
-/// VFS path the kernel resolved it to.
+/// One import edge inside a module: the specifier as written, and what the
+/// kernel resolved it to. For a file edge, `resolved` is the absolute VFS path
+/// and `builtin` is false; for a runtime builtin (`node:fs`, `fs`, …) `builtin`
+/// is true and `resolved` is the builtin key (the name without the `node:`
+/// scheme) — there is no VFS file, so the shim wires it to the guest runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportEdge {
     pub specifier: String,
     pub resolved: String,
+    pub builtin: bool,
 }
 
 /// One node in the resolved module graph.
@@ -198,24 +219,26 @@ pub fn resolve_graph(vfs: &dyn Vfs, entry: &str) -> Result<ModuleGraph, ResolveE
         }
 
         let source = read_text(vfs, &path_abs)?;
-        let parent = path::split(&path_abs).map(|(p, _)| p).unwrap_or("/");
+        let parent = path::split(&path_abs).map(|(p, _)| p).unwrap_or("/").to_string();
         let mut imports = Vec::new();
         for specifier in scan_imports(&source) {
-            if !is_relative(&specifier) {
-                return Err(ResolveError::Unsupported(specifier));
+            // A `node:` builtin (or a bare core name): a runtime-provided external.
+            if let Some(key) = builtin_key(&specifier) {
+                imports.push(ImportEdge { specifier, resolved: key, builtin: true });
+                continue;
             }
-            let resolved = path::normalize(parent, &specifier);
-            match vfs.stat(&resolved) {
-                Ok(meta) if meta.file_type == FileType::File => {}
-                _ => return Err(ResolveError::NotFound(resolved.clone())),
+            // Relative → VFS path; bare package → node_modules walk.
+            let resolved = if is_relative(&specifier) {
+                resolve_file(vfs, &path::normalize(&parent, &specifier))
+            } else {
+                resolve_bare(vfs, &parent, &specifier)
             }
+            .ok_or_else(|| ResolveError::NotFound(specifier.clone()))?;
+
             if !seen.contains(&resolved) {
                 queue.push(resolved.clone());
             }
-            imports.push(ImportEdge {
-                specifier,
-                resolved,
-            });
+            imports.push(ImportEdge { specifier, resolved, builtin: false });
         }
         modules.push(ModuleRecord {
             path: path_abs,
@@ -238,6 +261,189 @@ pub fn resolve_graph(vfs: &dyn Vfs, entry: &str) -> Result<ModuleGraph, ResolveE
 
 fn is_relative(specifier: &str) -> bool {
     specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/')
+}
+
+/// The builtin key for a specifier, if it names a Node core module. A `node:`
+/// scheme is always a builtin (the runtime errors if it doesn't provide it); a
+/// bare name is a builtin only if it's in [`NODE_BUILTINS`] (else it's a package).
+fn builtin_key(spec: &str) -> Option<String> {
+    if let Some(rest) = spec.strip_prefix("node:") {
+        return Some(rest.to_string());
+    }
+    if NODE_BUILTINS.contains(&spec) {
+        return Some(spec.to_string());
+    }
+    None
+}
+
+fn is_file(vfs: &dyn Vfs, p: &str) -> bool {
+    matches!(vfs.stat(p), Ok(m) if m.file_type == FileType::File)
+}
+
+fn is_dir(vfs: &dyn Vfs, p: &str) -> bool {
+    matches!(vfs.stat(p), Ok(m) if m.file_type == FileType::Dir)
+}
+
+fn read_json(vfs: &dyn Vfs, path_abs: &str) -> Option<Json> {
+    let bytes = read_file(vfs, path_abs).ok()?;
+    Json::parse(&String::from_utf8(bytes).ok()?)
+}
+
+/// Resolve a path to a file with Node's "load as file, then as directory"
+/// fallbacks (subset): exact, then `.js`/`.mjs`/`.cjs`/`.json`, then the
+/// directory's package entry or `index.*`.
+fn resolve_file(vfs: &dyn Vfs, p: &str) -> Option<String> {
+    if is_file(vfs, p) {
+        return Some(p.to_string());
+    }
+    for ext in [".js", ".mjs", ".cjs", ".json"] {
+        let cand = format!("{p}{ext}");
+        if is_file(vfs, &cand) {
+            return Some(cand);
+        }
+    }
+    if is_dir(vfs, p) {
+        return resolve_dir(vfs, p);
+    }
+    None
+}
+
+/// Resolve a directory to its entry file: package.json `exports`(".")/`module`/
+/// `main`, then `index.*`.
+fn resolve_dir(vfs: &dyn Vfs, dir: &str) -> Option<String> {
+    if let Some(pkg) = read_json(vfs, &path::normalize(dir, "package.json")) {
+        if let Some(target) = pick_entry(&pkg) {
+            if let Some(r) = resolve_file(vfs, &path::normalize(dir, &target)) {
+                return Some(r);
+            }
+        }
+    }
+    for idx in ["index.js", "index.mjs", "index.cjs", "index.json"] {
+        let cand = path::normalize(dir, idx);
+        if is_file(vfs, &cand) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// The package's "." entry target: `exports["."]` (ESM conditions), else the
+/// `module` field (ESM entry, preferred), else `main`.
+fn pick_entry(pkg: &Json) -> Option<String> {
+    if let Some(exports) = pkg.get("exports") {
+        if let Some(t) = resolve_export(exports, ".") {
+            return Some(t);
+        }
+    }
+    pkg.get("module")
+        .and_then(Json::as_str)
+        .or_else(|| pkg.get("main").and_then(Json::as_str))
+        .map(String::from)
+}
+
+/// Resolve a subpath ("." or "./sub") against a package `exports` value.
+fn resolve_export(exports: &Json, subpath: &str) -> Option<String> {
+    match exports {
+        // `"exports": "./index.js"` — a bare string is the "." target only.
+        Json::Str(s) => (subpath == ".").then(|| s.clone()),
+        Json::Obj(pairs) => {
+            // Subpath map (keys start with ".") vs. a bare conditions object.
+            if pairs.iter().any(|(k, _)| k.starts_with('.')) {
+                if let Some((_, v)) = pairs.iter().find(|(k, _)| k == subpath) {
+                    return pick_condition(v);
+                }
+                resolve_wildcard(pairs, subpath)
+            } else if subpath == "." {
+                pick_condition(exports)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Pick an ESM target from a conditions value: a string, the first matching of
+/// `import`/`node`/`default`/`require` in a conditions object (recursively), or
+/// the first usable entry of a fallback array.
+fn pick_condition(v: &Json) -> Option<String> {
+    match v {
+        Json::Str(s) => Some(s.clone()),
+        Json::Obj(_) => ["import", "node", "default", "require"]
+            .iter()
+            .find_map(|cond| v.get(cond).and_then(pick_condition)),
+        Json::Arr(items) => items.iter().find_map(pick_condition),
+        _ => None,
+    }
+}
+
+/// A `"./*"`-pattern subpath export: substitute the matched tail into the target.
+fn resolve_wildcard(pairs: &[(String, Json)], subpath: &str) -> Option<String> {
+    for (k, v) in pairs {
+        if let Some(prefix) = k.strip_suffix('*') {
+            if let Some(rest) = subpath.strip_prefix(prefix) {
+                return Some(pick_condition(v)?.replace('*', rest));
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a bare package specifier via the `node_modules` walk from `from_dir`.
+fn resolve_bare(vfs: &dyn Vfs, from_dir: &str, spec: &str) -> Option<String> {
+    let (name, sub) = split_package(spec);
+    let mut dir = from_dir.to_string();
+    loop {
+        let pkg_dir = path::normalize(&dir, &format!("node_modules/{name}"));
+        if is_dir(vfs, &pkg_dir) {
+            if let Some(r) = resolve_in_package(vfs, &pkg_dir, sub) {
+                return Some(r);
+            }
+        }
+        if dir == "/" {
+            return None;
+        }
+        dir = path::split(&dir).map(|(p, _)| p).unwrap_or("/").to_string();
+    }
+}
+
+/// Resolve a (possibly-subpath) import inside an already-located package dir.
+fn resolve_in_package(vfs: &dyn Vfs, pkg_dir: &str, sub: &str) -> Option<String> {
+    let pkg = read_json(vfs, &path::normalize(pkg_dir, "package.json"));
+    if sub.is_empty() {
+        if let Some(target) = pkg.as_ref().and_then(pick_entry) {
+            if let Some(r) = resolve_file(vfs, &path::normalize(pkg_dir, &target)) {
+                return Some(r);
+            }
+        }
+        return resolve_dir(vfs, pkg_dir);
+    }
+    // A subpath: honor a subpath `exports` map if the package has one (exports
+    // seals the package); otherwise resolve it as a plain file under the package.
+    if let Some(exports) = pkg.as_ref().and_then(|p| p.get("exports")) {
+        if matches!(exports, Json::Obj(pairs) if pairs.iter().any(|(k, _)| k.starts_with('.'))) {
+            return resolve_export(exports, &format!("./{sub}"))
+                .and_then(|t| resolve_file(vfs, &path::normalize(pkg_dir, &t)));
+        }
+    }
+    resolve_file(vfs, &path::normalize(pkg_dir, sub))
+}
+
+/// Split a bare specifier into (package name, subpath), handling `@scope/name`.
+fn split_package(spec: &str) -> (&str, &str) {
+    // For a scoped name the first '/' belongs to the name; search after it.
+    let from = if spec.starts_with('@') {
+        spec.find('/').map(|i| i + 1).unwrap_or(spec.len())
+    } else {
+        0
+    };
+    match spec[from..].find('/') {
+        Some(rel) => {
+            let idx = from + rel;
+            (&spec[..idx], &spec[idx + 1..])
+        }
+        None => (spec, ""),
+    }
 }
 
 /// True if `bytes` begins with the WebAssembly magic header (`\0asm`).
@@ -472,7 +678,8 @@ mod tests {
             g.modules[0].imports,
             vec![ImportEdge {
                 specifier: "./lib/util.js".into(),
-                resolved: "/proj/lib/util.js".into()
+                resolved: "/proj/lib/util.js".into(),
+                builtin: false,
             }]
         );
     }
@@ -494,18 +701,114 @@ mod tests {
         write(&mut vfs, "/main.js", "import './gone.js';");
         assert_eq!(
             resolve_graph(&vfs, "/main.js").unwrap_err(),
-            ResolveError::NotFound("/gone.js".into())
+            ResolveError::NotFound("./gone.js".into())
         );
     }
 
     #[test]
-    fn bare_specifier_is_unsupported() {
+    fn uninstalled_bare_package_is_not_found() {
         let mut vfs = MemVfs::new();
         write(&mut vfs, "/main.js", "import _ from 'lodash';");
         assert_eq!(
             resolve_graph(&vfs, "/main.js").unwrap_err(),
-            ResolveError::Unsupported("lodash".into())
+            ResolveError::NotFound("lodash".into())
         );
+    }
+
+    #[test]
+    fn node_builtin_imports_are_external_edges() {
+        let mut vfs = MemVfs::new();
+        write(
+            &mut vfs,
+            "/main.js",
+            "import fs from 'node:fs'; import { join } from 'path'; import p from 'node:custom';",
+        );
+        let g = resolve_graph(&vfs, "/main.js").unwrap();
+        assert_eq!(g.modules.len(), 1, "builtins are not graph nodes");
+        assert_eq!(
+            g.modules[0].imports,
+            vec![
+                ImportEdge { specifier: "node:fs".into(), resolved: "fs".into(), builtin: true },
+                ImportEdge { specifier: "path".into(), resolved: "path".into(), builtin: true },
+                // `node:` is always a builtin even if unknown here — the runtime
+                // decides whether it can provide it (honest failure at load).
+                ImportEdge { specifier: "node:custom".into(), resolved: "custom".into(), builtin: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_package_resolves_via_node_modules_main_and_exports() {
+        let mut vfs = MemVfs::new();
+        vfs.mkdir("/proj").unwrap();
+        for d in ["/proj/node_modules", "/proj/node_modules/leftpad", "/proj/node_modules/leftpad/lib"] {
+            vfs.mkdir(d).unwrap();
+        }
+        write(&mut vfs, "/proj/app.js", "import lp from 'leftpad'; import edge from 'edgy';");
+        write(&mut vfs, "/proj/node_modules/leftpad/package.json", r#"{"main":"lib/index.js"}"#);
+        write(&mut vfs, "/proj/node_modules/leftpad/lib/index.js", "export default 1;");
+        // ESM `exports` conditions: import → ./esm/main.js
+        for d in ["/proj/node_modules/edgy", "/proj/node_modules/edgy/esm"] {
+            vfs.mkdir(d).unwrap();
+        }
+        write(
+            &mut vfs,
+            "/proj/node_modules/edgy/package.json",
+            r#"{"exports":{".":{"import":"./esm/main.js","require":"./cjs/main.js"}}}"#,
+        );
+        write(&mut vfs, "/proj/node_modules/edgy/esm/main.js", "export default 2;");
+        let g = resolve_graph(&vfs, "/proj/app.js").unwrap();
+        let resolved: Vec<_> = g.modules[0].imports.iter().map(|e| e.resolved.clone()).collect();
+        assert_eq!(resolved, vec![
+            "/proj/node_modules/leftpad/lib/index.js",
+            "/proj/node_modules/edgy/esm/main.js",
+        ]);
+        // Both dependency files are pulled into the graph.
+        assert_eq!(g.modules.len(), 3);
+    }
+
+    #[test]
+    fn scoped_subpath_export_resolves() {
+        let mut vfs = MemVfs::new();
+        vfs.mkdir("/proj").unwrap();
+        for d in [
+            "/proj/node_modules",
+            "/proj/node_modules/@scope",
+            "/proj/node_modules/@scope/utils",
+            "/proj/node_modules/@scope/utils/build",
+        ] {
+            vfs.mkdir(d).unwrap();
+        }
+        write(&mut vfs, "/proj/app.js", "import x from '@scope/utils/lodash';");
+        write(
+            &mut vfs,
+            "/proj/node_modules/@scope/utils/package.json",
+            r#"{"exports":{"./lodash":"./build/lodash.js","./package.json":"./package.json"}}"#,
+        );
+        write(&mut vfs, "/proj/node_modules/@scope/utils/build/lodash.js", "export default 3;");
+        let g = resolve_graph(&vfs, "/proj/app.js").unwrap();
+        assert_eq!(
+            g.modules[0].imports[0].resolved,
+            "/proj/node_modules/@scope/utils/build/lodash.js"
+        );
+    }
+
+    #[test]
+    fn dependency_walks_up_to_parent_node_modules() {
+        // A hoisted dep: pkg `a` requires `b`, but `b` lives in the top-level
+        // node_modules, not inside `a` — the walk must climb to find it.
+        let mut vfs = MemVfs::new();
+        vfs.mkdir("/proj").unwrap();
+        for d in ["/proj/node_modules", "/proj/node_modules/a", "/proj/node_modules/b"] {
+            vfs.mkdir(d).unwrap();
+        }
+        write(&mut vfs, "/proj/app.js", "import a from 'a';");
+        write(&mut vfs, "/proj/node_modules/a/package.json", r#"{"main":"index.js"}"#);
+        write(&mut vfs, "/proj/node_modules/a/index.js", "import b from 'b'; export default b;");
+        write(&mut vfs, "/proj/node_modules/b/index.js", "export default 9;");
+        let g = resolve_graph(&vfs, "/proj/app.js").unwrap();
+        let paths: Vec<_> = g.modules.iter().map(|m| m.path.clone()).collect();
+        assert!(paths.contains(&"/proj/node_modules/b/index.js".to_string()), "{paths:?}");
     }
 
     #[test]

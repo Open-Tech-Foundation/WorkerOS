@@ -23,8 +23,11 @@ import { createModule } from "./module.js";
 // ---- core builtins --------------------------------------------------------
 // `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
 // not to files in the VFS (PLAN Phase 5·C, B). The registry grows here as more
-// `node:` builtins land (`crypto`, `stream`, …).
-function makeBuiltins(sys) {
+// `node:` builtins land (`crypto`, `stream`, …). Exported so `/bin/node`'s ESM
+// stitch can synthesize a re-export module for each `node:` import the kernel
+// marked as a builtin edge (Phase 5·C-ESM). The map's keys are the builtin keys
+// the kernel resolves to (see `resolver.rs` `NODE_BUILTINS`).
+export function makeBuiltins(sys) {
   const fs = createFs(sys.syncFs);
   const path = createPath();
   const os = createOs();

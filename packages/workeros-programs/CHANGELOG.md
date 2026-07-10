@@ -8,6 +8,17 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **ESM `import` of `node:` builtins and installed packages** (PLAN Phase
+  5·C-ESM / D). With the kernel resolver now resolving `node_modules` and marking
+  `node:` imports as builtin edges, `/bin/node`'s ESM stitch (`node-program.js`)
+  synthesizes a tiny re-export module for each builtin edge — `export default m`
+  plus a named export per own key — so `import fs from 'node:fs'` and
+  `import { readFileSync } from 'fs'` both resolve to the guest runtime object
+  (`makeBuiltins` is now exported for this). Bare-package `import`s (a package's
+  `main`/`exports`, scoped + subpath) are ordinary VFS modules the kernel put in
+  the graph, so ESM-only packages run. (CJS-in-an-ESM-graph interop — a `require`-
+  style dep pulled in by `import` — is a documented follow-up; the ESM path
+  assumes ESM modules.) End-to-end tested in a browser.
 - **`node:module` / `node:os` / `node:url` builtins + a fuller `process`** (PLAN
   Phase 5·B). Three more core `node:` builtins resolve through the CJS registry:
   - **`module`** (`src/node/module.js`) — the headline is `createRequire(filename)`:

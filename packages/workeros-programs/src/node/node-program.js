@@ -16,7 +16,7 @@
 // a plain ESM script keeps the kernel-graph stitch path. Both are guest code —
 // the kernel still owns only native resolution + execution (INV-1/INV-2).
 
-import { createNodeRuntime, usesCommonjs } from "/lib/workeros-node/require-runtime.js";
+import { createNodeRuntime, usesCommonjs, makeBuiltins } from "/lib/workeros-node/require-runtime.js";
 
 const enc = new TextEncoder();
 const err = (s) => sys.write(2, enc.encode(s));
@@ -155,6 +155,31 @@ if (entryMod && usesCommonjs(entryMod.source, graph.entry)) {
 // import specifier to its dependency's blob URL. Mechanical assembly only — the
 // kernel already decided every target (mirrors the worker's own stitch step).
 const pathToBlob = new Map();
+
+// `node:` builtin edges (Phase 5·C-ESM): the kernel marked these `builtin`, so
+// there is no VFS file. Synthesize a tiny ES module per distinct builtin that
+// re-exports the live runtime object (stashed on the global for the blob realm
+// to read) — `export default m` plus a named export per own key, so both
+// `import fs from 'node:fs'` and `import { readFileSync } from 'fs'` work.
+const builtins = makeBuiltins(sys);
+globalThis.__workerosBuiltins = builtins;
+const isIdent = (k) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k);
+const builtinModuleSource = (key) => {
+  const b = builtins.get(key);
+  const names = b && typeof b === "object" ? Object.keys(b).filter((k) => k !== "default" && isIdent(k)) : [];
+  let src = `const m = globalThis.__workerosBuiltins.get(${JSON.stringify(key)});\nexport default m;\n`;
+  for (const n of names) src += `export const ${n} = m[${JSON.stringify(n)}];\n`;
+  return src;
+};
+for (const mod of graph.modules) {
+  for (const imp of mod.imports) {
+    if (imp.builtin && !pathToBlob.has(imp.resolved)) {
+      const blob = new Blob([builtinModuleSource(imp.resolved)], { type: "text/javascript" });
+      pathToBlob.set(imp.resolved, URL.createObjectURL(blob));
+    }
+  }
+}
+
 let remaining = [...graph.modules];
 while (remaining.length) {
   const built = [];
