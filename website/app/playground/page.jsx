@@ -9,9 +9,9 @@
 //
 // The kernel runtime is served (unbundled) from /workeros/... by the sync step
 // (tools/sync-runtime.mjs → public/). We load it with a hidden dynamic import so
-// the site bundler leaves the worker/wasm graph untouched, and rely on the COI
-// service worker (public/coi-serviceworker.js) for the cross-origin isolation
-// SharedArrayBuffer needs.
+// the site bundler leaves the worker/wasm graph untouched, and rely on the single
+// WorkerOS service worker (public/preview-sw.js) for both the cross-origin
+// isolation SharedArrayBuffer needs (ADR-010) and preview routing (ADR-021).
 
 const RUNTIME_URL = "/workeros/packages/workeros-web/src/index.js";
 // Hidden from the bundler's static analysis — resolved purely at runtime.
@@ -68,6 +68,9 @@ function copyFallback(text) {
 export default function Playground() {
   let status = $state("booting");
   let statusText = $state("booting kernel…");
+  // The preview iframe src ("/__preview__/<port>/"), set when the user opens a
+  // port a guest is serving on (ADR-021). Empty until then.
+  let previewSrc = $state("");
 
   // Refit the terminal to its container. Assigned once the kernel has booted and
   // the xterm instance exists; a no-op before then.
@@ -94,8 +97,12 @@ export default function Playground() {
         if (!window.crossOriginIsolated) {
           statusText = "waiting for cross-origin isolation…";
         }
-        const { boot } = await loadRuntime(RUNTIME_URL);
+        const { boot, installPreviewBridge } = await loadRuntime(RUNTIME_URL);
         os = await boot();
+        // Bridge the service worker's preview requests to the kernel injector, so
+        // a guest `http.createServer(...).listen(port)` is reachable at
+        // /__preview__/<port>/ in the iframe below (ADR-021).
+        installPreviewBridge(os);
 
         // 3. Wire up xterm ⇆ the kernel TTY.
         const el = document.getElementById("term-screen");
@@ -195,6 +202,15 @@ export default function Playground() {
           term.focus();
           os.input(line + "\r");
         };
+
+        // Point the preview iframe at a port a guest is serving on. A cache-bust
+        // param forces a reload even when the same port is re-opened.
+        window.__pgPreview = () => {
+          const input = document.getElementById("preview-port");
+          const port = parseInt((input && input.value) || "0", 10);
+          if (!port) return;
+          previewSrc = `/__preview__/${port}/?t=${Date.now()}`;
+        };
       } catch (err) {
         status = "error";
         statusText = "boot failed";
@@ -231,9 +247,40 @@ export default function Playground() {
       <div class="pg-body">
         <div class="terminal">
           <div id="term-screen" class="term-screen" />
+          {previewSrc && (
+            <div class="preview-pane">
+              <div class="preview-bar">
+                <span class="preview-url">{previewSrc.split("?")[0]}</span>
+                <span class="nav-spacer" style="flex:1" />
+                <button class="chip" onclick={() => (previewSrc = "")}>
+                  close
+                </button>
+              </div>
+              <iframe class="preview-frame" src={previewSrc} title="preview" />
+            </div>
+          )}
         </div>
 
         <aside class="pg-side">
+          <h4>Preview a server</h4>
+          <p class="hint">
+            Run a server in the OS (e.g.{" "}
+            <code>node -e "require('http').createServer((_,r)=&gt;r.end('hi')).listen(5173)"</code>
+            ), then open its port:
+          </p>
+          <div class="cmd-list">
+            <input
+              id="preview-port"
+              class="preview-input"
+              type="number"
+              placeholder="5173"
+              value="5173"
+            />
+            <span class="chip" onclick={() => window.__pgPreview()}>
+              open preview
+            </span>
+          </div>
+
           <h4>Try a command</h4>
           <div class="cmd-list">
             {EXAMPLES.map((c) => (

@@ -9,11 +9,13 @@
     />
     <title>WorkerOS — an OS that boots in a Web Worker</title>
     <!--
-      Cross-origin isolation shim. WorkerOS uses SharedArrayBuffer (ADR-010) which
-      requires COOP/COEP. This service worker injects those headers client-side so the
-      playground boots on `otfw dev` and on any static host (GitHub Pages, etc.).
+      The single WorkerOS service worker (ADR-021). Two jobs in one SW (a page has
+      one controlling worker): (1) inject COOP/COEP headers so SharedArrayBuffer
+      works (ADR-010) on `otfw dev` and any static host; (2) intercept preview
+      requests (/__preview__/<port>/…) and route them into the kernel. Supersedes
+      the standalone coi-serviceworker.
     -->
-    <script src="/coi-serviceworker.js"></script>
+    <script src="/preview-sw.js"></script>
     <link rel="stylesheet" href="/app/global.css" />
   </head>
   <body>

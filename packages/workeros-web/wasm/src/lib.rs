@@ -544,6 +544,7 @@ impl WebKernel {
             kind: match m.file_type {
                 workeros_kernel::vfs::FileType::Dir => "dir",
                 workeros_kernel::vfs::FileType::File => "file",
+                workeros_kernel::vfs::FileType::Symlink => "symlink",
             },
             size: m.size,
         })
