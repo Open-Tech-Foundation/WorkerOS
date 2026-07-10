@@ -18,6 +18,8 @@
 
 import { createNodeRuntime, usesCommonjs, makeBuiltins } from "/lib/workeros-node/require-runtime.js";
 import { buildEsmGraph } from "/lib/workeros-node/esm-graph.js";
+import { createTty } from "/lib/workeros-node/tty.js";
+import { createEventLoop } from "/lib/workeros-node/event-loop.js";
 
 const enc = new TextEncoder();
 const err = (s) => sys.write(2, enc.encode(s));
@@ -40,6 +42,9 @@ const toBytes = (chunk) =>
 const [in0, out1, err2, ws] = await Promise.all([
   sys.isatty(0), sys.isatty(1), sys.isatty(2), sys.winsize(),
 ]);
+// Live terminal geometry: seeded from the startup probe, kept current by the
+// SIGWINCH handler below so tty.WriteStream.getWindowSize()/columns stay accurate.
+const winsize = { cols: ws.cols, rows: ws.rows };
 
 // A minimal Node EventEmitter — enough for `process` and its streams
 // (on/once/off/emit/listenerCount). `_onadd`/`_onremove` hooks let `process`
@@ -57,11 +62,22 @@ const emitter = (obj = {}) => {
   return obj;
 };
 
-const stream = (fd, isTTY) => {
-  const s = emitter({ write(chunk) { sys.write(fd, toBytes(chunk)); return true; }, isTTY });
-  if (isTTY) { s.columns = ws.cols; s.rows = ws.rows; }
-  return s;
-};
+// A non-TTY stdio fd (pipe/file redirect): a plain writable, no terminal methods —
+// exactly what Node hands you when a stream isn't a terminal.
+const pipeStream = (fd) =>
+  emitter({ write(chunk) { sys.write(fd, toBytes(chunk)); return true; }, isTTY: false });
+
+// The `node:tty` module. Its WriteStream/ReadStream back the stdio below when the
+// fd is a terminal, so `process.stdout` is a real tty.WriteStream (cursorTo,
+// clearLine, getColorDepth…) and `process.stdin.setRawMode()` works — same as Node.
+const tty = createTty({
+  write: (fd, bytes) => sys.write(fd, bytes),
+  isattyFor: (fd) => (fd === 0 ? in0 : fd === 1 ? out1 : fd === 2 ? err2 : false),
+  getWinsize: () => winsize,
+  getEnv: () => process.env,
+  setRawMode: (fd, on) => sys.tcsetattr({ canonical: !on, echo: !on, isig: !on }),
+  emitter,
+});
 
 const SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGWINCH", "SIGTSTP", "SIGHUP", "SIGUSR1", "SIGUSR2"]);
 
@@ -110,9 +126,11 @@ const process = emitter({
   chdir: (d) => { cwd = resolveCwd(String(d)); },
   hrtime,
   nextTick: (cb, ...args) => queueMicrotask(() => cb(...args)),
-  stdin: emitter({ isTTY: in0 }),
-  stdout: stream(1, out1),
-  stderr: stream(2, err2),
+  // A terminal fd gets a real tty stream (setRawMode / cursorTo / …); a redirected
+  // one gets a plain reader/writer — the isTTY split Node makes.
+  stdin: in0 ? new tty.ReadStream(0) : emitter({ isTTY: false, readable: true }),
+  stdout: out1 ? new tty.WriteStream(1) : pipeStream(1),
+  stderr: err2 ? new tty.WriteStream(2) : pipeStream(2),
   // sys.exit reports the code to the kernel and throws to unwind the current tick,
   // exactly like Node's non-returning process.exit.
   exit: (code = 0) => sys.exit(code | 0),
@@ -123,16 +141,34 @@ process._onadd = (ev) => { if (SIGNALS.has(ev) && process.listenerCount(ev) === 
 process._onremove = (ev) => { if (SIGNALS.has(ev) && process.listenerCount(ev) === 0) sys.sighandle(ev, false); };
 globalThis.process = process;
 
+// Node event-loop keep-alive (INV-1): without it, /bin/node reports the process
+// exited the instant the script's synchronous top level returns, so a top-level
+// setInterval/setTimeout would never fire. `install` publishes wrapped timer
+// globals that ref-count outstanding work; the tail `await whenIdle()` waits for
+// them to drain. (Bind the natives first — install overwrites the globals.)
+const loop = createEventLoop({
+  setTimeout: globalThis.setTimeout.bind(globalThis),
+  clearTimeout: globalThis.clearTimeout.bind(globalThis),
+  setInterval: globalThis.setInterval.bind(globalThis),
+  clearInterval: globalThis.clearInterval.bind(globalThis),
+});
+loop.install(globalThis);
+const whenIdle = loop.whenIdle;
+
 // Deliver kernel signals to process listeners. SIGWINCH refreshes the cached
 // terminal size first, so a handler (and later reads of stdout.columns) see the
-// new geometry; its default disposition is otherwise a harmless no-op.
+// new geometry; its default disposition is otherwise a harmless no-op. A handler
+// that calls process.exit throws ProcessExit (exit already reported) — swallow it.
 sys.onSignal(async (sig) => {
   if (sig === "SIGWINCH") {
     const size = await sys.winsize();
+    winsize.cols = size.cols; // keep the tty streams' getWindowSize() current
+    winsize.rows = size.rows;
     if (process.stdout.isTTY) { process.stdout.columns = size.cols; process.stdout.rows = size.rows; }
     process.stdout.emit("resize");
   }
-  process.emit(sig);
+  try { process.emit(sig); }
+  catch (e) { if (!e || e.name !== "ProcessExit") throw e; }
 });
 
 // Node module resolution is *userland* (INV-1): the kernel is just the
@@ -140,7 +176,13 @@ sys.onSignal(async (sig) => {
 // and — for ESM — build the whole import graph in-process (`buildEsmGraph`),
 // resolving relative + `node_modules`/`exports` + `node:` builtins. The kernel
 // knows nothing of any of that.
-const builtins = makeBuiltins(sys);
+// The `node:` builtins that only this running program can supply — `process` and
+// `tty` carry per-process state (argv/env/stdio, the fds' TTY-ness) that the pure
+// `makeBuiltins` factory can't. Threaded into both the ESM registry here and the
+// CJS runtime below, so `import process from 'node:process'` / `require('tty')`
+// alike resolve to these exact objects. (chalk's supports-color needs both.)
+const nodeBuiltins = { process, tty };
+const builtins = makeBuiltins(sys, nodeBuiltins);
 const fs = builtins.get("fs");
 const path = builtins.get("path");
 
@@ -163,7 +205,7 @@ const entrySource = new TextDecoder().decode(entryBytes);
 // which resolves the `require` graph out of the VFS and provides the `node:`
 // builtins (fs/path). A plain ESM script falls through to the stitch path below.
 if (usesCommonjs(entrySource, entryAbs)) {
-  const run = createNodeRuntime(sys);
+  const run = createNodeRuntime(sys, nodeBuiltins);
   await run(entryAbs, entrySource);
 } else {
 
@@ -255,3 +297,9 @@ while (remaining.length) {
 await import(pathToBlob.get(graph.entry));
 
 } // end ESM branch
+
+// Node stays alive past top level while the event loop has ref'd work; do the
+// same, so timer-driven scripts (spinners, polling, deferred writes) actually run
+// to completion instead of the process being reported exited the instant the
+// entry's synchronous body returns.
+await whenIdle();

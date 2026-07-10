@@ -8,6 +8,11 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **Color-capable default terminal env** (`kernel-worker.js`). The interactive
+  shell session now seeds `TERM=xterm-256color` and `COLORTERM=truecolor`, so
+  color-detecting guest tools (chalk's `supports-color`, etc.) light up 24-bit
+  color instead of falling back to plain text on a TTY — honest, since the host
+  xterm already renders ANSI color.
 - **`nano` fuzzy file finder** (`^P`, Ctrl-P "go to file"). Recursively scans the
   cwd (skipping `node_modules`/`.git`, capped at 4k files) and offers a fuzzy-ranked
   picker — basename matches beat path matches, more contiguous and shorter paths

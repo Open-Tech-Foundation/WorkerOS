@@ -16,6 +16,8 @@ export const NODE_BUILTINS = new Set([
   "os",
   "url",
   "module",
+  "process",
+  "tty",
 ]);
 
 export const isBuiltinSpec = (spec) => spec.startsWith("node:") || NODE_BUILTINS.has(spec);
@@ -175,11 +177,36 @@ export function createResolver({ fs, path }) {
     }
   };
 
+  // Resolve a `#`-prefixed package-internal import against the nearest enclosing
+  // package.json `imports` map (Node subpath imports — the sibling of `exports`,
+  // scoped to the defining package). The map is keyed on `#name`/`#name/*`; a
+  // target may be a relative file (rooted at that package) or another bare spec.
+  // Chalk v5 needs this: its source does `import '#ansi-styles'`/`'#supports-color'`.
+  const resolveImports = (fromDir, spec) => {
+    let dir = fromDir;
+    for (;;) {
+      const pkg = readJson(path.join(dir, "package.json"));
+      // The nearest package.json defines the scope (Node stops here whether or not
+      // it matches); resolving against an ancestor's imports would cross packages.
+      if (pkg) {
+        const map = pkg.imports;
+        if (map && typeof map === "object") {
+          const t = spec in map ? pickCondition(map[spec]) : resolveWildcard(map, spec);
+          if (t) return isRelative(t) ? resolveFile(path.join(dir, t)) : resolveBare(dir, t);
+        }
+        return null;
+      }
+      if (dir === "/") return null;
+      dir = path.dirname(dir);
+    }
+  };
+
   const resolveFrom = (fromDir, spec) => {
+    if (spec.startsWith("#")) return resolveImports(fromDir, spec);
     if (spec.startsWith("/")) return resolveFile(path.normalize(spec));
     if (isRelative(spec)) return resolveFile(path.join(fromDir, spec));
     return resolveBare(fromDir, spec);
   };
 
-  return { resolveFile, resolveDir, resolveBare, resolveFrom, pickEntry };
+  return { resolveFile, resolveDir, resolveBare, resolveImports, resolveFrom, pickEntry };
 }

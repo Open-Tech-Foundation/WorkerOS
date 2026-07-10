@@ -8,6 +8,38 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **Node event-loop keep-alive** (`src/node/event-loop.js`, `node-program.js`).
+  `/bin/node` returned to the program worker the instant the script's synchronous
+  top level settled, so a top-level `setInterval`/`setTimeout` never fired (the
+  process was reported exited at ~0 ms). New `event-loop.js` wraps the worker's
+  native timers with Node's timer-handle surface (`ref`/`unref`/`hasRef`/`refresh`
+  + numeric-id coercion, so `clear*` takes the handle or the id) over a reference
+  count; `/bin/node` installs the wrapped globals and `await`s `whenIdle()` so
+  timer-driven scripts (spinners, polling, deferred writes) run to completion and
+  exit once the loop drains — a never-cleared `setInterval` keeps it alive
+  forever, as in Node. `SIGINT` → `process.exit` stays clean (the post-exit
+  `ProcessExit` is swallowed). `setImmediate` is a 0 ms one-shot (honest limit,
+  INV-5). Unit-tested with real timers.
+- **`node:tty` + `node:process` builtins** (`src/node/tty.js`, `node-program.js`).
+  Packages import these rather than read the globals — chalk's `supports-color`
+  does `import process from 'node:process'` and `import tty from 'node:tty'`, so
+  `const {env} = process` threw with neither provided. `tty.js` is a real module:
+  `isatty`, `WriteStream` (`cursorTo`/`moveCursor`/`clearLine`/`clearScreenDown`
+  emitting the exact CSI escapes Node's `readline` writes, plus `getWindowSize`/
+  `getColorDepth`/`hasColors`), and `ReadStream` (`setRawMode`, wired to the
+  kernel line discipline via `tcsetattr`). `process.std{in,out,err}` are now real
+  `tty` streams on a terminal fd (a plain reader/writer when redirected — Node's
+  isTTY split). `process`/`tty` carry per-process state the pure `makeBuiltins`
+  can't, so they're threaded into both the ESM registry and the CJS runtime
+  (`makeBuiltins`/`createNodeRuntime` take an `extras` map) — `import` and
+  `require` resolve the same objects. Unit-tested.
+- **Package `imports` (`#…` subpath imports)** (`src/node/resolve.js`). The
+  userland-resolver move (see the ESM entry below) ported `exports` but not its
+  sibling `imports`, so chalk's `import '#ansi-styles'`/`'#supports-color'`
+  resolved as bare packages and failed. `resolveFrom` now resolves a `#`-spec
+  against the nearest enclosing `package.json` `imports` map — package-scoped,
+  reusing the same condition-picking and `./*` wildcard logic as `exports`.
+  Unit-tested.
 - **npm bin-linking + PATH** (`npm/npm-program.js`, PLAN Phase 5·E). `npm install`
   now writes a generated launcher to `node_modules/.bin/<name>` for each package
   `bin` (a string, named after the package, or a `{ name: path }` map). The VFS

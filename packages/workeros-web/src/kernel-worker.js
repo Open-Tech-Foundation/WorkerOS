@@ -21,7 +21,13 @@ let kernel = null;
 let shell = null;
 
 // The interactive shell session state (cwd/env), persisted across exec lines.
-const session = { cwd: "/", env: { HOME: "/", PATH: "/bin:/sbin" } };
+// TERM/COLORTERM advertise the host xterm's ANSI color support so color-detecting
+// tools (chalk's supports-color, etc.) light up 24-bit color instead of falling
+// back to plain text on a TTY.
+const session = {
+  cwd: "/",
+  env: { HOME: "/", PATH: "/bin:/sbin", TERM: "xterm-256color", COLORTERM: "truecolor" },
+};
 
 // pid → { worker, sink, onExit, resolveExit, done }.
 const programs = new Map();

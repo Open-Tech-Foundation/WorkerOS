@@ -38,6 +38,12 @@ test("builtin detection", () => {
   assert.equal(isBuiltinSpec("node:fs"), true);
   assert.equal(isBuiltinSpec("node:anything"), true); // node: is always a builtin
   assert.equal(isBuiltinSpec("lodash"), false);
+  // process/tty are builtins too (chalk's supports-color imports node:process,
+  // node:tty) — bare and node: forms both.
+  assert.equal(isBuiltinSpec("process"), true);
+  assert.equal(isBuiltinSpec("tty"), true);
+  assert.equal(builtinKey("node:process"), "process");
+  assert.equal(builtinKey("node:tty"), "tty");
   assert.equal(builtinKey("node:path"), "path");
   assert.equal(builtinKey("fs/promises"), "fs/promises");
   assert.equal(builtinKey("lodash"), null);
@@ -91,4 +97,49 @@ test("module field wins over main for ESM", () => {
     "/proj/node_modules/dual/cjs.js": "",
   });
   assert.equal(r.resolveFrom("/proj", "dual"), "/proj/node_modules/dual/esm.js");
+});
+
+test("package #imports: chalk-style subpath imports with conditions and wildcard", () => {
+  // Mirrors chalk v5: a bare `exports` string plus `#`-prefixed internal imports,
+  // one of which is a conditions map (node vs default/browser).
+  const r = mk({
+    "/proj/node_modules/chalk/package.json": JSON.stringify({
+      exports: "./source/index.js",
+      imports: {
+        "#ansi-styles": "./source/vendor/ansi-styles/index.js",
+        "#supports-color": {
+          node: "./source/vendor/supports-color/index.js",
+          default: "./source/vendor/supports-color/browser.js",
+        },
+        "#util/*": "./source/util/*.js",
+      },
+    }),
+    "/proj/node_modules/chalk/source/index.js": "",
+    "/proj/node_modules/chalk/source/vendor/ansi-styles/index.js": "",
+    "/proj/node_modules/chalk/source/vendor/supports-color/index.js": "",
+    "/proj/node_modules/chalk/source/vendor/supports-color/browser.js": "",
+    "/proj/node_modules/chalk/source/util/fmt.js": "",
+  });
+  const src = "/proj/node_modules/chalk/source";
+  // The entry resolves as a bare package (regression guard for the exports string).
+  assert.equal(r.resolveFrom("/proj", "chalk"), src + "/index.js");
+  assert.equal(r.resolveImports(src, "#ansi-styles"), src + "/vendor/ansi-styles/index.js");
+  // node wins over default/browser — the runtime presents as Node.
+  assert.equal(r.resolveImports(src, "#supports-color"), src + "/vendor/supports-color/index.js");
+  assert.equal(r.resolveImports(src, "#util/fmt"), src + "/util/fmt.js");
+  // A `#` spec with no matching key in the enclosing package is unresolved.
+  assert.equal(r.resolveImports(src, "#nope"), null);
+});
+
+test("package #imports are scoped to the nearest package.json", () => {
+  // An outer package defines `#x`; an inner nested package.json (without imports)
+  // shadows the scope, so `#x` from inside the inner package does NOT reach out.
+  const r = mk({
+    "/proj/node_modules/outer/package.json": '{"imports":{"#x":"./real.js"}}',
+    "/proj/node_modules/outer/real.js": "",
+    "/proj/node_modules/outer/inner/package.json": '{"name":"inner"}',
+    "/proj/node_modules/outer/inner/mod.js": "",
+  });
+  assert.equal(r.resolveImports("/proj/node_modules/outer", "#x"), "/proj/node_modules/outer/real.js");
+  assert.equal(r.resolveImports("/proj/node_modules/outer/inner", "#x"), null);
 });

@@ -27,7 +27,12 @@ import { createModule } from "./module.js";
 // stitch can synthesize a re-export module for each `node:` import the kernel
 // marked as a builtin edge (Phase 5·C-ESM). The map's keys are the builtin keys
 // the kernel resolves to (see `resolver.rs` `NODE_BUILTINS`).
-export function makeBuiltins(sys) {
+// `extras` carries builtins that only the running program can supply — `process`
+// and `tty` need per-process state (argv/env/stdio, the fds' TTY-ness) that this
+// pure factory has no access to. `/bin/node` builds them and passes them here so
+// both `require('process')`/`require('tty')` (CJS) and `import 'node:process'`
+// (ESM) resolve to the same objects, not just one path.
+export function makeBuiltins(sys, extras) {
   const fs = createFs(sys.syncFs);
   const path = createPath();
   const os = createOs();
@@ -44,6 +49,7 @@ export function makeBuiltins(sys) {
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.
   reg.set("module", null);
   reg.set("module", createModule({ fs, path, url, builtins: reg }));
+  if (extras) for (const [k, v] of Object.entries(extras)) if (v !== undefined) reg.set(k, v);
   return reg;
 }
 
@@ -97,8 +103,8 @@ function scanRequires(src) {
 const isRelative = (s) => s.startsWith("./") || s.startsWith("../") || s.startsWith("/");
 
 // ---- the runtime -----------------------------------------------------------
-export function createNodeRuntime(sys) {
-  const builtins = makeBuiltins(sys);
+export function createNodeRuntime(sys, extras) {
+  const builtins = makeBuiltins(sys, extras);
 
   async function readFile(p) {
     const fd = await sys.open(p, {});
