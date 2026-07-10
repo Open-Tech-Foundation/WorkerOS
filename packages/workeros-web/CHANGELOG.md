@@ -21,8 +21,16 @@ main-thread client API). Format:
   `Ctrl-A`/`E`/`B`/`F`), editing (Backspace, Del, `Ctrl-U`/`K`/`W`), and
   `Ctrl-L`. While the prompt is active the REPL owns the terminal in raw mode and
   echoes/redraws itself; a program that reads stdin still gets the kernel cooked
-  discipline. (Single-line only for now — no soft-wrap; UTF-8 across chunks and
-  bracketed paste are follow-ups.)
+  discipline. (UTF-8 across chunks and bracketed paste are follow-ups.)
+- **Soft-wrap in the readline prompt** — the line editor is now multi-line aware
+  (à la GNU readline / linenoise): a prompt + command wider than the terminal
+  wraps across rows, with correct cursor movement, editing, and redraw over the
+  wrapped rows (it clears from the old cursor row up to the line's first row and
+  repaints, tracking the tallest the line has been). It reads the terminal width
+  each redraw, so a `SIGWINCH` resize while typing re-wraps the line in place;
+  Enter/`Ctrl-C` first park the cursor at the end of the wrapped line so the
+  newline breaks below the whole command. Fixes the garbled buffer and cursor
+  drift on long or resized command lines.
 - **Cooperative signals + `SIGWINCH`.** New protocol messages `SIGNAL`
   (kernel→program) and `SIGACTION` (program→kernel), and `sys.onSignal`/
   `sys.sighandle` on the ABI. A foreground process that installed a `SIGINT`

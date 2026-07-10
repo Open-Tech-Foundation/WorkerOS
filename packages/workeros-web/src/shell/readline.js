@@ -18,10 +18,12 @@ const dec = new TextDecoder();
  * @param {string} o.prompt   the prompt string (already styled)
  * @param {string[]} o.history shared history ring (most-recent last); read-only here
  * @param {(s: string) => void} o.write  emit terminal bytes/ANSI (as a string)
+ * @param {() => number} [o.columns]  current terminal width (re-read every render,
+ *   so a mid-edit resize re-wraps correctly). Defaults to 80.
  * @param {(r: {line?: string, aborted?: boolean, eof?: boolean}) => void} o.done
- * @returns {{ start: () => void, feed: (bytes: Uint8Array) => void }}
+ * @returns {{ start: () => void, feed: (bytes: Uint8Array) => void, resize: () => void }}
  */
-export function createLineEditor({ prompt, history = [], write, done }) {
+export function createLineEditor({ prompt, history = [], write, done, columns = () => 80 }) {
   let buf = []; // the line as an array of characters (one JS char each)
   let pos = 0; // cursor index within buf
   let hist = history.length; // history cursor; === length means "editing a new line"
@@ -29,12 +31,52 @@ export function createLineEditor({ prompt, history = [], write, done }) {
   let escBuf = null; // chars of an in-progress ESC sequence, or null
   let finished = false;
 
-  // Redraw the whole line: CR to column 0, prompt, text, clear to EOL, then move
-  // the cursor back to `pos`. Single-line only (no soft-wrap) — see §4.
+  // The prompt is written already-styled; its *display* width ignores ANSI SGR.
+  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  const promptCells = () => [...stripAnsi(prompt)].length;
+
+  // Multi-line aware redraw (à la GNU readline / linenoise). The prompt + line
+  // can wrap across several terminal rows, so we can't just CR to column 0: we
+  // move from the previous cursor row up to the line's first row clearing each,
+  // repaint the whole wrapped line, then place the cursor on its row/column.
+  // `maxrows` remembers the tallest the line has been so shrinking it still
+  // clears the now-stale rows below.
+  let oldpos = 0; // cursor index at the previous render
+  let maxrows = 0; // most rows the line has occupied so far this session
   const render = () => {
-    let out = "\r" + prompt + buf.join("") + "\x1b[K";
-    const tail = buf.length - pos;
-    if (tail > 0) out += "\x1b[" + tail + "D";
+    const cols = Math.max(1, columns() | 0);
+    const plen = promptCells();
+    const len = buf.length;
+
+    let rows = Math.floor((plen + len + cols - 1) / cols); // rows the line spans
+    if (rows < 1) rows = 1;
+    const rpos = Math.floor((plen + oldpos + cols) / cols); // old cursor row (1-based)
+    const oldRows = maxrows;
+
+    let out = "";
+    // 1. Drop to the last previously-drawn row, then clear rows up to the first.
+    if (oldRows - rpos > 0) out += "\x1b[" + (oldRows - rpos) + "B";
+    for (let j = 0; j < oldRows - 1; j++) out += "\r\x1b[K\x1b[1A";
+    out += "\r\x1b[K";
+
+    // 2. Paint prompt + buffer.
+    out += prompt + buf.join("");
+
+    // 3. Cursor at end and the line exactly fills the last row → the terminal
+    //    parks it with a pending wrap; force a real fresh row to land on.
+    if (len > 0 && pos === len && (plen + len) % cols === 0) {
+      out += "\r\n";
+      rows++;
+    }
+    if (rows > maxrows) maxrows = rows;
+
+    // 4. Move the cursor to its row, then set its column.
+    const rpos2 = Math.floor((plen + pos + cols) / cols); // current cursor row (1-based)
+    if (rows - rpos2 > 0) out += "\x1b[" + (rows - rpos2) + "A";
+    const col = (plen + pos) % cols;
+    out += col ? "\r\x1b[" + col + "C" : "\r";
+
+    oldpos = pos;
     write(out);
   };
 
@@ -92,8 +134,10 @@ export function createLineEditor({ prompt, history = [], write, done }) {
       }
 
       if (b === 0x1b) { escBuf = []; continue; } // ESC: begin a sequence
-      if (b === 0x0d || b === 0x0a) { write("\r\n"); finish({ line: buf.join("") }); continue; } // Enter
-      if (b === 0x03) { write("^C\r\n"); finish({ aborted: true }); continue; } // Ctrl-C
+      // Enter / Ctrl-C: park the cursor at the end of the (possibly wrapped) line
+      // first, so the newline breaks below the whole command, not mid-row.
+      if (b === 0x0d || b === 0x0a) { pos = buf.length; render(); write("\r\n"); finish({ line: buf.join("") }); continue; } // Enter
+      if (b === 0x03) { pos = buf.length; render(); write("^C\r\n"); finish({ aborted: true }); continue; } // Ctrl-C
       if (b === 0x04) { // Ctrl-D: EOF on empty line, else forward-delete
         if (buf.length === 0) finish({ eof: true });
         else if (pos < buf.length) { buf.splice(pos, 1); render(); }
@@ -115,7 +159,7 @@ export function createLineEditor({ prompt, history = [], write, done }) {
         render();
         continue;
       }
-      if (b === 0x0c) { write("\x1b[2J\x1b[H"); render(); continue; } // Ctrl-L: clear screen
+      if (b === 0x0c) { write("\x1b[2J\x1b[H"); maxrows = 0; render(); continue; } // Ctrl-L: clear screen
 
       if (b >= 0x20 && b !== 0x7f) {
         if (b < 0x80) { insertStr(String.fromCharCode(b)); }
@@ -130,5 +174,11 @@ export function createLineEditor({ prompt, history = [], write, done }) {
     }
   };
 
-  return { start: () => write(prompt), feed };
+  return {
+    // Paint the initial (empty) prompt through render() so wrap state is primed.
+    start: () => render(),
+    feed,
+    // Re-wrap after a terminal resize (SIGWINCH) while the line is being edited.
+    resize: () => { if (!finished) render(); },
+  };
 }

@@ -121,6 +121,7 @@ function readCommandLine() {
       prompt: prompt(),
       history,
       write: (s) => termOut(enc.encode(s)),
+      columns: () => (kernel.tty_get_winsize() || {}).cols || 80,
       done: (r) => { activeReadline = null; resolve(r); },
     });
     activeReadline = editor;
@@ -607,6 +608,8 @@ self.onmessage = async (ev) => {
 
       case MSG.RESIZE:
         kernel.tty_set_winsize(msg.rows | 0, msg.cols | 0);
+        // Re-wrap the shell prompt at the new width if it's being edited.
+        if (activeReadline) activeReadline.resize();
         // Notify the foreground process(es) so a TUI can re-layout. Default
         // disposition is ignore, so a program without a handler is unaffected.
         for (const pid of [...foreground]) deliverSignal(pid, "SIGWINCH");

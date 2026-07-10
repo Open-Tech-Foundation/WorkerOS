@@ -105,3 +105,83 @@ test("unknown escape sequences and stray control bytes are ignored", () => {
   const { result } = run(["ab", `${ESC}[5~`, new Uint8Array([0x16]), "c", "\r"]);
   assert.deepEqual(result, { line: "abc" });
 });
+
+// ---- soft-wrap (multi-line editing) ----
+// The editor wraps prompt + line across rows when it exceeds the terminal width.
+// We drive it with an explicit column count (default 80 is single-line for these).
+
+// Like `run`, but with a fixed/mutable terminal width. `cols` may be a number or
+// a `() => number` so a test can resize mid-script.
+function runW(cols, script, history = []) {
+  let out = "";
+  let result = null;
+  const columns = typeof cols === "function" ? cols : () => cols;
+  const ed = createLineEditor({
+    prompt: "$ ", // 2 display columns
+    history,
+    write: (s) => (out += s),
+    columns,
+    done: (r) => (result = r),
+  });
+  ed.start();
+  for (const chunk of script) {
+    if (chunk === "RESIZE") ed.resize();
+    else ed.feed(typeof chunk === "string" ? enc(chunk) : chunk);
+  }
+  return { result, out, ed };
+}
+
+const CLEAR_UP = "\x1b[1A"; // cursor-up, emitted only when repainting >1 row
+
+test("a short line never engages the multi-line machinery", () => {
+  const { result, out } = runW(80, ["echo hi", "\r"]);
+  assert.deepEqual(result, { line: "echo hi" });
+  assert.ok(!out.includes(CLEAR_UP), "single-line edit should not move between rows");
+});
+
+test("a line longer than the width wraps but submits intact", () => {
+  const line = "abcdefghijklmnopqrstuvwxyz0123456789"; // 36 chars; +2 prompt = 38
+  const { result, out } = runW(20, [line, "\r"]);
+  assert.deepEqual(result, { line });
+  // 38 cells across 20 columns is 2 rows, so repaints must clear the wrapped row.
+  assert.ok(out.includes(CLEAR_UP), "wrapped line should repaint across rows");
+});
+
+test("editing at the start of a wrapped line moves the cursor up a row", () => {
+  // 30 chars + 2 prompt = 32 cells → 2 rows at width 20. Home, then insert.
+  const body = "0123456789012345678901234567890"; // 31 chars
+  const { result, out } = runW(20, [body, "\x01", "X", "\r"]);
+  assert.deepEqual(result, { line: "X" + body });
+  assert.ok(out.includes(CLEAR_UP), "moving to the first row needs a cursor-up");
+});
+
+test("a line that exactly fills the row forces a fresh wrap row", () => {
+  // prompt(2) + 18 = 20 = exactly one row; the renderer must emit a real newline
+  // so the cursor has a row to sit on rather than parking in the pending-wrap cell.
+  const body = "123456789012345678"; // 18 chars
+  const { out } = runW(20, [body]);
+  assert.ok(out.includes("\r\n"), "exact-fill line should force a wrap newline");
+});
+
+test("resizing narrower re-wraps the line being edited", () => {
+  const line = "the quick brown fox jumps over the lazy dog"; // 43 chars: 1 row at 80
+  let width = 80;
+  let out = "";
+  let result = null;
+  const ed = createLineEditor({
+    prompt: "$ ",
+    columns: () => width,
+    write: (s) => (out += s),
+    done: (r) => (result = r),
+  });
+  ed.start();
+  ed.feed(enc(line)); // typed on a wide terminal → a single row
+  width = 20; // the terminal shrank under us
+  ed.resize(); // SIGWINCH → re-wrap at the new width (now 3 rows)
+  // With the line now wrapped, jumping Home must repaint across the wrapped rows.
+  const afterResize = out.length;
+  ed.feed(enc("\x01")); // Ctrl-A / Home
+  assert.ok(out.slice(afterResize).includes(CLEAR_UP), "home on a re-wrapped line spans rows");
+  ed.feed(enc("\r"));
+  assert.deepEqual(result, { line });
+});
