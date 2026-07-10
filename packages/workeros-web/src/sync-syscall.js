@@ -19,7 +19,8 @@
 
 export const STATE = 0; // Int32 index: 0 idle, 1 request-ready, 2 response-ready
 export const STATUS = 1; // Int32 index: 0 ok, negative = -errno
-export const LEN = 2; // Int32 index: payload byte length
+export const LEN = 2; // Int32 index: total payload byte length
+export const MLEN = 3; // Int32 index: request meta (JSON) byte length; bytes follow
 export const HEADER_BYTES = 16;
 
 export const S_IDLE = 0;
@@ -45,15 +46,24 @@ export function views(sab) {
 
 /**
  * Program-worker side: a blocking syscall. `binary` true means the response
- * payload is raw bytes (a read); otherwise it's JSON. Returns
- * `{ status, bytes }` or `{ status, value }`.
+ * payload is raw bytes (a read); otherwise it's JSON. `reqBytes` (optional) is a
+ * raw request payload placed after the JSON meta — used by a synchronous `write`
+ * to carry the bytes being written. Returns `{ status, bytes }` or
+ * `{ status, value }`.
  */
 export function makeSyncCaller(sab, signal) {
   const { i32, u8 } = views(sab);
-  return function syncCall(call, args, binary) {
-    const req = enc.encode(JSON.stringify({ call, ...args }));
-    u8.set(req, 0);
-    Atomics.store(i32, LEN, req.length);
+  return function syncCall(call, args, binary, reqBytes) {
+    const meta = enc.encode(JSON.stringify({ call, ...args }));
+    u8.set(meta, 0);
+    let total = meta.length;
+    if (reqBytes && reqBytes.length) {
+      // The payload region is fixed (DATA_BYTES); the caller chunks larger writes.
+      u8.set(reqBytes.subarray(0, DATA_BYTES - meta.length), meta.length);
+      total += Math.min(reqBytes.length, DATA_BYTES - meta.length);
+    }
+    Atomics.store(i32, MLEN, meta.length);
+    Atomics.store(i32, LEN, total);
     Atomics.store(i32, STATE, S_REQ);
     signal(); // tell the kernel worker a request is waiting
     // Park until the kernel flips STATE away from S_REQ.
@@ -69,11 +79,19 @@ export function makeSyncCaller(sab, signal) {
   };
 }
 
-/** Kernel-worker side: read the pending request. */
+/** Kernel-worker side: read the pending request's JSON meta. */
 export function readRequest(sab) {
   const { i32, u8 } = views(sab);
+  const mlen = Atomics.load(i32, MLEN);
+  return JSON.parse(dec.decode(u8.slice(0, mlen)));
+}
+
+/** Kernel-worker side: the raw request payload after the meta (empty if none). */
+export function requestBytes(sab) {
+  const { i32, u8 } = views(sab);
+  const mlen = Atomics.load(i32, MLEN);
   const len = Atomics.load(i32, LEN);
-  return JSON.parse(dec.decode(u8.slice(0, len)));
+  return u8.slice(mlen, len);
 }
 
 /** Kernel-worker side: write a response and wake the program worker. */

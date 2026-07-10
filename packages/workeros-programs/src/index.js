@@ -83,3 +83,17 @@ export const programs = [
     source: () => fetchBytes("./grep/grep.wasm"),
   },
 ];
+
+/**
+ * Guest runtime *library* files installed into the VFS at boot (not `/bin`
+ * programs). `/bin/node` imports these at load time through the kernel resolver
+ * (INV-2), keeping `node` a self-contained guest whose library lives on the
+ * filesystem — very much like `/lib` on a real system. The CommonJS runtime and
+ * its `node:` builtins (`fs`, `path`) live here.
+ * @type {{ path: string, source: () => Promise<string> }[]}
+ */
+export const libraries = [
+  { path: "/lib/workeros-node/require-runtime.js", source: () => fetchText("./node/require-runtime.js") },
+  { path: "/lib/workeros-node/fs.js", source: () => fetchText("./node/fs.js") },
+  { path: "/lib/workeros-node/path.js", source: () => fetchText("./node/path.js") },
+];

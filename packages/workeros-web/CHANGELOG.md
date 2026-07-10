@@ -8,6 +8,16 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **Synchronous `fs` for JS guests** (PLAN Phase 5·A). The per-process SAB
+  sync-syscall channel is now exposed to a JS guest as `sys.syncFs`
+  (open/read/**write**/close/seek/stat/readdir/mkdir/unlink/rmdir/rename), the
+  basis for Node's `readFileSync`/`writeFileSync`/… A synchronous **`write`** was
+  added: `makeSyncCaller` can carry a raw request payload after the JSON meta (new
+  `MLEN` header field + `requestBytes`), and the kernel worker's `serviceSync`
+  gains a `write` case that reports `nwritten`/`ENOSPC` back through the channel
+  (terminal writes still stream to the sink). The guest runtime library
+  (`@opentf/workeros-programs`'s node layer) is installed into the VFS at
+  `/lib/workeros-node/` at boot so `/bin/node` imports it via the kernel resolver.
 - **`tcgetattr`/`tcsetattr` syscalls** — the program worker's `sys` ABI gains
   `tcgetattr()` and `tcsetattr({ canonical, echo, isig })`, serviced by the kernel
   worker (`getattr`/`setattr`) from the kernel TTY's termios. A full-screen program

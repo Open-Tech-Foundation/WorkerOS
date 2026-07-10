@@ -14,6 +14,27 @@
 // Scope: CommonJS (the classic npm/`require` case). ESM entries keep going
 // through the kernel's ahead-of-time graph + the program worker's stitch path.
 
+import { createFs } from "./fs.js";
+import { createPath } from "./path.js";
+
+// ---- core builtins --------------------------------------------------------
+// `require('fs')` / `require('node:fs')` and `path` resolve to guest builtins,
+// not to files in the VFS (PLAN Phase 5·C, the slice `fs` needs). The registry
+// grows here as more `node:` builtins land (`os`, `url`, `module`, …).
+function makeBuiltins(sys) {
+  const fs = createFs(sys.syncFs);
+  const path = createPath();
+  const reg = new Map([
+    ["fs", fs],
+    ["fs/promises", fs.promises],
+    ["path", path],
+  ]);
+  return reg;
+}
+
+// A specifier's builtin key, stripping the `node:` scheme.
+const builtinKey = (spec) => (spec.startsWith("node:") ? spec.slice(5) : spec);
+
 // ---- tiny POSIX-ish path helpers ------------------------------------------
 const path = {
   dirname(p) {
@@ -62,6 +83,8 @@ const isRelative = (s) => s.startsWith("./") || s.startsWith("../") || s.startsW
 
 // ---- the runtime -----------------------------------------------------------
 export function createNodeRuntime(sys) {
+  const builtins = makeBuiltins(sys);
+
   async function readFile(p) {
     const fd = await sys.open(p, {});
     const chunks = [];
@@ -166,6 +189,7 @@ export function createNodeRuntime(sys) {
     if (absPath.endsWith(".json")) return; // JSON has no requires
     const dir = path.dirname(absPath);
     for (const spec of scanRequires(source)) {
+      if (builtins.has(builtinKey(spec))) continue; // builtin: no VFS file to read
       const key = dir + "\0" + spec;
       if (resolutions.has(key)) continue;
       let dep;
@@ -200,11 +224,14 @@ export function createNodeRuntime(sys) {
     cache.set(absPath, module.exports); // seed before eval for require cycles
     const dir = path.dirname(absPath);
     const require = (spec) => {
+      const b = builtins.get(builtinKey(spec));
+      if (b) return b;
       const abs = resolutions.get(dir + "\0" + spec);
       if (!abs) throw new Error(`Cannot find module '${spec}'`);
       return load(abs);
     };
-    require.resolve = (spec) => resolutions.get(dir + "\0" + spec) || spec;
+    require.resolve = (spec) =>
+      builtins.has(builtinKey(spec)) ? spec : resolutions.get(dir + "\0" + spec) || spec;
     const fn = new Function("require", "module", "exports", "__dirname", "__filename", source);
     fn(require, module, module.exports, dir, absPath);
     cache.set(absPath, module.exports);

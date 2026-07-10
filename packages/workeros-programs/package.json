@@ -5,12 +5,17 @@
   "license": "Apache-2.0",
   "type": "module",
   "main": "src/index.js",
+  "scripts": {
+    "test": "node --test tools/*.test.js"
+  },
   "exports": {
     ".": "./src/index.js",
     "./node": "./src/node/index.js",
     "./wasi": "./src/wasi/host.js",
     "./node/process-shim": "./src/node/process-shim.js",
-    "./node/require-runtime": "./src/node/require-runtime.js"
+    "./node/require-runtime": "./src/node/require-runtime.js",
+    "./node/fs": "./src/node/fs.js",
+    "./node/path": "./src/node/path.js"
   },
   "files": [
     "src"

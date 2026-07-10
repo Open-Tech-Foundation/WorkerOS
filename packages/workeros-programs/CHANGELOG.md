@@ -8,6 +8,25 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:fs` — synchronous filesystem** (`src/node/fs.js`, PLAN Phase 5·A). The
+  keystone for real tools: `createFs(sys.syncFs)` implements the sync `fs` surface
+  (`readFileSync`/`writeFileSync`/`appendFileSync`/`openSync`/`readSync`/`writeSync`/
+  `closeSync`/`statSync`/`existsSync`/`readdirSync`/`mkdirSync`(recursive)/`rmSync`/
+  `rmdirSync`/`unlinkSync`/`renameSync`/`copyFileSync`/`realpathSync`/`fstatSync`) plus
+  a thin `fs.promises`, over the per-process SAB sync-syscall channel exposed as
+  `sys.syncFs`. Kernel errnos map to Node codes (`ENOENT`/`EEXIST`/`ENOSPC`/…).
+  Honest surface (INV-5): reads return a `Uint8Array` unless an encoding is given;
+  no symlinks/permissions/timestamps.
+- **`node:path` (posix)** (`src/node/path.js`) — a real `path` builtin
+  (join/resolve/dirname/basename/extname/normalize/relative/parse/format),
+  replacing the ad-hoc helper.
+- **CommonJS `node:` builtin registry** (`require-runtime.js`) — `require('fs')`,
+  `require('node:fs')`, `require('fs/promises')`, and `require('path')`/
+  `require('node:path')` resolve to the guest builtins. `/bin/node` now runs a
+  CommonJS entry through the CJS runtime (ESM entries keep the stitch path); the
+  runtime library is installed into the VFS at `/lib/workeros-node/` and imported
+  by `/bin/node` via the kernel resolver (INV-2), so `node` stays a self-contained
+  guest program. Unit-tested in pure Node; end-to-end tested in a browser.
 - **`nano`** (`src/nano/nano-program.js`) — a small modeless full-screen text
   editor at `/bin/nano`, WorkerOS's first interactive TUI. It takes the terminal
   raw + no-echo (`sys.tcsetattr`), uses the alternate screen, and paints frames

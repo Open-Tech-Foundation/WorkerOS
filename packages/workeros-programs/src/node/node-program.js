@@ -11,8 +11,12 @@
 // kernel. Today it is "just enough Node for ordinary ESM scripts" (INV-5): we do
 // not claim to be Node, and unsupported bits fail honestly rather than pretending.
 //
-// Authored as a standalone top-level-await script (no import/export) so it runs
-// through the program worker's ESM path, which awaits top-level await.
+// It imports its CommonJS runtime + `node:` builtins (`fs`/`path`) from the VFS
+// (`/lib/workeros-node`, installed at boot), so a `require`-using script runs;
+// a plain ESM script keeps the kernel-graph stitch path. Both are guest code —
+// the kernel still owns only native resolution + execution (INV-1/INV-2).
+
+import { createNodeRuntime, usesCommonjs } from "/lib/workeros-node/require-runtime.js";
 
 const enc = new TextEncoder();
 const err = (s) => sys.write(2, enc.encode(s));
@@ -100,6 +104,15 @@ if (graph.kind === "wasm") {
   sys.exit(1);
 }
 
+// CommonJS entry (`require`/`module.exports`): run it through the CJS runtime,
+// which resolves the `require` graph out of the VFS and provides the `node:`
+// builtins (fs/path). A plain ESM script falls through to the stitch path below.
+const entryMod = graph.modules.find((m) => m.path === graph.entry);
+if (entryMod && usesCommonjs(entryMod.source, graph.entry)) {
+  const run = createNodeRuntime(sys);
+  await run(graph.entry, entryMod.source);
+} else {
+
 // Stitch the resolved graph into blob URLs, dependencies first, rewriting each
 // import specifier to its dependency's blob URL. Mechanical assembly only — the
 // kernel already decided every target (mirrors the worker's own stitch step).
@@ -126,3 +139,5 @@ while (remaining.length) {
 // past here and is caught by the program worker, which reports the code; a genuine
 // error likewise propagates to the worker's handler (stack + exit 1).
 await import(pathToBlob.get(graph.entry));
+
+} // end ESM branch

@@ -12,8 +12,8 @@ import { MSG } from "./protocol.js";
 import { createShell } from "./shell-exec.js";
 import { createLineEditor } from "./shell/readline.js";
 import { coreutils } from "../../workeros-coreutils/src/index.js";
-import { programs as osPrograms } from "../../workeros-programs/src/index.js";
-import { allocSyncBuffer, readRequest, writeResponse } from "./sync-syscall.js";
+import { programs as osPrograms, libraries as osLibraries } from "../../workeros-programs/src/index.js";
+import { allocSyncBuffer, readRequest, requestBytes, writeResponse } from "./sync-syscall.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -335,6 +335,19 @@ function serviceSync(pid) {
         writeResponse(rec.syncSab, 0, res.status === "data" ? res.data : new Uint8Array(0));
         break;
       }
+      case "write": {
+        // Read the payload bytes before writing the response overwrites the SAB.
+        const bytes = requestBytes(rec.syncSab);
+        const eff = kernel.sys_write(pid, req.fd, bytes);
+        // A write to an un-redirected terminal fd streams to the host; a file/pipe
+        // write just reports nwritten. (Mirrors the async `write` handler.)
+        if (eff.target === "stdout") rec.sink.stdout(bytes);
+        else if (eff.target === "stderr") rec.sink.stderr(bytes);
+        retryPendingReads(); // a pipe may have gained data
+        retrySyncPending();
+        writeResponse(rec.syncSab, 0, { nwritten: eff.nwritten });
+        break;
+      }
       case "open":
         writeResponse(rec.syncSab, 0, { fd: kernel.sys_open(pid, req.path, req.opts || {}) });
         break;
@@ -517,6 +530,11 @@ self.onmessage = async (ev) => {
           const data = await prog.source();
           if (data == null) continue; // a wasm program not built in this environment
           kernel.fs_write(prog.bin, typeof data === "string" ? enc.encode(data) : new Uint8Array(data));
+        }
+        // Install the guest runtime library (/lib/workeros-node): the CommonJS
+        // runtime + node: builtins that /bin/node imports at load time (INV-2).
+        for (const lib of osLibraries) {
+          kernel.fs_write(lib.path, enc.encode(await lib.source()));
         }
         shell = createShell({ kernel, startProcess, session, readLine: readLineFromTty });
         post({ type: MSG.BOOTED, version: kernel.version, abi: kernel.abi });

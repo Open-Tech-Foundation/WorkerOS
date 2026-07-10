@@ -52,9 +52,50 @@ function reportExit(code) {
   kernel.postMessage({ type: MSG.PROC_EXIT, code: code | 0 });
 }
 
-/** Build the WorkerOS-native `sys` ABI for a guest. */
-function makeSys(start) {
+/** Build the synchronous-filesystem primitives from a process's SAB sync channel.
+ *  Each call blocks this thread (`Atomics.wait`) while the kernel worker services
+ *  it — the basis for Node's synchronous `fs` (`readFileSync`/`writeFileSync`/…).
+ *  Every method throws a plain `Error` carrying the kernel's errno name on
+ *  failure; the guest's `node:fs` maps that to a Node error code. */
+function makeSyncFs(syncCall) {
+  const fail = (r) => {
+    let msg;
+    if (r.value && r.value.error) msg = r.value.error;
+    else if (r.bytes && r.bytes.length) {
+      try { msg = JSON.parse(new TextDecoder().decode(r.bytes)).error; } catch {}
+    }
+    throw new Error(msg || "errno " + r.status);
+  };
+  const json = (name, args, bytes) => {
+    const r = syncCall(name, args, false, bytes);
+    if (r.status < 0) fail(r);
+    return r.value || {};
+  };
   return {
+    open: (path, opts) => json("open", { path, opts }).fd,
+    read: (fd, max) => {
+      const r = syncCall("read", { fd, max }, true);
+      if (r.status < 0) fail(r);
+      return r.bytes;
+    },
+    write: (fd, bytes) => json("write", { fd }, bytes).nwritten,
+    close: (fd) => { json("close", { fd }); },
+    seek: (fd, offset, whence) => json("seek", { fd, offset, whence }).offset,
+    stat: (path) => json("stat", { path }),
+    readdir: (path) => json("readdir", { path }).entries,
+    mkdir: (path) => { json("mkdir", { path }); },
+    unlink: (path) => { json("unlink", { path }); },
+    rmdir: (path) => { json("rmdir", { path }); },
+    rename: (from, to) => { json("rename", { from, to }); },
+  };
+}
+
+/** Build the WorkerOS-native `sys` ABI for a guest. */
+function makeSys(start, syncCall) {
+  return {
+    // Synchronous filesystem primitives over the SAB channel (Node `fs` builds on
+    // these). Async fd ops below are for streaming/pipes; `syncFs` is for files.
+    syncFs: makeSyncFs(syncCall),
     argv: start.argv,
     env: start.env,
     cwd: start.cwd,
@@ -156,12 +197,11 @@ async function readAll(sys, path) {
 
 /** Run a `wasm32-wasip1` binary: read it from the VFS, bind the WASI host to the
  *  kernel syscalls, instantiate, and call its `_start`. */
-async function runWasm(start, sys) {
+async function runWasm(start, sys, syncCall) {
   const bytes = await readAll(sys, start.graph.entry);
   let memory = null;
   // Blocking WASI calls (fd_read/path_open/…) go through the synchronous SAB
   // channel; the kernel worker services them while this thread parks.
-  const syncCall = makeSyncCaller(start.syncSab, () => kernel.postMessage({ type: MSG.SYNC }));
   const imports = createWasiImports({
     sys,
     syncCall,
@@ -221,13 +261,16 @@ self.onmessage = async (ev) => {
   }
   if (msg.type !== MSG.START) return;
 
-  const sys = makeSys(msg);
+  // One synchronous-syscall channel per process (SAB + Atomics). Both the WASI
+  // host and a JS guest's `sys.syncFs` block on it; only one guest runs at a time.
+  const syncCall = makeSyncCaller(msg.syncSab, () => kernel.postMessage({ type: MSG.SYNC }));
+  const sys = makeSys(msg, syncCall);
   installGlobals(msg, sys);
 
   try {
     // A wasm32-wasip1 binary: run it through the WASI host bound to the kernel.
     if (msg.graph.kind === "wasm") {
-      await runWasm(msg, sys);
+      await runWasm(msg, sys, syncCall);
       reportExit(0);
       return;
     }
