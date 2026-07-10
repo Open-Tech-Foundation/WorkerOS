@@ -45,6 +45,7 @@ let screenCols = 80;
 let textRows = 20; // editable rows = screenRows - 4 chrome rows
 let cutBuffer = []; // lines held by ^K, pasted by ^U
 let lastWasCut = false; // consecutive ^K accumulate into cutBuffer
+let showLineNumbers = true; // left gutter with line numbers (toggle: M-N)
 
 // Undo/redo: whole-document snapshots. `coalesceKey` groups a run of like edits
 // (a burst of typing, a run of backspaces) into one undo step; any other action
@@ -167,16 +168,58 @@ export function visibleSlice(line, startCol, width) {
   return out;
 }
 
+// Inverse of cxToRx: the code-unit index whose cell contains render column `rx`
+// (used to place the cursor from a mouse click).
+export function rxToCx(line, rx) {
+  let col = 0, i = 0;
+  while (i < line.length) {
+    let w, adv;
+    if (line[i] === "\t") { w = TABSTOP - (col % TABSTOP); adv = 1; }
+    else { const cp = line.codePointAt(i); w = charWidth(cp); adv = cp > 0xffff ? 2 : 1; }
+    if (col + w > rx) break; // rx lands inside this cell → cursor sits before it
+    col += w;
+    i += adv;
+  }
+  return i;
+}
+
+// Width of the line-number gutter for a document of `n` lines: the widest number
+// (min 2 digits) plus a one-column separator. 0 when line numbers are off.
+export function gutterWidthFor(n) {
+  return Math.max(String(n).length, 2) + 1;
+}
+
+// Decode an SGR mouse report (`ESC [ < b ; x ; y M|m`) into a mouse event, or
+// null if it isn't one. `press` is true for a button-press (`M`), false for
+// release (`m`); x/y are 1-based cell coordinates.
+export function parseMouse(params, final) {
+  if (params[0] !== "<") return null;
+  const parts = params.slice(1).split(";");
+  if (parts.length !== 3) return null;
+  const b = Number(parts[0]), x = Number(parts[1]), y = Number(parts[2]);
+  if (!Number.isFinite(b) || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { b, x, y, press: final === "M" };
+}
+
+const gutterWidth = () => (showLineNumbers ? gutterWidthFor(rows.length) : 0);
+const textWidth = () => Math.max(screenCols - gutterWidth(), 1);
+
 function scroll() {
   const rx = cxToRx(rows[cy], cx);
+  const tw = textWidth();
   if (cy < rowoff) rowoff = cy;
   if (cy >= rowoff + textRows) rowoff = cy - textRows + 1;
   if (rx < coloff) coloff = rx;
-  if (rx >= coloff + screenCols) coloff = rx - screenCols + 1;
+  if (rx >= coloff + tw) coloff = rx - tw + 1;
 }
 
 const INVERSE = "\x1b[7m";
 const RESET = "\x1b[0m";
+// 24-bit (true-color) SGR helpers. The playground terminal (xterm.js) renders
+// these directly; a real xterm does too. Used for the line-number gutter.
+const fg = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
+const GUTTER_DIM = fg(105, 112, 128); // inactive line numbers
+const GUTTER_CUR = fg(255, 150, 80); // the current line's number (accent)
 
 // Pad/truncate a plain string to exactly `n` columns.
 const fit = (s, n) => (s.length > n ? s.slice(0, n) : s + " ".repeat(n - s.length));
@@ -194,11 +237,17 @@ function refresh() {
   const title = `  nano  ${name}${dirty ? "  *" : ""}`;
   out += INVERSE + fit(title, screenCols) + RESET + "\r\n";
 
-  // Text area.
+  // Text area, with an optional 24-bit-colored line-number gutter.
+  const gw = gutterWidth();
+  const tw = textWidth();
   for (let i = 0; i < textRows; i++) {
     const docRow = rowoff + i;
     if (docRow < rows.length) {
-      out += visibleSlice(rows[docRow], coloff, screenCols);
+      if (gw > 0) {
+        const num = String(docRow + 1).padStart(gw - 1);
+        out += (docRow === cy ? GUTTER_CUR : GUTTER_DIM) + num + " " + RESET;
+      }
+      out += visibleSlice(rows[docRow], coloff, tw);
     }
     out += "\x1b[K\r\n";
   }
@@ -227,9 +276,9 @@ function refresh() {
   out += bar1 + "\x1b[K\r\n";
   out += bar2 + "\x1b[K";
 
-  // Place the cursor and show it.
+  // Place the cursor and show it (offset past the gutter).
   const screenRow = cy - rowoff + 2; // +1 title, +1 to 1-based
-  const screenCol = cxToRx(rows[cy], cx) - coloff + 1;
+  const screenCol = gw + cxToRx(rows[cy], cx) - coloff + 1;
   out += `\x1b[${screenRow};${screenCol}H\x1b[?25h`;
   write(out);
 }
@@ -287,6 +336,11 @@ async function parseEsc() {
   }
 }
 function decodeCsi(final, params) {
+  // SGR mouse report: ESC [ < b ; x ; y  (M press / m release).
+  if (params[0] === "<") {
+    const m = parseMouse(params, final);
+    return m ? { mouse: m } : { key: "esc" };
+  }
   switch (final) {
     case "A": return { key: "up" };
     case "B": return { key: "down" };
@@ -394,6 +448,25 @@ function pageUp() { coalesceKey = null; cy = Math.max(0, cy - textRows); clampCx
 function pageDown() { coalesceKey = null; cy = Math.min(rows.length - 1, cy + textRows); clampCx(); }
 const gotoHome = () => { coalesceKey = null; cx = 0; };
 const gotoEnd = () => { coalesceKey = null; cx = rows[cy].length; };
+
+// A mouse report: left-click positions the cursor; the wheel scrolls the view.
+function handleMouse(m) {
+  coalesceKey = null;
+  if (m.b & 64) { // wheel: bit 0 = down, else up (3 lines, like a real terminal)
+    if (m.b & 1) cy = Math.min(rows.length - 1, cy + 3);
+    else cy = Math.max(0, cy - 3);
+    clampCx();
+    return;
+  }
+  if (!m.press || (m.b & 3) !== 0) return; // only act on a left-button press
+  const rel = m.y - 2; // screen row 1 is the title bar; text starts at row 2
+  if (rel < 0 || rel >= textRows) return; // a click on the chrome
+  const docRow = rowoff + rel;
+  if (docRow >= rows.length) { cy = rows.length - 1; cx = rows[cy].length; return; }
+  cy = docRow;
+  const rx = coloff + Math.max(0, m.x - 1 - gutterWidth());
+  cx = rxToCx(rows[cy], rx);
+}
 
 // ---- message-bar prompts ---------------------------------------------------
 // A one-line prompt on the message bar. Returns the entered string, or null if
@@ -580,14 +653,22 @@ async function tryExit() {
 
 // ---- main ------------------------------------------------------------------
 async function main() {
-  const arg = sys.argv[1];
+  // Args: flags then a filename. `-l`/`--linenumbers`, `-L`/`--nolinenumbers`.
+  let arg = null;
+  for (let i = 1; i < sys.argv.length; i++) {
+    const a = sys.argv[i];
+    if (a === "-l" || a === "--linenumbers") showLineNumbers = true;
+    else if (a === "-L" || a === "--nolinenumbers") showLineNumbers = false;
+    else if (!a.startsWith("-")) { arg = a; break; }
+  }
   await updateSize();
 
   // Enter raw + no-echo and the alternate screen. Save termios so we can restore
-  // it — and register SIGWINCH so a resize re-lays-out.
+  // it — register SIGWINCH so a resize re-lays-out — and enable SGR mouse
+  // reporting so clicks/scroll arrive as input we decode ourselves.
   const savedAttr = await sys.tcgetattr();
   await sys.tcsetattr({ canonical: false, echo: false, isig: false });
-  write("\x1b[?1049h");
+  write("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
   sys.sighandle("SIGWINCH", true);
   sys.onSignal(async (sig) => {
     if (sig === "SIGWINCH") { await updateSize(); scroll(); refresh(); }
@@ -604,10 +685,15 @@ async function main() {
       let isCut = false;
 
       if (k.key === "eof") break; // terminal closed
+      else if (k.mouse) handleMouse(k.mouse);
       else if (k.alt) {
-        // Meta/Alt chords: M-U undo, M-E redo (as in GNU nano).
+        // Meta/Alt chords: M-U undo, M-E redo, M-N toggle line numbers.
         if (k.alt === "u") undo();
         else if (k.alt === "e") redo();
+        else if (k.alt === "n") {
+          showLineNumbers = !showLineNumbers;
+          setMsg(showLineNumbers ? "Line numbers on" : "Line numbers off");
+        }
       } else if (k.ctrl) {
         switch (k.ctrl) {
           case "X": if (await tryExit()) return; break; // finally restores the TTY
@@ -616,7 +702,7 @@ async function main() {
           case "\\": await replace(); break; // ^\ : search & replace
           case "K": cutLine(); isCut = true; break;
           case "U": pasteCut(); break;
-          case "G": setMsg("^O save  ^W find  ^\\ replace  M-U undo  M-E redo  ^K/^U cut/paste  ^X exit"); break;
+          case "G": setMsg("^O save  ^W find  ^\\ replace  M-U/M-E undo/redo  M-N line#s  mouse: click/scroll  ^X exit"); break;
           case "C": cursorPosition(); break;
           case "A": gotoHome(); break;
           case "E": gotoEnd(); break;
@@ -647,9 +733,10 @@ async function main() {
       lastWasCut = isCut;
     }
   } finally {
-    // Always restore the terminal, even on error.
+    // Always restore the terminal, even on error: disable mouse reporting, leave
+    // the alternate screen, and put the saved termios back.
     sys.sighandle("SIGWINCH", false);
-    write("\x1b[?1049l");
+    write("\x1b[?1006l\x1b[?1000l\x1b[?1049l");
     await sys.tcsetattr(savedAttr);
   }
 }

@@ -14,6 +14,9 @@ import {
   prevLen,
   cxToRx,
   visibleSlice,
+  rxToCx,
+  gutterWidthFor,
+  parseMouse,
 } from "../src/nano/nano-program.js";
 
 const cp = (s) => s.codePointAt(0);
@@ -56,4 +59,36 @@ test("visibleSlice: plain, tab expansion, and wide-glyph clipping", () => {
   assert.equal(visibleSlice("日本", 0, 3), "日 ");
   // Clipped on both edges → the middle window shows only spaces.
   assert.equal(visibleSlice("日本", 1, 2), "  ");
+});
+
+test("rxToCx is the inverse of cxToRx on cell boundaries (for mouse clicks)", () => {
+  assert.equal(rxToCx("hello", 3), 3);
+  assert.equal(rxToCx("\tab", 8), 1); // render col 8 is just past the tab
+  assert.equal(rxToCx("日x", 2), 1); // past the wide glyph
+  assert.equal(rxToCx("日x", 1), 0); // clicking the right half lands before it
+  for (const line of ["hello", "\tab", "日x", "a😀b"]) {
+    for (let cx = 0; cx <= line.length; cx++) {
+      // A boundary column round-trips; a mid-surrogate index isn't a boundary.
+      if (cx > 0 && cx < line.length) {
+        const c = line.charCodeAt(cx);
+        if (c >= 0xdc00 && c <= 0xdfff) continue;
+      }
+      assert.equal(rxToCx(line, cxToRx(line, cx)), cx, `${JSON.stringify(line)} @ ${cx}`);
+    }
+  }
+});
+
+test("gutterWidthFor sizes the line-number column (min 2 digits + separator)", () => {
+  assert.equal(gutterWidthFor(1), 3); // "·1 " → 2 digits + space
+  assert.equal(gutterWidthFor(9), 3);
+  assert.equal(gutterWidthFor(42), 3);
+  assert.equal(gutterWidthFor(100), 4);
+  assert.equal(gutterWidthFor(1000), 5);
+});
+
+test("parseMouse decodes SGR mouse reports and rejects non-mouse CSI", () => {
+  assert.deepEqual(parseMouse("<0;12;3", "M"), { b: 0, x: 12, y: 3, press: true });
+  assert.deepEqual(parseMouse("<65;1;1", "m"), { b: 65, x: 1, y: 1, press: false });
+  assert.equal(parseMouse("3", "~"), null); // an ordinary CSI (Delete)
+  assert.equal(parseMouse("<0;12", "M"), null); // malformed (missing y)
 });

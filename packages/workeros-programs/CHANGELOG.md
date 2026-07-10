@@ -31,6 +31,16 @@ guest runtime. Format:
     emoji (surrogate pair) is never split. The pure width/slice helpers are
     exported and unit-tested (`tools/nano-text.test.js`); the `M-U`/`M-E`/`^\`
     flows and a wide-glyph round-trip are covered by the browser e2e.
+  - **Line-number gutter** in 24-bit color — a left gutter numbers each line
+    (accent for the current line, dim for the rest, via true-color SGR the
+    terminal renders directly); on by default, toggle with `M-N` or `-L`. Text
+    layout, horizontal scroll, and the cursor column all account for the gutter.
+  - **Mouse support** — nano enables SGR mouse reporting (`?1000`/`?1006`) and
+    decodes the reports itself: a left-click positions the cursor (mapping the
+    click cell back through tabs/wide glyphs to a code-unit index) and the wheel
+    scrolls. No kernel/host change — xterm forwards the events and the raw TTY
+    passes them through; disabled again on exit. `rxToCx`, `gutterWidthFor`, and
+    `parseMouse` are exported and unit-tested; a real click is covered by e2e.
 - **`process` signal handling.** The node runtime gains a minimal EventEmitter on
   `process` (and its streams): `process.on('SIGINT'|'SIGWINCH'|'SIGTSTP'…, cb)`,
   `once`/`off`/`emit`/`listenerCount`. Registering a signal handler tells the

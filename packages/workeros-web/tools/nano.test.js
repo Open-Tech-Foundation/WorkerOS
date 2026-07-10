@@ -230,3 +230,71 @@ test("nano: wide glyphs and emoji round-trip; Backspace deletes whole code point
   // The emoji was deleted cleanly (no lone surrogate corrupting the UTF-8).
   assert.equal(buf.saved, "日本\n", "wide text round-trips and Backspace removes a full code point");
 });
+
+test("nano: a mouse click positions the cursor", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/m.txt", "0123456789\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-400)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /m.txt\r");
+    await waitFor("Read 1 line");
+    os.input("\x1bn"); // M-N: turn the line-number gutter off so column math is 1:1
+    await waitFor("Line numbers off");
+    // SGR mouse: left-press at column 5, row 2 (the first text row) → index 4.
+    os.input("\x1b[<0;5;2M\x1b[<0;5;2m");
+    await sleep(120);
+    os.input("X"); // insert at the clicked position
+    await sleep(120);
+    os.input("\x0f"); // ^O
+    await waitFor("File Name to Write");
+    os.input("\r");
+    await waitFor("Wrote 1 line");
+    os.input("\x18");
+    await sleep(120);
+    return { saved: new TextDecoder().decode(await os.fs.read("/m.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "0123X456789\n", "the click landed the cursor between '3' and '4'");
+});
+
+test("nano: line-number gutter renders in 24-bit color", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/g.txt", "alpha\nbeta\ngamma\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-400)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /g.txt\r");
+    await waitFor("Read 3 lines");
+    await sleep(150);
+    return { out };
+  });
+  assert.deepEqual(pageErrors, []);
+  // The gutter emits true-color SGR: the accent for the current line, dim for others.
+  assert.match(buf.out, /38;2;255;150;80/, "current-line number uses a 24-bit accent color");
+  assert.match(buf.out, /38;2;105;112;128/, "other line numbers use a 24-bit dim color");
+});
