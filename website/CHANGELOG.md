@@ -28,4 +28,20 @@ Notable changes to the WorkerOS website + live playground, built with the
   edge; `public/_redirects` is the SPA fallback. Both are emitted to `dist/` root.
   README documents the local-build + `wrangler pages deploy dist` flow.
 
+### Fixed
+- **Playground fits the viewport.** The playground is a full-viewport app, not a
+  scrolling document, so its layout is now pinned to `100vh` and the marketing
+  footer is dropped (both scoped via `.app:has(.pg)` so the landing page keeps its
+  normal flow). Crucially `.main` is made a shrinkable flex column
+  (`min-height: 0`); without it the default `min-height: auto` let the tall
+  terminal balloon the shell past the fold, producing spurious vertical + then
+  horizontal scrollbars and an oversized shell. xterm's FitAddon now sizes to a
+  real, bounded box — full-screen TUIs like `nano` paint within the viewport.
+- **Terminal grid no longer overflows its box.** FitAddon divides the container
+  height by xterm's internal cell height, which the DOM renderer rounds up
+  per-row — overcounting rows so the last one spilled below the viewport and a
+  full-screen TUI's bottom bar (e.g. `nano`'s shortcut keys) was clipped. `refit`
+  now re-measures the rendered row height and drops rows until the grid fits, then
+  notifies the kernel (`os.resize`) of the corrected size.
+
 [Unreleased]: https://github.com/opentf/workeros/commits/main

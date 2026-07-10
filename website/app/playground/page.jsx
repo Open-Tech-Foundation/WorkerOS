@@ -113,6 +113,22 @@ export default function Playground() {
         refit = () => {
           try {
             fit.fit();
+            // FitAddon sizes the grid by dividing the container height by xterm's
+            // internal cell height — which the DOM renderer then rounds *up*
+            // per-row. That overcounts rows, so the last one spills below the
+            // viewport and a full-screen TUI's bottom bar (e.g. nano's shortcut
+            // keys) gets clipped. Re-measure the rendered row height and drop rows
+            // until the grid actually fits its box.
+            const rowsEl = el.querySelector(".xterm-rows");
+            const firstRow = rowsEl && rowsEl.firstElementChild;
+            const box = el.querySelector(".xterm");
+            if (firstRow && box) {
+              const cellH = firstRow.getBoundingClientRect().height;
+              const avail = box.clientHeight;
+              let rows = term.rows;
+              while (rows > 1 && rows * cellH > avail + 1) rows--;
+              if (rows !== term.rows) term.resize(term.cols, rows);
+            }
             if (term.rows !== lastRows || term.cols !== lastCols) {
               lastRows = term.rows;
               lastCols = term.cols;

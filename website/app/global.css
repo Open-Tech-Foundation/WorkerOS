@@ -239,7 +239,19 @@ pre.code .a { color: var(--accent-soft); }
 .footer a:hover { color: var(--text); }
 
 /* ================= PLAYGROUND ================= */
-.pg { display: flex; flex-direction: column; height: calc(100vh - 60px); }
+/* The playground is a full-viewport app (a terminal that must fit exactly),
+   not a scrolling document: pin the shell to the viewport and drop the marketing
+   footer so nothing spills past the fold. Scoped with :has() so the homepage —
+   which has no `.pg` — keeps its normal min-height + footer. */
+.app:has(.pg) { height: 100vh; overflow: hidden; }
+.app:has(.pg) .footer { display: none; }
+/* `.main` must be a shrinkable flex column: without `min-height: 0` its default
+   `min-height: auto` lets the tall terminal balloon it past the viewport (the
+   old "enlarged shell"). With it, `.pg`'s `flex: 1` resolves against the space
+   left under the 60px nav, so xterm's FitAddon sizes to a real, bounded box. */
+.app:has(.pg) .main { min-height: 0; display: flex; flex-direction: column; }
+
+.pg { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .pg-head {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   padding: 16px 24px; border-bottom: 1px solid var(--line-soft);
