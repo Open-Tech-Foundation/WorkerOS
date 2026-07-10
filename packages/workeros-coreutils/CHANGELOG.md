@@ -8,6 +8,11 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Added
+- **`echo -e`/`-E`** — interpret (or not) backslash escapes: `\n \t \r \e \a \b \f
+  \v \\`, `\xHH`, `\0NNN`, and `\c`. Option groups combine (`-ne`). Lets `echo -e
+  "\e[31m…"` emit real ANSI so the terminal renders color.
+
+### Added (initial)
 - Initial coreutils set, installed at **`/sbin`** as **system binaries** (kept apart
   from the `/bin` OS/user programs so they read as untouchable OS internals), each
   executed as a real process:

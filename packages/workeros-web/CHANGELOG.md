@@ -8,6 +8,9 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`echo -e`/`-E` in the shell** — the `wsh` `echo` builtin now interprets
+  backslash escapes under `-e` (`\n \t \r \e \a \b \f \v \\`, `\xHH`, `\0NNN`,
+  `\c`), option groups combine (`-ne`), so `echo -e "\e[31m…"` emits real ANSI.
 - **Interactive terminal over the kernel TTY.** The kernel worker now runs the
   shell REPL itself, reading command lines from the kernel's TTY line discipline
   and streaming a single terminal output channel back to the main thread. New

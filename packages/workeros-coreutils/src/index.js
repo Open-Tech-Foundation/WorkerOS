@@ -51,9 +51,42 @@ function util(body) {
 export const coreutils = {
   "/sbin/echo": util(`
 let nl = true;
+let interpret = false;
 let args = sys.argv.slice(1);
-if (args[0] === "-n") { nl = false; args = args.slice(1); }
-out(args.join(" ") + (nl ? "\\n" : ""));
+// Consume leading option groups: -n, -e, -E (and combos like -ne). Anything else
+// (e.g. -foo, or a bare -) is treated as an operand, matching POSIX echo.
+while (args.length && /^-[neE]+$/.test(args[0])) {
+  const f = args[0].slice(1);
+  if (f.includes("n")) nl = false;
+  if (f.includes("e")) interpret = true;
+  if (f.includes("E")) interpret = false;
+  args = args.slice(1);
+}
+let s = args.join(" ");
+if (interpret) {
+  // -e: interpret backslash escapes (\\n \\t \\e \\xHH \\0NNN … ). Char codes keep
+  // the source free of nested backslash-escaping. 92 is the backslash byte.
+  const map = { n: 10, t: 9, r: 13, e: 27, E: 27, a: 7, b: 8, f: 12, v: 11 };
+  let r = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) !== 92 || i + 1 >= s.length) { r += s[i]; continue; }
+    const c = s[++i];
+    if (c === String.fromCharCode(92)) { r += String.fromCharCode(92); }
+    else if (c in map) { r += String.fromCharCode(map[c]); }
+    else if (c === "c") { nl = false; break; } // \\c: stop output, no newline
+    else if (c === "x") {
+      let h = "";
+      while (h.length < 2 && i + 1 < s.length && /[0-9a-fA-F]/.test(s[i + 1])) h += s[++i];
+      r += h ? String.fromCharCode(parseInt(h, 16)) : String.fromCharCode(92) + "x";
+    } else if (c >= "0" && c <= "7") {
+      let o = c;
+      while (o.length < 3 && i + 1 < s.length && s[i + 1] >= "0" && s[i + 1] <= "7") o += s[++i];
+      r += String.fromCharCode(parseInt(o, 8) & 0xff);
+    } else { r += String.fromCharCode(92) + c; }
+  }
+  s = r;
+}
+out(s + (nl ? "\\n" : ""));
 sys.exit(0);
 `),
 

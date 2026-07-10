@@ -571,9 +571,22 @@ export function createInterpreter({ runtime, session }) {
     "true": async () => 0,
     "false": async () => 1,
     "echo": async (args, io) => {
-      let nl = true, a = args;
-      if (a[0] === "-n") { nl = false; a = a.slice(1); }
-      writeOut(io, a.join(" ") + (nl ? "\n" : ""));
+      let nl = true, interpret = false, a = args;
+      // Leading option groups: -n, -e, -E (combos like -ne). Anything else is an operand.
+      while (a.length && /^-[neE]+$/.test(a[0])) {
+        const f = a[0].slice(1);
+        if (f.includes("n")) nl = false;
+        if (f.includes("e")) interpret = true;
+        if (f.includes("E")) interpret = false;
+        a = a.slice(1);
+      }
+      let s = a.join(" ");
+      if (interpret) {
+        const r = echoEscapes(s);
+        s = r.text;
+        if (r.stop) nl = false; // \c: suppress the rest and the trailing newline
+      }
+      writeOut(io, s + (nl ? "\n" : ""));
       return 0;
     },
     "printf": async (args, io) => {
@@ -773,6 +786,31 @@ function concat(chunks) {
   const b = new Uint8Array(n); let o = 0;
   for (const c of chunks) { b.set(c, o); o += c.length; }
   return b;
+}
+
+// Interpret C-style backslash escapes for `echo -e`: \n \t \r \e \a \b \f \v \\,
+// \xHH, and \0NNN (octal). Returns { text, stop } where `stop` is set by \c
+// (truncate output and drop the trailing newline). 92 is the backslash byte.
+function echoEscapes(s) {
+  const map = { n: 10, t: 9, r: 13, e: 27, E: 27, a: 7, b: 8, f: 12, v: 11 };
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) !== 92 || i + 1 >= s.length) { out += s[i]; continue; }
+    const c = s[++i];
+    if (c === "\\") out += "\\";
+    else if (c in map) out += String.fromCharCode(map[c]);
+    else if (c === "c") return { text: out, stop: true };
+    else if (c === "x") {
+      let h = "";
+      while (h.length < 2 && i + 1 < s.length && /[0-9a-fA-F]/.test(s[i + 1])) h += s[++i];
+      out += h ? String.fromCharCode(parseInt(h, 16)) : "\\x";
+    } else if (c >= "0" && c <= "7") {
+      let o = c;
+      while (o.length < 3 && i + 1 < s.length && s[i + 1] >= "0" && s[i + 1] <= "7") o += s[++i];
+      out += String.fromCharCode(parseInt(o, 8) & 0xff);
+    } else out += "\\" + c;
+  }
+  return { text: out, stop: false };
 }
 
 // Minimal printf: %s %d %% and \n \t \\ escapes; recycles the format over args.
