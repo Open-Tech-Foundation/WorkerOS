@@ -270,6 +270,84 @@ test("nano: a mouse click positions the cursor", opts, async () => {
   assert.equal(buf.saved, "0123X456789\n", "the click landed the cursor between '3' and '4'");
 });
 
+test("nano: click-drag selects a range the ^K cut removes", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/m.txt", "0123456789\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-400)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /m.txt\r");
+    await waitFor("Read 1 line");
+    os.input("\x1bn"); // M-N: gutter off so column math is 1:1
+    await waitFor("Line numbers off");
+    // Press at col 2 (index 1), drag (motion, button+32) to col 6 (index 5), release.
+    os.input("\x1b[<0;2;2M\x1b[<32;6;2M\x1b[<0;6;2m");
+    await sleep(120);
+    os.input("\x0b"); // ^K: cut the drag-selected range "1234"
+    await sleep(120);
+    os.input("\x0f"); // ^O
+    await waitFor("File Name to Write");
+    os.input("\r");
+    await waitFor("Wrote 1 line");
+    os.input("\x18");
+    await sleep(120);
+    return { saved: new TextDecoder().decode(await os.fs.read("/m.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "056789\n", "the drag selected '1234' and ^K cut it");
+});
+
+test("nano: double-click selects the word under the cursor", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/m.txt", "hello world foo\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-400)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /m.txt\r");
+    await waitFor("Read 1 line");
+    os.input("\x1bn"); // M-N: gutter off so column math is 1:1
+    await waitFor("Line numbers off");
+    // Two quick presses on col 9 (index 8, inside "world") → double-click selects the word.
+    os.input("\x1b[<0;9;2M\x1b[<0;9;2m\x1b[<0;9;2M\x1b[<0;9;2m");
+    await sleep(120);
+    os.input("\x0b"); // ^K: cut the selected word
+    await sleep(120);
+    os.input("\x0f"); // ^O
+    await waitFor("File Name to Write");
+    os.input("\r");
+    await waitFor("Wrote 1 line");
+    os.input("\x18");
+    await sleep(120);
+    return { saved: new TextDecoder().decode(await os.fs.read("/m.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "hello  foo\n", "double-click selected 'world' and ^K cut it");
+});
+
 test("nano: line-number gutter renders in 24-bit color", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();

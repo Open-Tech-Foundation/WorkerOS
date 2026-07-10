@@ -48,6 +48,23 @@ function loadCss(href) {
   document.head.appendChild(l);
 }
 
+// Last-resort clipboard write for when navigator.clipboard is unavailable or
+// rejects (older/insecure contexts): a throwaway textarea + execCommand("copy").
+function copyFallback(text) {
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  } catch {
+    /* nothing more we can do */
+  }
+}
+
 export default function Playground() {
   let status = $state("booting");
   let statusText = $state("booting kernel…");
@@ -103,6 +120,34 @@ export default function Playground() {
         // Keystrokes → kernel line discipline; kernel output → the screen.
         os.onOutput((bytes) => term.write(bytes));
         term.onData((data) => os.input(data));
+
+        // OSC 52 → system clipboard. TUIs like nano copy by emitting
+        // `ESC ] 52 ; c ; <base64> ST`; xterm.js doesn't touch the clipboard on
+        // its own (and Ctrl+Shift+C only copies xterm's own text selection, not a
+        // TUI's inverse-video region), so bridge it to navigator.clipboard here.
+        // The kernel output runs shortly after the keypress that triggered the
+        // copy, so transient user activation is still valid. Returning true marks
+        // the sequence handled.
+        term.parser.registerOscHandler(52, (payload) => {
+          const semi = payload.indexOf(";"); // strip the `c;` selection prefix
+          const b64 = semi >= 0 ? payload.slice(semi + 1) : payload;
+          if (!b64 || b64 === "?") return true; // empty or a (read) query — ignore
+          let text;
+          try {
+            const bin = atob(b64);
+            const arr = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+            text = new TextDecoder().decode(arr);
+          } catch {
+            return true; // malformed base64 — swallow the sequence anyway
+          }
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => copyFallback(text));
+          } else {
+            copyFallback(text);
+          }
+          return true;
+        });
 
         // Keep the kernel's winsize in step with the rendered geometry. Only
         // re-notify the kernel when rows/cols actually change (a pixel resize that

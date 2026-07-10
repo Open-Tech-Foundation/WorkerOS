@@ -29,6 +29,16 @@ Notable changes to the WorkerOS website + live playground, built with the
   README documents the local-build + `wrangler pages deploy dist` flow.
 
 ### Fixed
+- **Copy to the system clipboard works in the playground (OSC 52).** Full-screen
+  TUIs like `nano` copy by emitting `ESC ] 52 ; c ; <base64> ST`, but xterm.js
+  never touches the system clipboard on its own — and `Ctrl+Shift+C` only copies
+  xterm's own text selection, not a TUI's inverse-video region — so a
+  select-and-copy silently went nowhere. The playground now registers a
+  `parser.registerOscHandler(52, …)` that base64-decodes the payload and writes it
+  to `navigator.clipboard` (with a `document.execCommand("copy")` fallback). The
+  kernel output runs within the copy keystroke's transient activation window, so
+  the write is allowed. Covered by an e2e that pipes nano's exact sequence through
+  the vendored xterm and reads the clipboard back (`tools/osc52-clipboard.test.js`).
 - **Playground fits the viewport.** The playground is a full-viewport app, not a
   scrolling document, so its layout is now pinned to `100vh` and the marketing
   footer is dropped (both scoped via `.app:has(.pg)` so the landing page keeps its

@@ -66,6 +66,8 @@ let textRows = 20; // editable rows = screenRows - 2 chrome rows (title + status
 let cutBuffer = ""; // text held by ^K / copy, re-inserted by ^U (may span lines)
 let lastWasCut = false; // consecutive line ^K accumulate into cutBuffer
 let mark = null; // selection anchor { cy, cx }, or null (^6 sets/clears)
+let dragging = false; // a left mouse button is held: motion extends the selection
+let lastClick = { t: 0, x: -1, y: -1, count: 0 }; // for double/triple-click detection
 let showLineNumbers = true; // left gutter with line numbers (toggle: M-N)
 let autoIndent = true; // carry leading whitespace onto a new line (toggle: M-I)
 let softWrap = false; // wrap long lines onto extra screen rows (toggle: M-$)
@@ -1040,7 +1042,32 @@ function deleteWordRight() {
   markDirty();
 }
 
-// A mouse report: left-click positions the cursor; the wheel scrolls the view.
+// Map a mouse report's screen cell to a document position { cy, cx }, or null
+// when it lands on the chrome (title/status bars). A click below the last line
+// snaps to end-of-buffer.
+function mouseTarget(m) {
+  const rel = m.y - 2; // screen row 1 is the title bar; text starts at row 2
+  if (rel < 0 || rel >= textRows) return null;
+  const v = visualMap[rel];
+  if (!v) return { cy: rows.length - 1, cx: rows[rows.length - 1].length }; // below the buffer
+  const rx = v.start + Math.max(0, m.x - 1 - gutterWidth());
+  return { cy: v.r, cx: rxToCx(rows[v.r], rx) };
+}
+
+// The word (run of word chars) around `cx`, as { s, e }. Off a word char it
+// selects the single grapheme under the cursor. Drives double-click selection.
+function wordBounds(line, cx) {
+  if (isWordCh(line[cx])) {
+    let s = cx, e = cx;
+    while (s > 0 && isWordCh(line[s - 1])) s--;
+    while (e < line.length && isWordCh(line[e])) e++;
+    return { s, e };
+  }
+  return { s: cx, e: cx < line.length ? cx + nextLen(line, cx) : cx };
+}
+
+// A mouse report: left-click positions the cursor and starts a selection that a
+// drag extends; double/triple-click select the word/line; the wheel scrolls.
 function handleMouse(m) {
   coalesceKey = null;
   if (m.b & 64) { // wheel: bit 0 = down, else up (3 lines, like a real terminal)
@@ -1049,14 +1076,43 @@ function handleMouse(m) {
     clampCx();
     return;
   }
-  if (!m.press || (m.b & 3) !== 0) return; // only act on a left-button press
-  const rel = m.y - 2; // screen row 1 is the title bar; text starts at row 2
-  if (rel < 0 || rel >= textRows) return; // a click on the chrome
-  const v = visualMap[rel];
-  if (!v) { cy = rows.length - 1; cx = rows[cy].length; return; } // below the buffer
-  cy = v.r;
-  const rx = v.start + Math.max(0, m.x - 1 - gutterWidth());
-  cx = rxToCx(rows[cy], rx);
+  if ((m.b & 3) !== 0) return; // only the left button drives cursor/selection
+
+  if (!m.press) { // release: a click with no drag leaves no selection
+    if (dragging && mark && mark.cy === cy && mark.cx === cx) mark = null;
+    dragging = false;
+    return;
+  }
+
+  const t = mouseTarget(m);
+  if (!t) return;
+
+  if (m.b & 32) { // motion while held: extend the selection to the cursor
+    if (!dragging) return; // motion without a press we own (e.g. over chrome)
+    cy = t.cy; cx = t.cx;
+    return;
+  }
+
+  // A fresh left-button press. Count rapid presses on the same cell for
+  // double- (word) and triple- (line) click.
+  const now = Date.now();
+  const repeat = now - lastClick.t < 400 && lastClick.x === m.x && lastClick.y === m.y;
+  lastClick = { t: now, x: m.x, y: m.y, count: repeat ? lastClick.count + 1 : 1 };
+  cy = t.cy; cx = t.cx;
+
+  if (lastClick.count >= 3) { // triple-click: select the whole line
+    mark = { cy, cx: 0 };
+    cx = rows[cy].length;
+    dragging = false;
+  } else if (lastClick.count === 2) { // double-click: select the word
+    const w = wordBounds(rows[cy], cx);
+    mark = { cy, cx: w.s };
+    cx = w.e;
+    dragging = false;
+  } else { // single press: anchor a selection the drag will grow
+    mark = { cy, cx };
+    dragging = true;
+  }
 }
 
 // ---- message-bar prompts ---------------------------------------------------
@@ -1595,7 +1651,7 @@ async function main() {
   // reporting so clicks/scroll arrive as input we decode ourselves.
   const savedAttr = await sys.tcgetattr();
   await sys.tcsetattr({ canonical: false, echo: false, isig: false });
-  write("\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h");
+  write("\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h");
   sys.sighandle("SIGWINCH", true);
   sys.onSignal(async (sig) => {
     if (sig !== "SIGWINCH") return;
@@ -1692,7 +1748,7 @@ async function main() {
     // Always restore the terminal, even on error: disable mouse reporting, leave
     // the alternate screen, and put the saved termios back.
     sys.sighandle("SIGWINCH", false);
-    write("\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?1049l");
+    write("\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?1049l");
     await sys.tcsetattr(savedAttr);
   }
 }
