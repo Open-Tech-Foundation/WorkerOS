@@ -686,13 +686,15 @@ function refresh() {
   for (; sl < textRows; sl++) out += "\x1b[K\r\n"; // blank rows past the buffer
 
   // Message bar: status text on the left, a VSCode-style indent indicator on the
-  // right (`Spaces: 4` / `Tab Size: 8`). The indicator yields to the message when
-  // the screen is too narrow to show both, so a status line is never truncated.
+  // right (`Spaces: 4` / `Tab Size: 8`). Keep a one-column right margin so the
+  // indicator never lands in the last cell — where a web terminal's scrollbar /
+  // magic-margin wrap would clip it. It also yields to the message when the screen
+  // is too narrow to show both, so a status line is never truncated.
   const indicator = expandTab ? `Spaces: ${indentSize}` : `Tab Size: ${tabWidth}`;
   const iw = dispWidth(indicator);
-  const room = screenCols - iw - 1;
+  const room = screenCols - iw - 2; // 1 gap before the indicator + 1 margin after
   if (room >= 0 && dispWidth(statusmsg) <= room)
-    out += fit(statusmsg, room) + " " + indicator + "\r\n";
+    out += fit(statusmsg, room) + " " + indicator + " " + "\r\n";
   else out += fit(statusmsg, screenCols) + "\r\n";
 
   // Two shortcut bars.
