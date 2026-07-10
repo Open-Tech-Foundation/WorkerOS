@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn realistic_package_json() {
         let src = r#"{
-            "name": "edge.js",
+            "name": "example-pkg",
             "version": "6.0.0",
             "type": "module",
             "main": "build/index.js",
