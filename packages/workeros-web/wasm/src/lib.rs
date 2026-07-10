@@ -15,6 +15,7 @@ use workeros_kernel::resolver::{ModuleGraph, ModuleKind};
 use workeros_kernel::shell::{self, AndOrOp, RedirectOp};
 use workeros_kernel::syscall::{Fd, PipeEnd, PipeId, RedirectMode};
 use workeros_kernel::vfs::OpenOptions;
+use workeros_kernel::tty::{Termios, TtySignal, Winsize};
 use workeros_kernel::{Kernel, ReadResult, SpawnError, StdioPlan, StdioTarget, WriteEffect};
 
 /// A booted kernel handle, held by the kernel worker's JS glue.
@@ -169,6 +170,17 @@ impl From<&ModuleGraph> for GraphDto {
     }
 }
 
+fn termios_to_js(t: Termios) -> JsValue {
+    let obj = js_sys::Object::new();
+    let set = |k: &str, v: bool| {
+        js_sys::Reflect::set(&obj, &JsValue::from_str(k), &JsValue::from_bool(v)).unwrap();
+    };
+    set("canonical", t.canonical);
+    set("echo", t.echo);
+    set("isig", t.isig);
+    obj.into()
+}
+
 fn errno_to_js(e: Errno) -> JsError {
     JsError::new(&format!("errno {:?} ({})", e, e.raw()))
 }
@@ -305,10 +317,92 @@ impl WebKernel {
         Ok(obj.into())
     }
 
-    /// Feed bytes to a process's stdin queue.
+    /// Feed host keystrokes through the terminal's line discipline. Returns
+    /// `{ echo: Uint8Array, signal?: "int"|"susp" }` — the bytes the host writes
+    /// back to the terminal display, and any control-key signal to deliver to the
+    /// foreground process.
+    #[wasm_bindgen]
+    pub fn tty_input(&mut self, data: &[u8]) -> JsValue {
+        let out = self.inner.tty_input(data);
+        let obj = js_sys::Object::new();
+        let set = |k: &str, v: &JsValue| {
+            js_sys::Reflect::set(&obj, &JsValue::from_str(k), v).unwrap();
+        };
+        set("echo", &js_sys::Uint8Array::from(&out.echo[..]));
+        if let Some(sig) = out.signal {
+            let name = match sig {
+                TtySignal::Int => "int",
+                TtySignal::Susp => "susp",
+            };
+            set("signal", &JsValue::from_str(name));
+        }
+        obj.into()
+    }
+
+    /// Take the next committed input line for the shell prompt as a `Uint8Array`,
+    /// or `null` if no full line is buffered yet.
+    #[wasm_bindgen]
+    pub fn tty_read_line(&mut self) -> JsValue {
+        match self.inner.tty_read_line() {
+            Some(line) => js_sys::Uint8Array::from(&line[..]).into(),
+            None => JsValue::NULL,
+        }
+    }
+
+    /// `isatty(fd)` for a process: true when the descriptor is the terminal, not
+    /// a redirected file or pipe.
+    #[wasm_bindgen]
+    pub fn isatty(&self, pid: Pid, fd: Fd) -> Result<bool, JsError> {
+        self.inner.isatty(pid, fd).map_err(errno_to_js)
+    }
+
+    /// Inject bytes into a process's stdin queue (the programmatic `writeStdin`
+    /// API): no line discipline, no echo, delivered to that process's next read.
     #[wasm_bindgen]
     pub fn feed_stdin(&mut self, pid: Pid, data: &[u8]) -> Result<(), JsError> {
         self.inner.feed_stdin(pid, data).map_err(errno_to_js)
+    }
+
+    /// `tcgetattr` — the terminal's current line-discipline flags.
+    #[wasm_bindgen]
+    pub fn tty_get_attr(&self) -> JsValue {
+        termios_to_js(self.inner.tty_get_attr())
+    }
+
+    /// `tcsetattr` — set the line-discipline flags (e.g. a program going raw).
+    /// Accepts `{ canonical, echo, isig }`; missing keys keep their current value.
+    #[wasm_bindgen]
+    pub fn tty_set_attr(&mut self, attr: JsValue) -> Result<(), JsError> {
+        let mut t = self.inner.tty_get_attr();
+        let get = |k: &str| js_sys::Reflect::get(&attr, &JsValue::from_str(k)).ok();
+        if let Some(v) = get("canonical").filter(|v| !v.is_undefined()) {
+            t.canonical = v.is_truthy();
+        }
+        if let Some(v) = get("echo").filter(|v| !v.is_undefined()) {
+            t.echo = v.is_truthy();
+        }
+        if let Some(v) = get("isig").filter(|v| !v.is_undefined()) {
+            t.isig = v.is_truthy();
+        }
+        self.inner.tty_set_attr(t);
+        Ok(())
+    }
+
+    /// `TIOCGWINSZ` — the terminal window size as `{ rows, cols }`.
+    #[wasm_bindgen]
+    pub fn tty_get_winsize(&self) -> JsValue {
+        let ws = self.inner.tty_winsize();
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &JsValue::from_f64(ws.rows as f64)).unwrap();
+        js_sys::Reflect::set(&obj, &JsValue::from_str("cols"), &JsValue::from_f64(ws.cols as f64)).unwrap();
+        obj.into()
+    }
+
+    /// Update the terminal window size after a host resize. The host then signals
+    /// `SIGWINCH` to the foreground process.
+    #[wasm_bindgen]
+    pub fn tty_set_winsize(&mut self, rows: u16, cols: u16) {
+        self.inner.tty_set_winsize(Winsize { rows, cols });
     }
 
     /// Open an IPC pipe (`otf:ipc_open`); returns its id for a stdio plan.

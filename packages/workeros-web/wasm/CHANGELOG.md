@@ -7,6 +7,10 @@ No release cut yet — see **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **TTY bindings** — expose the kernel's terminal device to the host:
+  `tty_input(data)` (returns `{ echo, signal? }`), `tty_read_line()`,
+  `isatty(pid, fd)`, `tty_get_attr`/`tty_set_attr` (termios: `canonical`/`echo`/
+  `isig`), and `tty_get_winsize`/`tty_set_winsize`.
 - **`WebKernel` binding** — a `wasm-bindgen` façade over `workeros-kernel` that
   the kernel worker instantiates in the browser.
 - **`sys_seek(pid, fd, offset, whence)`** binding (offset/result as JS numbers) for
