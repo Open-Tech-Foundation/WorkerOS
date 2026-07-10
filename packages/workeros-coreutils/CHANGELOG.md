@@ -8,6 +8,8 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Added
+- **`coreutils`** — implemented a POSIX-compliant argument parser across all tools handling short grouped flags (`-al`), long flags (`--recursive`), and the `--` operand terminator.
+- **`ls`** — enhanced to support `-l` (long format), `-h` (human-readable sizes), `-r` (reverse sort), and `-R` (recursive directory traversal).
 - **`echo -e`/`-E`** — interpret (or not) backslash escapes: `\n \t \r \e \a \b \f
   \v \\`, `\xHH`, `\0NNN`, and `\c`. Option groups combine (`-ne`). Lets `echo -e
   "\e[31m…"` emit real ANSI so the terminal renders color.
