@@ -30,8 +30,6 @@ pub struct WebKernel {
 struct ImportDto {
     specifier: String,
     resolved: String,
-    /// True → a runtime-provided `node:` builtin (no VFS file); `resolved` is its key.
-    builtin: bool,
 }
 
 #[derive(Serialize)]
@@ -164,7 +162,6 @@ impl From<&ModuleGraph> for GraphDto {
                         .map(|e| ImportDto {
                             specifier: e.specifier.clone(),
                             resolved: e.resolved.clone(),
-                            builtin: e.builtin,
                         })
                         .collect(),
                 })

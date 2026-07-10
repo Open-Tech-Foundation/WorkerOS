@@ -7,10 +7,6 @@ No release cut yet — see **Unreleased**.
 ## [Unreleased]
 
 ### Added
-- **`resolveGraph` import edges carry `builtin`** — the graph DTO's `ImportDto`
-  gains a `builtin: bool`. When true the edge is a runtime-provided `node:`
-  builtin (`resolved` is the builtin key, no VFS file), so `/bin/node`'s ESM
-  stitch wires it to the guest runtime instead of a blob (PLAN Phase 5·C-ESM).
 - **`SpawnError::LimitExceeded` → JS** — `spawn_err_to_js` maps the kernel's new
   process-count-cap refusal (INV-6/ADR-020) to an `EAGAIN`-shaped error, so a host
   that hits the fork-bomb guard surfaces it honestly.

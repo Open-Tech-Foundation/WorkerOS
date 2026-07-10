@@ -17,7 +17,6 @@
 
 pub mod caps;
 pub mod errno;
-pub mod json;
 pub mod limits;
 pub mod process;
 pub mod resolver;

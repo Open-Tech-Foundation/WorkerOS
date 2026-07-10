@@ -18,23 +18,26 @@ guest runtime. Format:
   (`esbuild …`) — the policy is npm's `PATH` convention in userland, not kernel
   knowledge (INV-1). Honest limit (INV-5): `sys.exec` doesn't forward stdin yet.
 - **CJS-in-an-ESM-graph interop** (`node-program.js`, `module.js`). A CommonJS
-  dependency reached via an ESM `import` (the kernel resolves it into the graph
-  as a leaf) can't be evaluated as an ES module. `/bin/node`'s ESM stitch now
+  dependency reached via an ESM `import` (resolved into the graph as a leaf)
+  can't be evaluated as an ES module. `/bin/node`'s ESM stitch now
   stands each such module up with a synthetic ES module — `export default
   module.exports` plus a named export per own key (interop for `import { x }`) —
   backed by the synchronous CJS loader (`module.js` `_load`), which resolves the
   dep's own `require` subtree on demand over the sync `fs`. End-to-end tested.
-- **ESM `import` of `node:` builtins and installed packages** (PLAN Phase
-  5·C-ESM / D). With the kernel resolver now resolving `node_modules` and marking
-  `node:` imports as builtin edges, `/bin/node`'s ESM stitch (`node-program.js`)
-  synthesizes a tiny re-export module for each builtin edge — `export default m`
-  plus a named export per own key — so `import fs from 'node:fs'` and
-  `import { readFileSync } from 'fs'` both resolve to the guest runtime object
-  (`makeBuiltins` is now exported for this). Bare-package `import`s (a package's
-  `main`/`exports`, scoped + subpath) are ordinary VFS modules the kernel put in
-  the graph, so ESM-only packages run. (CJS-in-an-ESM-graph interop — a `require`-
-  style dep pulled in by `import` — is a documented follow-up; the ESM path
-  assumes ESM modules.) End-to-end tested in a browser.
+- **ESM `import` of `node:` builtins and installed packages — resolved in
+  userland** (PLAN Phase 5·C-ESM / D). `/bin/node` now resolves its own ES module
+  graph over the synchronous `fs` (`src/node/resolve.js` + `src/node/esm-graph.js`),
+  because `node_modules`/`package.json` `exports`/`node:` is Node-ecosystem policy,
+  not the kernel's business (INV-1 — the kernel does only generic relative
+  resolution). `resolve.js` handles the `node_modules` walk, `exports`(".")/
+  `module`/`main` with ESM conditions, `@scope` + `./*` subpath exports, and
+  ext/`index` fallbacks; `esm-graph.js` scans imports (tokenized, so
+  strings/comments don't false-positive) and builds the graph. Builtin imports
+  become `builtin` edges that the stitch turns into a re-export module wired to
+  the guest runtime — so `import fs from 'node:fs'` and
+  `import { readFileSync } from 'fs'` both work (`makeBuiltins` is exported for
+  this). ESM-only packages run; an uninstalled package fails honestly (INV-5).
+  Unit-tested in pure Node and end-to-end in a browser.
 - **`node:module` / `node:os` / `node:url` builtins + a fuller `process`** (PLAN
   Phase 5·B). Three more core `node:` builtins resolve through the CJS registry:
   - **`module`** (`src/node/module.js`) — the headline is `createRequire(filename)`:

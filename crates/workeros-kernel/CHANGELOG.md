@@ -15,24 +15,16 @@ a release yet, so everything lives under **Unreleased**.
   `node_modules/.bin` convention lives entirely in userland: the shell (and
   `npm run`) prepends those dirs to `PATH`, exactly as real npm does (it edits
   the environment; it never teaches the OS about `node_modules`).
-- **ESM `node_modules` + `node:` builtin resolution in the resolver (PLAN Phase
-  5·C-ESM / D).** `resolve_graph` no longer rejects every non-relative specifier
-  (INV-2, the kernel owns resolution). It now handles three kinds:
-  - **`node:` builtins** (`node:fs`, or a bare core name like `fs`/`path`/`os`/
-    `url`/`module` from `NODE_BUILTINS`) → a runtime-provided **external** edge
-    (`ImportEdge.builtin = true`, `resolved` = builtin key, no VFS file); the
-    guest supplies the module (INV-1). `node:` is always treated as a builtin.
-  - **bare packages** (`lodash`, `@scope/pkg/sub`) → the `node_modules` walk:
-    nearest `node_modules/<name>` climbing to `/`, then package.json
-    `exports`(".")/`module`/`main` with ESM condition selection
-    (`import`/`node`/`default`), subpath `exports` (incl. `@scope` and `./*`
-    wildcards), and `.js`/`.mjs`/`.cjs`/`.json` + `index` fallbacks. Resolved
-    targets are real VFS files, so ESM-only packages join the graph normally.
-  - An uninstalled bare package is an honest `NotFound`, never a silent stub (INV-5).
-- **`json` module** — a compact, dependency-free recursive-descent JSON value
-  parser (`Json::parse`), just enough to read package.json fields during
-  resolution (order-preserving objects, for `exports` condition matching). Keeps
-  the kernel crate free of `serde`.
+
+### Notes
+- The resolver (`resolve_graph`) resolves **relative** specifiers only — generic
+  ES-module-on-a-filesystem resolution. Bare / `node:` specifiers stay an honest
+  `Unsupported` error: `node_modules`/`package.json` `exports`/`node:` builtins
+  are Node-ecosystem policy that the guest node layer (`/bin/node`, which has
+  synchronous `fs`) resolves for itself (INV-1). The kernel is deliberately kept
+  free of that knowledge (and of `serde`/JSON parsing it would need for it).
+
+### Added
 - **Resource limits — kernel accounting caps (`limits` module; INV-6/ADR-020).**
   Bounds the runaway cases that would take down the tab. A **live-process cap**
   (default 128, excludes zombies) refuses fork-bombs in `Kernel::spawn`

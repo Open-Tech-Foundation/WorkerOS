@@ -17,6 +17,7 @@
 // the kernel still owns only native resolution + execution (INV-1/INV-2).
 
 import { createNodeRuntime, usesCommonjs, makeBuiltins } from "/lib/workeros-node/require-runtime.js";
+import { buildEsmGraph } from "/lib/workeros-node/esm-graph.js";
 
 const enc = new TextEncoder();
 const err = (s) => sys.write(2, enc.encode(s));
@@ -134,34 +135,50 @@ sys.onSignal(async (sig) => {
   process.emit(sig);
 });
 
-// The kernel resolves the whole import graph against the VFS (every specifier→path
-// decision is the kernel's — INV-2); we only evaluate what it hands back.
-const graph = await sys.resolveGraph(script);
-if (graph.kind === "wasm") {
+// Node module resolution is *userland* (INV-1): the kernel is just the
+// filesystem here. We read the entry ourselves (sync `fs`), decide CJS vs ESM,
+// and — for ESM — build the whole import graph in-process (`buildEsmGraph`),
+// resolving relative + `node_modules`/`exports` + `node:` builtins. The kernel
+// knows nothing of any of that.
+const builtins = makeBuiltins(sys);
+const fs = builtins.get("fs");
+const path = builtins.get("path");
+
+const entryAbs = path.isAbsolute(script) ? path.normalize(script) : path.join(sys.cwd, script);
+let entryBytes;
+try {
+  entryBytes = fs.readFileSync(entryAbs);
+} catch {
+  err("node: cannot find module '" + script + "'\n");
+  sys.exit(1);
+}
+// A wasm file (`\0asm`) isn't JS — run it directly, not through node.
+if (entryBytes.length >= 4 && entryBytes[0] === 0x00 && entryBytes[1] === 0x61 && entryBytes[2] === 0x73 && entryBytes[3] === 0x6d) {
   err("node: " + script + " is a wasm module, not JS (run it directly)\n");
   sys.exit(1);
 }
+const entrySource = new TextDecoder().decode(entryBytes);
 
 // CommonJS entry (`require`/`module.exports`): run it through the CJS runtime,
 // which resolves the `require` graph out of the VFS and provides the `node:`
 // builtins (fs/path). A plain ESM script falls through to the stitch path below.
-const entryMod = graph.modules.find((m) => m.path === graph.entry);
-if (entryMod && usesCommonjs(entryMod.source, graph.entry)) {
+if (usesCommonjs(entrySource, entryAbs)) {
   const run = createNodeRuntime(sys);
-  await run(graph.entry, entryMod.source);
+  await run(entryAbs, entrySource);
 } else {
+
+const graph = buildEsmGraph({ fs, path }, entryAbs, entrySource);
 
 // Stitch the resolved graph into blob URLs, dependencies first, rewriting each
 // import specifier to its dependency's blob URL. Mechanical assembly only — the
-// kernel already decided every target (mirrors the worker's own stitch step).
+// resolver already decided every target.
 const pathToBlob = new Map();
 
-// `node:` builtin edges (Phase 5·C-ESM): the kernel marked these `builtin`, so
-// there is no VFS file. Synthesize a tiny ES module per distinct builtin that
-// re-exports the live runtime object (stashed on the global for the blob realm
-// to read) — `export default m` plus a named export per own key, so both
+// `node:` builtin edges (Phase 5·C-ESM): resolved as `builtin`, so there is no
+// VFS file. Synthesize a tiny ES module per distinct builtin that re-exports the
+// live runtime object (stashed on the global for the blob realm to read) —
+// `export default m` plus a named export per own key, so both
 // `import fs from 'node:fs'` and `import { readFileSync } from 'fs'` work.
-const builtins = makeBuiltins(sys);
 globalThis.__workerosBuiltins = builtins;
 // Load a CommonJS module (and, on demand, its `require` subtree) via the
 // synchronous CJS loader — backed by the sync `fs`, so a CJS dep reached from
