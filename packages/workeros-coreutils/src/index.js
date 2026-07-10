@@ -16,9 +16,18 @@ const PRELUDE = `const enc = new TextEncoder();
 const dec = new TextDecoder();
 const out = (s) => sys.write(1, enc.encode(s));
 const err = (s) => sys.write(2, enc.encode(s));
-const flags = sys.argv.slice(1).filter((a) => a.startsWith("-") && a !== "-");
-const operands = sys.argv.slice(1).filter((a) => !a.startsWith("-") || a === "-");
-const has = (f) => flags.some((g) => g.includes(f.replace("-", "")));
+const flags = new Set();
+const longFlags = new Set();
+const operands = [];
+let _dd = false;
+for (const a of sys.argv.slice(1)) {
+  if (_dd) operands.push(a);
+  else if (a === "--") _dd = true;
+  else if (a.startsWith("--")) longFlags.add(a.slice(2));
+  else if (a.startsWith("-") && a !== "-") { for (let i = 1; i < a.length; i++) flags.add(a[i]); }
+  else operands.push(a);
+}
+const has = (f) => f.startsWith("--") ? longFlags.has(f.slice(2)) : flags.has(f.replace("-", ""));
 const basename = (p) => p.replace(/\\/+$/, "").split("/").pop();
 // Read a whole fd to text.
 const readFd = async (fd) => {
