@@ -21,6 +21,9 @@ import {
   fitCols,
   wordLeftIndex,
   wordRightIndex,
+  findNext,
+  findInLine,
+  wrapSegments,
 } from "../src/nano/nano-program.js";
 
 const cp = (s) => s.codePointAt(0);
@@ -126,4 +129,35 @@ test("word boundaries: left skips spaces+word, right skips word+spaces", () => {
   assert.equal(wordRightIndex(line, 0), 5); // over "foo" + spaces → start of "bar"
   assert.equal(wordRightIndex(line, 5), 9); // → start of "baz"
   assert.equal(wordRightIndex(line, 12), 12); // clamp at end
+});
+
+test("findNext: forward/backward, wrap, case-insensitive, and regex", () => {
+  const rows = ["foo bar", "BAR baz", "qux foo"];
+  const plain = { caseSens: true, regex: false, backward: false };
+  // Forward from (0,0): next "foo" is the one on row 2 (skips the match at cursor).
+  assert.deepEqual(findNext(rows, 0, 0, "foo", plain), { cy: 2, cx: 4, len: 3 });
+  // Wrap: from the last line, "bar" (case-sensitive) is back on row 0.
+  assert.deepEqual(findNext(rows, 2, 0, "bar", plain), { cy: 0, cx: 4, len: 3 });
+  // Case-insensitive finds "BAR" on row 1 first.
+  assert.deepEqual(
+    findNext(rows, 0, 0, "bar", { caseSens: false, regex: false, backward: false }),
+    { cy: 0, cx: 4, len: 3 },
+  );
+  // Backward from (2,4) — the "foo" at the cursor — the previous one is on row 0.
+  assert.deepEqual(findNext(rows, 2, 4, "foo", { ...plain, backward: true }), { cy: 0, cx: 0, len: 3 });
+  // Regex: \bba\w+ matches "bar" then "baz".
+  assert.deepEqual(
+    findNext(rows, 0, 0, "ba\\w+", { caseSens: false, regex: true, backward: false }),
+    { cy: 0, cx: 4, len: 3 },
+  );
+  assert.equal(findNext(rows, 0, 0, "zzz", plain), null);
+  assert.equal(findInLine("aXbXc", 2, "X", plain).index, 3); // resume search mid-line
+});
+
+test("wrapSegments breaks a line every `tw` render columns", () => {
+  assert.deepEqual(wrapSegments(0, 10), [0]); // empty line → one segment
+  assert.deepEqual(wrapSegments(8, 10), [0]); // fits
+  assert.deepEqual(wrapSegments(10, 10), [0]); // exact width, still one row
+  assert.deepEqual(wrapSegments(11, 10), [0, 10]);
+  assert.deepEqual(wrapSegments(25, 10), [0, 10, 20]);
 });

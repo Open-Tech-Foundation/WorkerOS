@@ -48,7 +48,10 @@ let lastWasCut = false; // consecutive line ^K accumulate into cutBuffer
 let mark = null; // selection anchor { cy, cx }, or null (^6 sets/clears)
 let showLineNumbers = true; // left gutter with line numbers (toggle: M-N)
 let autoIndent = true; // carry leading whitespace onto a new line (toggle: M-I)
+let softWrap = false; // wrap long lines onto extra screen rows (toggle: M-$)
 let lineEnding = "\n"; // detected on load ("\n" unix, "\r\n" dos, "\r" mac)
+let lastSearch = ""; // last search needle (empty ^W query repeats it)
+let searchOpts = { caseSens: false, regex: false, backward: false };
 
 // Undo/redo: whole-document snapshots. `coalesceKey` groups a run of like edits
 // (a burst of typing, a run of backspaces) into one undo step; any other action
@@ -246,6 +249,61 @@ export function wordRightIndex(line, cx) {
   return i;
 }
 
+// First match of `q` in `line` at or after `from`, honoring case/regex options.
+// Returns { index, len } or null. A regex that fails to compile yields null.
+export function findInLine(line, from, q, opts) {
+  if (opts.regex) {
+    let re;
+    try { re = new RegExp(q, opts.caseSens ? "g" : "gi"); } catch { return null; }
+    re.lastIndex = Math.max(0, from);
+    const m = re.exec(line);
+    return m ? { index: m.index, len: m[0].length || 1 } : null;
+  }
+  const hay = opts.caseSens ? line : line.toLowerCase();
+  const needle = opts.caseSens ? q : q.toLowerCase();
+  const i = hay.indexOf(needle, Math.max(0, from));
+  return i < 0 ? null : { index: i, len: q.length };
+}
+
+// Find the next occurrence of `q` from (cy, cx), scanning the whole document once
+// (wrapping), forward or backward. Returns { cy, cx, len } or null. Pure over the
+// passed `rows` so it unit-tests without editor state.
+export function findNext(rows, cy, cx, q, opts) {
+  if (!q) return null;
+  const n = rows.length;
+  if (!opts.backward) {
+    for (let step = 0; step <= n; step++) {
+      const r = (cy + step) % n;
+      const from = step === 0 ? cx + 1 : 0;
+      const m = findInLine(rows[r], from, q, opts);
+      if (m) return { cy: r, cx: m.index, len: m.len };
+      if (step === n) break;
+    }
+  } else {
+    for (let step = 0; step <= n; step++) {
+      const r = ((cy - step) % n + n) % n;
+      const limit = step === 0 ? cx : rows[r].length + 1; // matches strictly before
+      let best = null, at = 0;
+      for (;;) {
+        const m = findInLine(rows[r], at, q, opts);
+        if (!m || m.index >= limit) break;
+        best = m; at = m.index + Math.max(1, m.len);
+      }
+      if (best) return { cy: r, cx: best.index, len: best.len };
+      if (step === n) break;
+    }
+  }
+  return null;
+}
+
+// Render-column start of each wrapped segment of a line `lineWidth` columns wide,
+// broken every `tw` columns. Always at least `[0]`.
+export function wrapSegments(lineWidth, tw) {
+  const starts = [0];
+  for (let s = tw; s < lineWidth; s += tw) starts.push(s);
+  return starts;
+}
+
 // Decode an SGR mouse report (`ESC [ < b ; x ; y M|m`) into a mouse event, or
 // null if it isn't one. `press` is true for a button-press (`M`), false for
 // release (`m`); x/y are 1-based cell coordinates.
@@ -261,13 +319,35 @@ export function parseMouse(params, final) {
 const gutterWidth = () => (showLineNumbers ? gutterWidthFor(rows.length) : 0);
 const textWidth = () => Math.max(screenCols - gutterWidth(), 1);
 
+// screen-row → { r, start } map for the last painted frame; drives cursor
+// placement and mouse hit-testing in both plain and soft-wrap modes.
+let visualMap = [];
+
+// How many screen rows a document line occupies (1 unless soft-wrapping).
+function visualHeight(r) {
+  if (!softWrap) return 1;
+  return wrapSegments(cxToRx(rows[r], rows[r].length), textWidth()).length;
+}
+
 function scroll() {
   const rx = cxToRx(rows[cy], cx);
   const tw = textWidth();
   if (cy < rowoff) rowoff = cy;
-  if (cy >= rowoff + textRows) rowoff = cy - textRows + 1;
-  if (rx < coloff) coloff = rx;
-  if (rx >= coloff + tw) coloff = rx - tw + 1;
+  if (softWrap) {
+    coloff = 0; // soft-wrap never scrolls horizontally
+    const curSeg = Math.floor(rx / tw); // cursor's wrapped segment within its line
+    // Advance rowoff until the cursor's segment fits in the visible screen rows.
+    for (;;) {
+      let used = 0;
+      for (let r = rowoff; r < cy; r++) used += visualHeight(r);
+      if (rowoff >= cy || used + curSeg + 1 <= textRows) break;
+      rowoff++;
+    }
+  } else {
+    if (cy >= rowoff + textRows) rowoff = cy - textRows + 1;
+    if (rx < coloff) coloff = rx;
+    if (rx >= coloff + tw) coloff = rx - tw + 1;
+  }
 }
 
 const INVERSE = "\x1b[7m";
@@ -318,20 +398,30 @@ function refresh() {
   const title = `  nano  ${name}${dirty ? "  *" : ""}`;
   out += INVERSE + fit(title, screenCols) + RESET + "\r\n";
 
-  // Text area, with an optional 24-bit-colored line-number gutter.
+  // Text area, with an optional 24-bit-colored line-number gutter. Each screen
+  // row records its document position in `visualMap` (for the cursor + mouse).
+  // In soft-wrap mode a long line spans several screen rows; otherwise one row
+  // per line and the window scrolls horizontally by `coloff`.
   const gw = gutterWidth();
   const tw = textWidth();
-  for (let i = 0; i < textRows; i++) {
-    const docRow = rowoff + i;
-    if (docRow < rows.length) {
+  visualMap = new Array(textRows).fill(null);
+  let sl = 0; // screen line index within the text area
+  for (let r = rowoff; r < rows.length && sl < textRows; r++) {
+    const segs = softWrap ? wrapSegments(cxToRx(rows[r], rows[r].length), tw) : [coloff];
+    const selCols = selColsFor(r);
+    for (let si = 0; si < segs.length && sl < textRows; si++) {
+      const start = segs[si];
+      visualMap[sl] = { r, start };
       if (gw > 0) {
-        const num = String(docRow + 1).padStart(gw - 1);
-        out += (docRow === cy ? GUTTER_CUR : GUTTER_DIM) + num + " " + RESET;
+        if (si === 0) out += (r === cy ? GUTTER_CUR : GUTTER_DIM) + String(r + 1).padStart(gw - 1) + " " + RESET;
+        else out += " ".repeat(gw); // continuation rows: blank gutter
       }
-      out += renderRowVisible(rows[docRow], coloff, tw, selColsFor(docRow));
+      out += renderRowVisible(rows[r], start, tw, selCols);
+      out += "\x1b[K\r\n";
+      sl++;
     }
-    out += "\x1b[K\r\n";
   }
+  for (; sl < textRows; sl++) out += "\x1b[K\r\n"; // blank rows past the buffer
 
   // Message bar.
   out += fit(statusmsg, screenCols) + "\r\n";
@@ -357,9 +447,19 @@ function refresh() {
   out += bar1 + "\x1b[K\r\n";
   out += bar2 + "\x1b[K";
 
-  // Place the cursor and show it (offset past the gutter).
-  const screenRow = cy - rowoff + 2; // +1 title, +1 to 1-based
-  const screenCol = gw + cxToRx(rows[cy], cx) - coloff + 1;
+  // Place the cursor: find the screen row in visualMap whose segment holds it.
+  const rx = cxToRx(rows[cy], cx);
+  let screenRow = 2, screenCol = gw + 1;
+  for (let i = 0; i < textRows; i++) {
+    const v = visualMap[i];
+    if (!v || v.r !== cy) continue;
+    const last = i + 1 >= textRows || !visualMap[i + 1] || visualMap[i + 1].r !== cy;
+    if ((rx >= v.start && rx < v.start + tw) || (last && rx >= v.start)) {
+      screenRow = i + 2; // +1 title bar, +1 to 1-based
+      screenCol = gw + Math.min(rx - v.start, tw) + 1;
+      break;
+    }
+  }
   out += `\x1b[${screenRow};${screenCol}H\x1b[?25h`;
   write(out);
 }
@@ -643,10 +743,10 @@ function handleMouse(m) {
   if (!m.press || (m.b & 3) !== 0) return; // only act on a left-button press
   const rel = m.y - 2; // screen row 1 is the title bar; text starts at row 2
   if (rel < 0 || rel >= textRows) return; // a click on the chrome
-  const docRow = rowoff + rel;
-  if (docRow >= rows.length) { cy = rows.length - 1; cx = rows[cy].length; return; }
-  cy = docRow;
-  const rx = coloff + Math.max(0, m.x - 1 - gutterWidth());
+  const v = visualMap[rel];
+  if (!v) { cy = rows.length - 1; cx = rows[cy].length; return; } // below the buffer
+  cy = v.r;
+  const rx = v.start + Math.max(0, m.x - 1 - gutterWidth());
   cx = rxToCx(rows[cy], rx);
 }
 
@@ -808,18 +908,48 @@ async function insertFile() {
 }
 
 // ---- commands --------------------------------------------------------------
-async function search() {
-  const q = await promptLine("Search: ");
-  if (!q) { setMsg("Cancelled"); return; }
-  // Scan forward from just after the cursor, wrapping around the document.
-  const total = rows.length;
-  for (let step = 0; step < total; step++) {
-    const r = (cy + step) % total;
-    const from = step === 0 ? cx + 1 : 0;
-    const hit = rows[r].indexOf(q, from);
-    if (hit !== -1) { cy = r; cx = hit; setMsg(`Found: ${q}`); return; }
+// A search prompt: like promptLine, plus M-C case, M-R regex, M-B backward
+// toggles (shown as [Case][Regex][Back]). Returns { query, opts } or null.
+async function promptSearch(label, opts) {
+  let s = "", p = 0;
+  const draw = () => {
+    const flags =
+      (opts.caseSens ? " [Case]" : "") + (opts.regex ? " [Regex]" : "") + (opts.backward ? " [Back]" : "");
+    write(`\x1b[${screenRows - 2};1H${INVERSE}${fit(label + s + flags, screenCols)}${RESET}` +
+      `\x1b[${screenRows - 2};${Math.min(dispWidth(label + s.slice(0, p)) + 1, screenCols)}H\x1b[?25h`);
+  };
+  promptRedraw = draw;
+  try {
+    for (;;) {
+      draw();
+      const k = await nextKey();
+      if (k.key === "enter") return { query: s, opts };
+      if (k.key === "esc" || k.ctrl === "C") return null;
+      else if (k.alt === "c") opts.caseSens = !opts.caseSens;
+      else if (k.alt === "r") opts.regex = !opts.regex;
+      else if (k.alt === "b") opts.backward = !opts.backward;
+      else if (k.char && k.char !== "\t") { s = s.slice(0, p) + k.char + s.slice(p); p += k.char.length; }
+      else if (k.key === "backspace") { if (p > 0) { const l = prevLen(s, p); s = s.slice(0, p - l) + s.slice(p); p -= l; } }
+      else if (k.key === "left") { if (p > 0) p -= prevLen(s, p); }
+      else if (k.key === "right") { if (p < s.length) p += nextLen(s, p); }
+      else if (k.key === "home") p = 0;
+      else if (k.key === "end") p = s.length;
+    }
+  } finally {
+    promptRedraw = null;
   }
-  setMsg(`"${q}" not found`);
+}
+
+async function search() {
+  const res = await promptSearch(`Search${lastSearch ? ` [${lastSearch}]` : ""}: `, { ...searchOpts });
+  if (res === null) { setMsg("Cancelled"); return; }
+  searchOpts = res.opts;
+  const q = res.query || lastSearch; // empty query repeats the last search
+  if (!q) { setMsg("Cancelled"); return; }
+  lastSearch = q;
+  const hit = findNext(rows, cy, cx, q, searchOpts);
+  if (hit) { cy = hit.cy; cx = hit.cx; setMsg(`Found: ${q}`); }
+  else setMsg(`"${q}" not found`);
 }
 // A yes/no/all/cancel prompt for the replace loop.
 async function promptReplace() {
@@ -843,9 +973,13 @@ async function promptReplace() {
 // matches from the cursor (wrapping), asking per instance unless "All" is chosen.
 // The whole operation is a single undo step.
 async function replace() {
-  const q = await promptLine("Search (to replace): ");
-  if (!q) { setMsg("Cancelled"); return; }
-  const rep = await promptLine(`Replace "${q}" with: `);
+  const sres = await promptSearch("Search (to replace): ", { ...searchOpts, backward: false });
+  if (sres === null || !sres.query) { setMsg("Cancelled"); return; }
+  const opts = { ...sres.opts, backward: false };
+  searchOpts = { ...opts };
+  const q = sres.query;
+  lastSearch = q;
+  const rep = await promptLine(`Replace with: `);
   if (rep === null) { setMsg("Cancelled"); return; }
 
   const pre = snap(); // capture once; commit to the undo stack only if we change
@@ -855,8 +989,9 @@ async function replace() {
     const r = (cy + step) % n;
     let c = step === 0 ? cx : 0;
     for (;;) {
-      const hit = rows[r].indexOf(q, c);
-      if (hit === -1) break;
+      const m = findInLine(rows[r], c, q, opts);
+      if (!m) break;
+      const hit = m.index;
       cy = r; cx = hit; scroll(); refresh();
       let doIt = all;
       if (!all) {
@@ -866,11 +1001,11 @@ async function replace() {
         else doIt = ans === "y";
       }
       if (doIt) {
-        rows[r] = rows[r].slice(0, hit) + rep + rows[r].slice(hit + q.length);
+        rows[r] = rows[r].slice(0, hit) + rep + rows[r].slice(hit + m.len);
         c = hit + rep.length; // resume past the replacement (no re-match loop)
         count++;
       } else {
-        c = hit + q.length;
+        c = hit + m.len;
       }
     }
   }
@@ -957,6 +1092,10 @@ async function main() {
         } else if (k.alt === "i") {
           autoIndent = !autoIndent;
           setMsg(autoIndent ? "Auto-indent on" : "Auto-indent off");
+        } else if (k.alt === "$") {
+          softWrap = !softWrap;
+          coloff = 0;
+          setMsg(softWrap ? "Soft wrap on" : "Soft wrap off");
         }
       } else if (k.ctrl) {
         switch (k.ctrl) {

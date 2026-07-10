@@ -178,7 +178,7 @@ test("nano: ^\\ search & replace, replacing all instances", opts, async () => {
     os.input("\x1c"); // ^\ : Replace
     await waitFor("Search (to replace)");
     os.input("foo\r");
-    await waitFor('Replace "foo" with');
+    await waitFor("Replace with");
     os.input("bar\r");
     await waitFor("Replace this instance?");
     os.input("a"); // All
@@ -522,4 +522,104 @@ test("nano: Tab completes a filename in the write-out prompt", opts, async () =>
   });
   assert.deepEqual(pageErrors, []);
   assert.equal(buf.saved, "x\n", "Tab completed the name and the buffer saved over it");
+});
+
+test("nano: regex replace-all (M-R) replaces every match", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/rx.txt", "a1b2c3\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /rx.txt\r");
+    await waitFor("Read 1 line");
+    os.input("\x1c"); // ^\ replace
+    await waitFor("Search (to replace)");
+    os.input("\x1br"); // M-R: enable regex
+    await sleep(60);
+    os.input("[0-9]\r"); // the pattern
+    await waitFor("Replace with");
+    os.input("-\r");
+    await waitFor("Replace this instance?");
+    os.input("a"); // All
+    await waitFor("Replaced 3");
+    os.input("\x0f"); await waitFor("File Name to Write"); os.input("\r"); await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/rx.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "a-b-c-\n", "every digit was replaced via the regex");
+});
+
+test("nano: repeat search (^W then empty) finds the next match", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/rep.txt", "x foo\ny foo\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /rep.txt\r");
+    await waitFor("Read 2 lines");
+    os.input("\x17"); await waitFor("Search"); os.input("foo\r"); // find #1 on line 1
+    await waitFor("Found: foo");
+    os.input("\x17"); await waitFor("Search [foo]"); os.input("\r"); // empty → repeat
+    await sleep(120);
+    out = ""; // clear, then ask for the cursor position
+    os.input("\x03"); // ^C cursor position
+    await waitFor("line 2");
+    return { ok: true };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.ok(buf.ok, "the repeated search advanced to the match on line 2");
+});
+
+test("nano: soft-wrap (M-$) — a click on the wrapped row maps to the far column", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/wrap.txt", "........................######\n"); // 24 dots + 6 hashes
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    os.resize(12, 24); // 24 columns
+    await waitFor("$");
+    os.input("nano /wrap.txt\r");
+    await waitFor("Read 1 line");
+    os.input("\x1bn"); // M-N: gutter off → text width is the full 24 columns
+    await waitFor("Line numbers off");
+    os.input("\x1b$"); // M-$: soft wrap on → line wraps at 24 → row2 shows the "######"
+    await waitFor("Soft wrap on");
+    // Click screen row 3 (the wrapped continuation), column 1 → render col 24.
+    os.input("\x1b[<0;1;3M");
+    await sleep(120);
+    os.input("X"); // insert at the wrap boundary (between dots and hashes)
+    await sleep(120);
+    os.input("\x0f"); await waitFor("File Name to Write"); os.input("\r"); await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/wrap.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "........................X######\n", "the click on the wrapped row landed at column 24");
 });

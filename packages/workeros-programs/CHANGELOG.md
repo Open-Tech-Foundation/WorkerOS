@@ -134,6 +134,15 @@ guest runtime. Format:
   - `wordLeftIndex`/`wordRightIndex` are exported and unit-tested; selection,
     word-delete, insert-file, auto-indent, in-prompt editing, and Tab-completion
     are covered by the browser e2e.
+  - **Search options & soft-wrap** — the search/replace prompt gains `M-C` case
+    sensitivity, `M-R` regex, and `M-B` backward toggles (shown as `[Case]`/
+    `[Regex]`/`[Back]`); an empty `^W` repeats the last needle. `M-$` toggles
+    **soft-wrap**, where a long line flows onto extra screen rows: the frame is
+    laid out through a screen-row→document `visualMap` that also drives cursor
+    placement and mouse hit-testing, so a click on a wrapped continuation lands
+    the right column. `findNext`/`findInLine`/`wrapSegments` are exported and
+    unit-tested; regex replace-all, repeat-search, and a wrapped-row click are
+    covered by the browser e2e.
 - **`process` signal handling.** The node runtime gains a minimal EventEmitter on
   `process` (and its streams): `process.on('SIGINT'|'SIGWINCH'|'SIGTSTP'…, cb)`,
   `once`/`off`/`emit`/`listenerCount`. Registering a signal handler tells the
