@@ -8,6 +8,12 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`nano` copies to the system clipboard (OSC 52).** Cutting (`^K`) and copying
+  (`M-6`) now also emit `ESC ] 52 ; c ; <base64> ST` so the selection lands on the
+  host clipboard, not just nano's internal cut buffer — the copy-out counterpart to
+  the bracketed-paste support (see **Fixed**). Successive `^K` cuts mirror the
+  accumulated buffer; payloads over ~74 KB are skipped (the common terminal cap).
+  Base64 is encoded in the guest without `atob`/`btoa`.
 - **`wsh` prepends `node_modules/.bin` to `PATH`** (PLAN Phase 5·E). Before
   spawning an external command the shell driver prepends the `node_modules/.bin`
   chain (cwd and every ancestor, absolute) to the child's `PATH`, so an

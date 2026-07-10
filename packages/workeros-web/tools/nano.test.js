@@ -372,6 +372,40 @@ test("nano: mark (^6) + copy (M-6) + paste (^U) duplicates a selection", opts, a
   assert.equal(buf.saved, "hello world\nhello world\n", "the copied selection was pasted on the new line");
 });
 
+test("nano: copy (M-6) mirrors the selection to the OS clipboard via OSC 52", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /clip.txt\r");
+    await waitFor("nano");
+    os.input("hello world");
+    await sleep(100);
+    out = ""; // discard the render up to here; capture only what the copy emits
+    os.input("\x01");   // ^A home → set mark here
+    os.input("\x1e");   // ^6 set mark
+    os.input("\x05");   // ^E end → selection = whole line
+    os.input("\x1b6");  // M-6 copy
+    await sleep(120);
+    // Grab the OSC 52 payload: ESC ] 52 ; c ; <base64> ST(ESC \).
+    const m = out.match(/\x1b\]52;c;([A-Za-z0-9+/=]*)\x1b\\/);
+    os.input("\x18"); await sleep(100); // ^X exit (buffer is clean — no prompt)
+    return { b64: m ? m[1] : null };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.b64, Buffer.from("hello world", "utf8").toString("base64"),
+    "the copied text was emitted as a base64 OSC 52 clipboard write");
+});
+
 test("nano: bracketed paste keeps indentation literal (no auto-indent staircase)", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();

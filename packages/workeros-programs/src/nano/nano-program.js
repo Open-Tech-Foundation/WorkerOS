@@ -17,6 +17,26 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 const write = (s) => sys.write(1, enc.encode(s));
 
+// Base64-encode a byte array (no atob/btoa dependency in the guest sandbox).
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function base64(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
+    out += B64[a >> 2] + B64[((a & 3) << 4) | (b >> 4)];
+    out += i + 1 < bytes.length ? B64[((b & 15) << 2) | (c >> 6)] : "=";
+    out += i + 2 < bytes.length ? B64[c & 63] : "=";
+  }
+  return out;
+}
+// OSC 52: hand `text` to the terminal's system clipboard (`c`). No-op for text
+// too large for the common terminal cap; a select-drag copy still works there.
+function osc52(text) {
+  const b64 = base64(enc.encode(text));
+  if (b64.length > 100000) return; // ~74 KB; most terminals reject larger
+  write(`\x1b]52;c;${b64}\x1b\\`);
+}
+
 const TABSTOP = 8;
 
 // ---- path helpers (same normalization the coreutils/curl use) --------------
@@ -679,6 +699,7 @@ function cutLine() {
     cutBuffer = selText(sel.a, sel.b);
     deleteRange(sel.a, sel.b);
     mark = null;
+    osc52(cutBuffer);
     markDirty();
     return false;
   }
@@ -689,6 +710,7 @@ function cutLine() {
   if (rows.length === 0) rows = [""];
   if (cy >= rows.length) cy = rows.length - 1;
   cx = 0;
+  osc52(cutBuffer); // accumulated cut (successive ^K) mirrors to the clipboard
   markDirty();
   return true;
 }
@@ -697,6 +719,7 @@ function copySelection() {
   const sel = selRange();
   if (sel) { cutBuffer = selText(sel.a, sel.b); mark = null; setMsg("Copied selection"); }
   else { cutBuffer = rows[cy] + "\n"; setMsg("Copied line"); }
+  osc52(cutBuffer);
 }
 function pasteCut() {
   if (!cutBuffer) { setMsg("Cut buffer is empty"); return; }
