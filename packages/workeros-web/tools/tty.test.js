@@ -190,6 +190,81 @@ test("node sees process.stdout.isTTY on a terminal, false when redirected", opts
   assert.match(buf.redirected, /^false /, `expected non-TTY when redirected, got ${JSON.stringify(buf.redirected)}`);
 });
 
+test("Ctrl-C is delivered to a node SIGINT handler (cooperative, not a kill)", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    // A program that catches SIGINT, prints, and exits 0 (not the 130 a kill gives).
+    await os.fs.write(
+      "/sigint.js",
+      [
+        "let done; const p = new Promise((r) => (done = r));",
+        "process.on('SIGINT', () => { process.stdout.write('caught SIGINT\\n'); done(); });",
+        "process.stdout.write('ready\\n');",
+        "await p;",
+        "process.stdout.write('clean-exit\\n');",
+      ].join("\n"),
+    );
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out));
+    };
+    await waitFor("$");
+    os.input("node /sigint.js\r");
+    await waitFor("ready"); // program is running and has installed its handler
+    os.input(String.fromCharCode(0x03)); // ^C
+    await waitFor("clean-exit");
+    return out;
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.match(buf, /caught SIGINT/, "the handler ran");
+  assert.match(buf, /clean-exit/, "the process finished on its own terms");
+  assert.doesNotMatch(buf, /\[exit 130\]/, "it was not hard-killed");
+});
+
+test("SIGWINCH reaches a node handler and refreshes stdout.columns", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write(
+      "/winch.js",
+      [
+        "let done; const p = new Promise((r) => (done = r));",
+        "process.stdout.write('cols=' + process.stdout.columns + '\\n');",
+        "process.on('SIGWINCH', () => { process.stdout.write('resized=' + process.stdout.columns + '\\n'); done(); });",
+        "await p;",
+      ].join("\n"),
+    );
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out));
+    };
+    await waitFor("$");
+    os.input("node /winch.js\r");
+    await waitFor("cols=80");
+    os.resize(30, 120); // rows, cols
+    await waitFor("resized=120");
+    return out;
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.match(buf, /cols=80/, "initial columns from the default winsize");
+  assert.match(buf, /resized=120/, "handler saw the new columns after resize");
+});
+
 test("echo -e emits real ANSI escapes to the terminal stream", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();
