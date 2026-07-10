@@ -16,19 +16,31 @@
 
 import { createFs } from "./fs.js";
 import { createPath } from "./path.js";
+import { createOs } from "./os.js";
+import { createUrl } from "./url.js";
+import { createModule } from "./module.js";
 
 // ---- core builtins --------------------------------------------------------
-// `require('fs')` / `require('node:fs')` and `path` resolve to guest builtins,
-// not to files in the VFS (PLAN Phase 5·C, the slice `fs` needs). The registry
-// grows here as more `node:` builtins land (`os`, `url`, `module`, …).
+// `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
+// not to files in the VFS (PLAN Phase 5·C, B). The registry grows here as more
+// `node:` builtins land (`crypto`, `stream`, …).
 function makeBuiltins(sys) {
   const fs = createFs(sys.syncFs);
   const path = createPath();
+  const os = createOs();
+  const url = createUrl();
   const reg = new Map([
     ["fs", fs],
     ["fs/promises", fs.promises],
     ["path", path],
+    ["path/posix", path],
+    ["os", os],
+    ["url", url],
   ]);
+  // Seed "module" before building it so its `builtinModules` list counts itself;
+  // `module.createRequire` reads back through `reg`, so it resolves every builtin.
+  reg.set("module", null);
+  reg.set("module", createModule({ fs, path, url, builtins: reg }));
   return reg;
 }
 

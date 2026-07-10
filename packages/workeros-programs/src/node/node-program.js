@@ -63,14 +63,52 @@ const stream = (fd, isTTY) => {
 };
 
 const SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGWINCH", "SIGTSTP", "SIGHUP", "SIGUSR1", "SIGUSR2"]);
+
+// `process.cwd()`/`chdir()`. The kernel owns the real cwd (set at spawn); we have
+// no chdir syscall yet, so this is a process-local view: it moves what the script
+// *sees* and how it resolves relative paths it builds, but absolute VFS ops are
+// unaffected. Honest limit (INV-5) until a kernel `chdir` lands.
+let cwd = sys.cwd;
+const resolveCwd = (d) => {
+  const segs = [];
+  for (const part of ((d.startsWith("/") ? "" : cwd) + "/" + d).split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") segs.pop();
+    else segs.push(part);
+  }
+  return "/" + segs.join("/");
+};
+
+// Monotonic high-res time from the worker clock (ms, sub-ms where the browser
+// allows it). `hrtime([prev])` → [seconds, nanoseconds]; `hrtime.bigint()` → ns.
+const nowNs = () => Math.round((globalThis.performance ? performance.now() : Date.now()) * 1e6);
+const hrtime = (prev) => {
+  const ns = nowNs();
+  let s = Math.floor(ns / 1e9);
+  let n = ns % 1e9;
+  if (prev) { s -= prev[0]; n -= prev[1]; if (n < 0) { s -= 1; n += 1e9; } }
+  return [s, n];
+};
+hrtime.bigint = () => BigInt(nowNs());
+
 const process = emitter({
   // Node convention: argv[0] is the runtime, argv[1] the script.
   argv: ["node", ...sys.argv.slice(1)],
+  argv0: "node",
+  execPath: "/bin/node",
   env: { ...sys.env },
   platform: "workeros",
+  arch: "wasm32",
   // A truthful, non-Node-fidelity version tag (INV-5): we are not Node.
   version: "workeros-node/0.0.0",
-  cwd: () => sys.cwd,
+  // `versions.node` is what packages feature-detect on; we report a recent value
+  // so they take modern code paths (which our builtins target) rather than throw
+  // "unsupported Node". We are still not Node — see `version`/`release` (INV-5).
+  versions: { node: "20.0.0", workeros: "0.0.0", v8: "0.0" },
+  cwd: () => cwd,
+  chdir: (d) => { cwd = resolveCwd(String(d)); },
+  hrtime,
+  nextTick: (cb, ...args) => queueMicrotask(() => cb(...args)),
   stdin: emitter({ isTTY: in0 }),
   stdout: stream(1, out1),
   stderr: stream(2, err2),

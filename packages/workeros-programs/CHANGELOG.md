@@ -8,6 +8,29 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:module` / `node:os` / `node:url` builtins + a fuller `process`** (PLAN
+  Phase 5·B). Three more core `node:` builtins resolve through the CJS registry:
+  - **`module`** (`src/node/module.js`) — the headline is `createRequire(filename)`:
+    a *synchronous* `require` for arbitrary CJS modules, built on the synchronous
+    `fs` (Phase 5·A). Unlike the ahead-of-time prefetch runtime, it resolves +
+    reads + evaluates each module on demand (`fs.*Sync`), so computed requires and
+    `createRequire(import.meta.url)('pkg')` — what tools like `esbuild`'s launcher
+    need — work. Node CJS resolution subset (relative + `node_modules`, `.js`/
+    `.cjs`/`.json` + `index`, package.json `exports`(".")/`main`). Also
+    `builtinModules`/`isBuiltin`/`require.cache`/`require.resolve`.
+  - **`os`** (`src/node/os.js`) — `EOL`/`platform`/`arch`/`tmpdir`/`homedir`/
+    `hostname`/`endianness`/`cpus`/`availableParallelism`/`userInfo`/… Constants
+    for the single posix personality; `cpus`/`totalmem` are best-effort browser
+    signals (`navigator.hardwareConcurrency`/`deviceMemory`), honest where the
+    browser can't tell us a true value (INV-5).
+  - **`url`** (`src/node/url.js`) — re-exports WHATWG `URL`/`URLSearchParams` and
+    adds `fileURLToPath`/`pathToFileURL` (posix) plus the legacy
+    `parse`/`format`/`resolve`.
+  - **`process`** (`src/node/node-program.js`) grows `chdir` (process-local view,
+    honest until a kernel `chdir` lands), `hrtime`(+`.bigint`), `nextTick`,
+    `arch`, and `versions` (reports a recent `node` for feature-detection while
+    staying truthful in `version`/`release`). All unit-tested in pure Node;
+    end-to-end tested in a browser.
 - **`node:fs` — synchronous filesystem** (`src/node/fs.js`, PLAN Phase 5·A). The
   keystone for real tools: `createFs(sys.syncFs)` implements the sync `fs` surface
   (`readFileSync`/`writeFileSync`/`appendFileSync`/`openSync`/`readSync`/`writeSync`/

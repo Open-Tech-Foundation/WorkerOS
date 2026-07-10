@@ -15,7 +15,10 @@
     "./node/process-shim": "./src/node/process-shim.js",
     "./node/require-runtime": "./src/node/require-runtime.js",
     "./node/fs": "./src/node/fs.js",
-    "./node/path": "./src/node/path.js"
+    "./node/path": "./src/node/path.js",
+    "./node/os": "./src/node/os.js",
+    "./node/url": "./src/node/url.js",
+    "./node/module": "./src/node/module.js"
   },
   "files": [
     "src"
