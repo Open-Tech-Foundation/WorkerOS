@@ -7,6 +7,21 @@ a release yet, so everything lives under **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **Content-addressed file storage: chunking + dedup + COW (persistence Stage 2,
+  ADR-022).** File bytes are no longer stored inline; a file is now an ordered
+  list of content-addressed chunk hashes (`Kind::File { chunks, size }`), each
+  64 KiB chunk stored once in a refcounted `ChunkStore` keyed by its **SHA-256**
+  (new dependency-free `crate::hash`, checked against NIST vectors). Identical
+  chunks — across files *and* (later) snapshots — are stored once (dedup); a
+  write materializes+re-chunks so unchanged regions re-hash to the same chunks
+  (the physical/persisted delta is just the changed chunks); the hash doubles as
+  a ZFS-style integrity checksum. `read_at`/`write_at`/truncate/reap all operate
+  over chunks, decrementing refcounts so a chunk's bytes are freed at the last
+  reference — the in-kernel half of copy-on-write. The `vfs_max_bytes` quota
+  stays *logical* (sum of file sizes), so dedup never lets a guest exceed its
+  budget. New `MemVfs::chunk_count`/`physical_bytes` expose the dedup metrics.
+  Native-tested (dedup, multi-chunk large files + cross-boundary reads, delta
+  sharing on edit, refcount freeing, truncate release) — 185 kernel tests pass.
 - **VFS symbolic links + inode timestamps (persistence Stage 1, ADR-022).** The
   inode model gains a `Symlink { target }` kind and `mtime`/`ctime`/`btime`
   (ms-epoch) fields. Path resolution now follows symlinks — intermediate always,

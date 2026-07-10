@@ -17,6 +17,7 @@
 
 pub mod caps;
 pub mod errno;
+pub mod hash;
 pub mod limits;
 pub mod net;
 pub mod process;

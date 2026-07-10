@@ -16,12 +16,66 @@
 //! alive until the last handle closes (POSIX-shaped, honest — INV-5).
 
 use crate::errno::{Errno, SysResult};
+use crate::hash::{sha256, Hash};
 use std::collections::BTreeMap;
 
 pub mod mount;
 pub mod path;
 
 use mount::MountTable;
+
+/// Content-addressed chunk size (ADR-022). Files are split into chunks of this
+/// size (the last may be shorter); each chunk is stored once by its SHA-256.
+/// 64 KiB keeps most source files to a single chunk while giving large-file
+/// edits sub-file delta granularity.
+const CHUNK_SIZE: usize = 64 * 1024;
+
+/// A refcounted, deduplicating store of content-addressed data chunks (ADR-022).
+///
+/// A chunk's identity is the SHA-256 of its bytes, so identical chunks — across
+/// files, and across snapshots — are stored exactly once. Refcounts track how
+/// many file/snapshot references hold each chunk so its bytes can be dropped when
+/// the last reference goes away (the in-kernel half of copy-on-write; the
+/// persistent block store and GC mirror this host-side in later stages).
+#[derive(Debug, Default)]
+struct ChunkStore {
+    chunks: BTreeMap<Hash, ChunkEntry>,
+}
+
+#[derive(Debug)]
+struct ChunkEntry {
+    bytes: Vec<u8>,
+    refs: u32,
+}
+
+impl ChunkStore {
+    /// Store `bytes`, or bump the refcount if an identical chunk already exists;
+    /// returns the chunk's content hash.
+    fn put(&mut self, bytes: Vec<u8>) -> Hash {
+        let h = sha256(&bytes);
+        match self.chunks.get_mut(&h) {
+            Some(e) => e.refs += 1,
+            None => {
+                self.chunks.insert(h, ChunkEntry { bytes, refs: 1 });
+            }
+        }
+        h
+    }
+
+    fn get(&self, h: &Hash) -> Option<&[u8]> {
+        self.chunks.get(h).map(|e| e.bytes.as_slice())
+    }
+
+    /// Drop one reference; free the chunk's bytes when the last one goes.
+    fn decref(&mut self, h: &Hash) {
+        if let Some(e) = self.chunks.get_mut(h) {
+            e.refs = e.refs.saturating_sub(1);
+            if e.refs == 0 {
+                self.chunks.remove(h);
+            }
+        }
+    }
+}
 
 /// An inode number. Stable for the lifetime of the inode.
 pub type Ino = usize;
@@ -35,7 +89,9 @@ const MAX_SYMLINK_DEPTH: u32 = 40;
 /// What an inode is.
 #[derive(Debug)]
 enum Kind {
-    File { data: Vec<u8> },
+    /// A regular file: an ordered list of content-addressed chunk hashes plus
+    /// the logical byte length (the last chunk may be shorter than `CHUNK_SIZE`).
+    File { chunks: Vec<Hash>, size: u64 },
     Dir { entries: BTreeMap<String, Ino> },
     /// A symbolic link. `target` is the (uninterpreted) path it points at —
     /// resolved lazily during path walks, relative to the link's directory.
@@ -72,7 +128,10 @@ impl Inode {
     }
     fn new_file(now: u64) -> Self {
         Inode {
-            kind: Kind::File { data: Vec::new() },
+            kind: Kind::File {
+                chunks: Vec::new(),
+                size: 0,
+            },
             nlink: 1,
             open_count: 0,
             mtime: now,
@@ -209,6 +268,8 @@ pub struct MemVfs {
     /// The wall clock (ms since epoch) stamped into inode times, set by the host
     /// before mutations (the kernel has no clock of its own — ADR-020).
     now: u64,
+    /// The content-addressed chunk store backing file data (ADR-022).
+    store: ChunkStore,
 }
 
 impl Default for MemVfs {
@@ -238,7 +299,29 @@ impl MemVfs {
             max_inodes,
             generation: 0,
             now: 0,
+            store: ChunkStore::default(),
         }
+    }
+
+    /// Materialize a file's bytes by concatenating its chunks (ADR-022).
+    fn materialize(&self, chunks: &[Hash], size: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(size as usize);
+        for h in chunks {
+            out.extend_from_slice(self.store.get(h).unwrap_or(&[]));
+        }
+        out.truncate(size as usize);
+        out
+    }
+
+    /// Split `data` into content-addressed chunks, storing each (incrementing
+    /// refcounts / deduping) and returning the ordered hash list.
+    fn rechunk(&mut self, data: &[u8]) -> Vec<Hash> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        data.chunks(CHUNK_SIZE)
+            .map(|c| self.store.put(c.to_vec()))
+            .collect()
     }
 
     /// The current mutation counter (ADR-022). The host persists a fresh
@@ -250,6 +333,18 @@ impl MemVfs {
     /// Record a structural or content mutation.
     fn bump(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Number of distinct content chunks currently stored — the deduplication
+    /// metric (identical chunks across files/snapshots count once).
+    pub fn chunk_count(&self) -> usize {
+        self.store.chunks.len()
+    }
+
+    /// Physical bytes held by the chunk store after dedup (before host-side
+    /// compression). Contrast with the logical `used_bytes` quota.
+    pub fn physical_bytes(&self) -> u64 {
+        self.store.chunks.values().map(|e| e.bytes.len() as u64).sum()
     }
 
     fn get(&self, ino: Ino) -> SysResult<&Inode> {
@@ -356,7 +451,7 @@ impl MemVfs {
     fn metadata_of(&self, ino: Ino) -> SysResult<Metadata> {
         let inode = self.get(ino)?;
         let (file_type, size) = match &inode.kind {
-            Kind::File { data } => (FileType::File, data.len() as u64),
+            Kind::File { size, .. } => (FileType::File, *size),
             Kind::Dir { .. } => (FileType::Dir, 0),
             Kind::Symlink { target } => (FileType::Symlink, target.len() as u64),
         };
@@ -397,17 +492,29 @@ impl MemVfs {
     }
 
     fn maybe_reap(&mut self, ino: Ino) {
-        if let Some(Some(inode)) = self.slots.get(ino) {
-            if inode.nlink == 0 && inode.open_count == 0 && ino != ROOT_INO {
-                // Release this inode's storage from the quota accounting.
-                if let Kind::File { data } = &inode.kind {
-                    self.used_bytes = self.used_bytes.saturating_sub(data.len() as u64);
-                }
-                self.inode_count = self.inode_count.saturating_sub(1);
-                self.slots[ino] = None;
-                self.free.push(ino);
-            }
+        let reap = matches!(self.slots.get(ino), Some(Some(i)) if i.nlink == 0 && i.open_count == 0)
+            && ino != ROOT_INO;
+        if !reap {
+            return;
         }
+        // Release this inode's chunks (decref, freeing bytes at the last ref) and
+        // its logical size from the quota accounting.
+        let released = match self.slots.get(ino) {
+            Some(Some(inode)) => match &inode.kind {
+                Kind::File { chunks, size } => Some((chunks.clone(), *size)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((chunks, size)) = released {
+            for h in &chunks {
+                self.store.decref(h);
+            }
+            self.used_bytes = self.used_bytes.saturating_sub(size);
+        }
+        self.inode_count = self.inode_count.saturating_sub(1);
+        self.slots[ino] = None;
+        self.free.push(ino);
     }
 }
 
@@ -454,11 +561,12 @@ impl MemVfs {
             };
             let ephemeral = mounts.is_ephemeral(&child_path);
             match &inode.kind {
-                Kind::File { data } => {
+                Kind::File { chunks, size } => {
                     if !ephemeral {
+                        let data = self.materialize(chunks, *size);
                         out.push(1);
                         put_bytes(out, child_path.as_bytes());
-                        put_bytes(out, data);
+                        put_bytes(out, &data);
                     }
                 }
                 Kind::Symlink { target } => {
@@ -759,19 +867,29 @@ impl Vfs for MemVfs {
             Err(e) => return Err(e),
         };
 
-        let inode = self.get_mut(ino)?;
-        if opts.directory && !inode.is_dir() {
+        if opts.directory && !self.get(ino)?.is_dir() {
             return Err(Errno::Notdir);
         }
         let mut freed = 0u64;
         if opts.truncate {
-            if let Kind::File { data } = &mut inode.kind {
-                freed = data.len() as u64;
-                data.clear();
+            // Release the file's chunks and clear it to zero length.
+            let old = match &self.get(ino)?.kind {
+                Kind::File { chunks, size } => Some((chunks.clone(), *size)),
+                _ => None,
+            };
+            if let Some((chunks, size)) = old {
+                for h in &chunks {
+                    self.store.decref(h);
+                }
+                if let Kind::File { chunks: c, size: s } = &mut self.get_mut(ino)?.kind {
+                    c.clear();
+                    *s = 0;
+                }
+                freed = size;
             }
         }
-        inode.open_count += 1;
-        // Borrow of `inode` ends here; release the truncated bytes from the quota.
+        self.get_mut(ino)?.open_count += 1;
+        // Release the truncated bytes from the quota accounting.
         self.used_bytes = self.used_bytes.saturating_sub(freed);
         if freed > 0 {
             self.touch_mtime(ino);
@@ -790,43 +908,66 @@ impl Vfs for MemVfs {
     }
 
     fn read_at(&self, ino: Ino, offset: u64, buf: &mut [u8]) -> SysResult<usize> {
-        match &self.get(ino)?.kind {
-            Kind::File { data } => {
-                let start = (offset as usize).min(data.len());
-                let n = buf.len().min(data.len() - start);
-                buf[..n].copy_from_slice(&data[start..start + n]);
-                Ok(n)
-            }
-            Kind::Dir { .. } => Err(Errno::Isdir),
-            Kind::Symlink { .. } => Err(Errno::Inval),
+        let (chunks, size) = match &self.get(ino)?.kind {
+            Kind::File { chunks, size } => (chunks, *size),
+            Kind::Dir { .. } => return Err(Errno::Isdir),
+            Kind::Symlink { .. } => return Err(Errno::Inval),
+        };
+        if offset >= size {
+            return Ok(0);
         }
+        let end = (offset + buf.len() as u64).min(size) as usize;
+        let mut pos = offset as usize;
+        let mut written = 0;
+        while pos < end {
+            let chunk = self.store.get(&chunks[pos / CHUNK_SIZE]).unwrap_or(&[]);
+            let within = pos % CHUNK_SIZE;
+            let n = chunk.len().saturating_sub(within).min(end - pos);
+            if n == 0 {
+                break; // defensive: chunk shorter than expected
+            }
+            buf[written..written + n].copy_from_slice(&chunk[within..within + n]);
+            written += n;
+            pos += n;
+        }
+        Ok(written)
     }
 
     fn write_at(&mut self, ino: Ino, offset: u64, src: &[u8]) -> SysResult<usize> {
-        let used = self.used_bytes;
-        let max = self.max_bytes;
-        // Do the sized write inside a scope so the inode borrow ends before we
-        // update the byte accounting (ADR-020). A write that would push total
-        // storage past the quota is refused whole with `ENOSPC`.
-        let growth = {
-            match &mut self.get_mut(ino)?.kind {
-                Kind::File { data } => {
-                    let start = offset as usize;
-                    let end = start + src.len();
-                    let growth = (end as u64).saturating_sub(data.len() as u64);
-                    if used + growth > max {
-                        return Err(Errno::Nospc);
-                    }
-                    if data.len() < end {
-                        data.resize(end, 0);
-                    }
-                    data[start..end].copy_from_slice(src);
-                    growth
-                }
-                Kind::Dir { .. } => return Err(Errno::Isdir),
-                Kind::Symlink { .. } => return Err(Errno::Inval),
-            }
+        // Snapshot the file's current chunk list + size (cheap: 32-byte hashes).
+        let (old_chunks, old_size) = match &self.get(ino)?.kind {
+            Kind::File { chunks, size } => (chunks.clone(), *size),
+            Kind::Dir { .. } => return Err(Errno::Isdir),
+            Kind::Symlink { .. } => return Err(Errno::Inval),
         };
+        let start = offset as usize;
+        let new_size = old_size.max(offset + src.len() as u64);
+        // Quota (ADR-020) is on *logical* size (what the guest sees), so dedup
+        // never lets a guest exceed its byte budget. A write past quota is
+        // refused whole with `ENOSPC`.
+        let growth = new_size - old_size;
+        if self.used_bytes + growth > self.max_bytes {
+            return Err(Errno::Nospc);
+        }
+        // Read-modify-rechunk. Materializing then re-chunking the whole file is
+        // simple and correct; because identical regions re-hash to the same
+        // chunks, dedup keeps the *physical* delta (and the persisted delta,
+        // Stage 3) to just the changed chunks. `rechunk` increfs the new chunks
+        // before we decref the old, so a chunk shared across the edit never
+        // transiently drops to zero.
+        let mut data = self.materialize(&old_chunks, old_size);
+        if data.len() < new_size as usize {
+            data.resize(new_size as usize, 0);
+        }
+        data[start..start + src.len()].copy_from_slice(src);
+        let new_chunks = self.rechunk(&data);
+        for h in &old_chunks {
+            self.store.decref(h);
+        }
+        if let Kind::File { chunks, size } = &mut self.get_mut(ino)?.kind {
+            *chunks = new_chunks;
+            *size = new_size;
+        }
         self.used_bytes += growth;
         self.touch_mtime(ino);
         self.bump();
@@ -835,7 +976,7 @@ impl Vfs for MemVfs {
 
     fn size(&self, ino: Ino) -> SysResult<u64> {
         match &self.get(ino)?.kind {
-            Kind::File { data } => Ok(data.len() as u64),
+            Kind::File { size, .. } => Ok(*size),
             Kind::Dir { .. } => Err(Errno::Isdir),
             Kind::Symlink { target } => Ok(target.len() as u64),
         }
@@ -1102,6 +1243,85 @@ mod tests {
         let n = vfs.read_at(ino, 0, &mut buf).unwrap();
         buf.truncate(n);
         buf
+    }
+
+    // --- Content-addressed storage (dedup / delta / COW, ADR-022) -----------
+
+    #[test]
+    fn identical_files_share_one_chunk() {
+        let mut vfs = fs();
+        write_file(&mut vfs, "/a.txt", b"the same content");
+        write_file(&mut vfs, "/b.txt", b"the same content");
+        // Dedup: one physical chunk, but the logical quota counts both files.
+        assert_eq!(vfs.chunk_count(), 1);
+        assert_eq!(vfs.physical_bytes(), "the same content".len() as u64);
+        assert_eq!(vfs.used_bytes, 2 * "the same content".len() as u64);
+        // Both read back correctly.
+        assert_eq!(read_file(&vfs, "/a.txt"), b"the same content");
+        assert_eq!(read_file(&vfs, "/b.txt"), b"the same content");
+    }
+
+    #[test]
+    fn large_file_splits_into_chunks_and_reads_back() {
+        let mut vfs = fs();
+        // 150 KiB → 3 chunks (64 + 64 + 22 KiB).
+        let data: Vec<u8> = (0..150 * 1024).map(|i| (i % 251) as u8).collect();
+        write_file(&mut vfs, "/big", &data);
+        assert_eq!(vfs.chunk_count(), 3);
+        assert_eq!(read_file(&vfs, "/big"), data);
+        // A partial read across a chunk boundary is correct.
+        let ino = vfs.resolve("/big").unwrap();
+        let mut buf = vec![0u8; 100];
+        let n = vfs.read_at(ino, 64 * 1024 - 50, &mut buf).unwrap();
+        assert_eq!(n, 100);
+        assert_eq!(buf, &data[64 * 1024 - 50..64 * 1024 + 50]);
+    }
+
+    #[test]
+    fn editing_one_chunk_shares_the_rest() {
+        let mut vfs = fs();
+        let data: Vec<u8> = (0..150 * 1024).map(|i| (i % 251) as u8).collect();
+        write_file(&mut vfs, "/a", &data);
+        write_file(&mut vfs, "/b", &data); // identical → 3 shared chunks
+        assert_eq!(vfs.chunk_count(), 3);
+        // Overwrite the first 10 bytes of /b: only its first chunk diverges; the
+        // trailing two chunks stay shared with /a. So 4 chunks total, not 6.
+        let ino = vfs.resolve("/b").unwrap();
+        vfs.write_at(ino, 0, b"XXXXXXXXXX").unwrap();
+        assert_eq!(vfs.chunk_count(), 4, "only the edited chunk diverges");
+        // Both files still read correctly.
+        assert_eq!(read_file(&vfs, "/a"), data);
+        let mut expected = data.clone();
+        expected[..10].copy_from_slice(b"XXXXXXXXXX");
+        assert_eq!(read_file(&vfs, "/b"), expected);
+    }
+
+    #[test]
+    fn chunk_freed_only_when_last_reference_drops() {
+        let mut vfs = fs();
+        write_file(&mut vfs, "/a", b"shared");
+        write_file(&mut vfs, "/b", b"shared");
+        assert_eq!(vfs.chunk_count(), 1);
+        vfs.unlink("/a").unwrap();
+        assert_eq!(vfs.chunk_count(), 1, "still referenced by /b");
+        vfs.unlink("/b").unwrap();
+        assert_eq!(vfs.chunk_count(), 0, "last reference gone → chunk freed");
+        assert_eq!(vfs.physical_bytes(), 0);
+    }
+
+    #[test]
+    fn truncate_releases_chunks() {
+        let mut vfs = fs();
+        let data: Vec<u8> = (0..100 * 1024).map(|i| i as u8).collect();
+        write_file(&mut vfs, "/f", &data);
+        assert!(vfs.chunk_count() >= 2);
+        // Re-open with truncate.
+        let ino = vfs
+            .open("/f", OpenOptions { create: false, truncate: true, ..Default::default() })
+            .unwrap();
+        vfs.close(ino).unwrap();
+        assert_eq!(vfs.chunk_count(), 0);
+        assert_eq!(vfs.size(ino).unwrap_or(0), 0);
     }
 
     #[test]
