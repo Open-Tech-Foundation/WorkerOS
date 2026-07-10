@@ -28,6 +28,9 @@ pub enum Errno {
     Inval = 28,
     /// Is a directory.
     Isdir = 31,
+    /// Too many levels of symbolic links (ELOOP) — symlink resolution exceeded
+    /// the depth cap or formed a cycle.
+    Loop = 32,
     /// Too many open files.
     Mfile = 41,
     /// Filename too long.

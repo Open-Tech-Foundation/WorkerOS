@@ -318,7 +318,10 @@ impl ProcessCtx {
         let meta = vfs.stat(&abs)?;
         let handle = match meta.file_type {
             FileType::Dir => Handle::Dir { ino },
-            FileType::File => Handle::File { ino, cursor: 0 },
+            // `open`/`stat` follow symlinks, so a resolved target is a file or
+            // dir; a symlink type here would mean a dangling link (already an
+            // error above). Treat as a file handle defensively.
+            FileType::File | FileType::Symlink => Handle::File { ino, cursor: 0 },
         };
         self.alloc_fd(handle)
     }

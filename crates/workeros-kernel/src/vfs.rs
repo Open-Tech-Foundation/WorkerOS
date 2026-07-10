@@ -29,11 +29,17 @@ pub type Ino = usize;
 /// The root directory's inode number.
 pub const ROOT_INO: Ino = 0;
 
+/// Maximum symlink-follow depth before returning `ELOOP` (POSIX `SYMLOOP_MAX`).
+const MAX_SYMLINK_DEPTH: u32 = 40;
+
 /// What an inode is.
 #[derive(Debug)]
 enum Kind {
     File { data: Vec<u8> },
     Dir { entries: BTreeMap<String, Ino> },
+    /// A symbolic link. `target` is the (uninterpreted) path it points at —
+    /// resolved lazily during path walks, relative to the link's directory.
+    Symlink { target: String },
 }
 
 #[derive(Debug)]
@@ -43,27 +49,52 @@ struct Inode {
     nlink: u32,
     /// Number of open file descriptors referencing this inode.
     open_count: u32,
+    /// Last content/target modification time (ms since epoch, host-supplied).
+    mtime: u64,
+    /// Last metadata change time (ms) — link count, rename, times.
+    ctime: u64,
+    /// Creation ("birth") time (ms).
+    btime: u64,
 }
 
 impl Inode {
-    fn new_dir() -> Self {
+    fn new_dir(now: u64) -> Self {
         Inode {
             kind: Kind::Dir {
                 entries: BTreeMap::new(),
             },
             nlink: 1,
             open_count: 0,
+            mtime: now,
+            ctime: now,
+            btime: now,
         }
     }
-    fn new_file() -> Self {
+    fn new_file(now: u64) -> Self {
         Inode {
             kind: Kind::File { data: Vec::new() },
             nlink: 1,
             open_count: 0,
+            mtime: now,
+            ctime: now,
+            btime: now,
+        }
+    }
+    fn new_symlink(target: String, now: u64) -> Self {
+        Inode {
+            kind: Kind::Symlink { target },
+            nlink: 1,
+            open_count: 0,
+            mtime: now,
+            ctime: now,
+            btime: now,
         }
     }
     fn is_dir(&self) -> bool {
         matches!(self.kind, Kind::Dir { .. })
+    }
+    fn is_symlink(&self) -> bool {
+        matches!(self.kind, Kind::Symlink { .. })
     }
 }
 
@@ -78,11 +109,12 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
-/// File type reported by [`Vfs::stat`].
+/// File type reported by [`Vfs::stat`]/[`Vfs::lstat`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
     File,
     Dir,
+    Symlink,
 }
 
 /// Metadata for an inode.
@@ -91,16 +123,31 @@ pub struct Metadata {
     pub ino: Ino,
     pub file_type: FileType,
     pub size: u64,
+    /// Modification / change / birth times (ms since epoch).
+    pub mtime: u64,
+    pub ctime: u64,
+    pub btime: u64,
+    /// Hard-link count.
+    pub nlink: u32,
 }
 
 /// The authoritative filesystem interface. All paths are absolute, normalized
 /// POSIX paths (see [`path::normalize`]); callers resolve relative paths against
 /// a cwd *before* calling in.
 pub trait Vfs {
-    /// Look up the inode at an absolute normalized path.
+    /// Set the wall clock (ms since epoch) the VFS stamps into inode times. The
+    /// kernel is clock-less (ADR-020); the host supplies time before mutations.
+    fn set_time(&mut self, now_ms: u64);
+    /// Look up the inode at an absolute normalized path, following symlinks.
     fn resolve(&self, path: &str) -> SysResult<Ino>;
-    /// Metadata for an existing path.
+    /// Metadata for an existing path, following a final symlink (`stat`).
     fn stat(&self, path: &str) -> SysResult<Metadata>;
+    /// Metadata for a path *without* following a final symlink (`lstat`).
+    fn lstat(&self, path: &str) -> SysResult<Metadata>;
+    /// Create a symbolic link at `linkpath` pointing at `target` (uninterpreted).
+    fn symlink(&mut self, target: &str, linkpath: &str) -> SysResult<Ino>;
+    /// Read a symbolic link's target. Errors with `EINVAL` if not a symlink.
+    fn readlink(&self, path: &str) -> SysResult<String>;
     /// Create a directory. Parent must exist; errors if the path exists.
     fn mkdir(&mut self, path: &str) -> SysResult<Ino>;
     /// List a directory's entries by path (excludes `.`/`..`).
@@ -159,6 +206,9 @@ pub struct MemVfs {
     /// A dumb "something changed" signal — it does not distinguish persistent
     /// from ephemeral changes (the snapshot walk prunes ephemeral paths anyway).
     generation: u64,
+    /// The wall clock (ms since epoch) stamped into inode times, set by the host
+    /// before mutations (the kernel has no clock of its own — ADR-020).
+    now: u64,
 }
 
 impl Default for MemVfs {
@@ -180,13 +230,14 @@ impl MemVfs {
     pub fn with_limits(max_bytes: u64, max_inodes: usize) -> Self {
         MemVfs {
             // Root is inode 0 and counts against the inode budget.
-            slots: vec![Some(Inode::new_dir())],
+            slots: vec![Some(Inode::new_dir(0))],
             free: Vec::new(),
             used_bytes: 0,
             inode_count: 1,
             max_bytes,
             max_inodes,
             generation: 0,
+            now: 0,
         }
     }
 
@@ -231,22 +282,60 @@ impl MemVfs {
         Ok(ino)
     }
 
-    /// Resolve a normalized absolute path to an inode, walking from root.
+    /// Resolve a normalized absolute path to an inode, following symlinks
+    /// (including a final one) — `stat`/`open` semantics.
     fn resolve_ino(&self, path: &str) -> SysResult<Ino> {
+        self.walk_path(path, true, &mut 0)
+    }
+
+    /// Resolve a path but do **not** follow a final symlink — `lstat`/`readlink`
+    /// and the create/remove family (which act on the link itself).
+    fn resolve_ino_nofollow(&self, path: &str) -> SysResult<Ino> {
+        self.walk_path(path, false, &mut 0)
+    }
+
+    /// Walk `path` from root, following intermediate symlinks (and the final one
+    /// iff `follow_final`). A relative symlink target is normalized against the
+    /// link's own directory; `..`/`.` are handled by [`path::normalize`]. Cycles
+    /// and excessive nesting bottom out at `ELOOP` via the shared `depth`.
+    fn walk_path(&self, path: &str, follow_final: bool, depth: &mut u32) -> SysResult<Ino> {
+        let comps: Vec<&str> = path::components(path).collect();
         let mut cur = ROOT_INO;
-        for comp in path::components(path) {
-            let inode = self.get(cur)?;
-            match &inode.kind {
-                Kind::Dir { entries } => {
-                    cur = *entries.get(comp).ok_or(Errno::Noent)?;
+        // Absolute path of `cur` — tracked so a relative symlink target resolves
+        // against the directory the link lives in.
+        let mut cur_dir = String::from("/");
+        for (i, comp) in comps.iter().enumerate() {
+            let is_final = i + 1 == comps.len();
+            let child = match &self.get(cur)?.kind {
+                Kind::Dir { entries } => *entries.get(*comp).ok_or(Errno::Noent)?,
+                _ => return Err(Errno::Notdir),
+            };
+            if self.get(child)?.is_symlink() && (!is_final || follow_final) {
+                *depth += 1;
+                if *depth > MAX_SYMLINK_DEPTH {
+                    return Err(Errno::Loop);
                 }
-                Kind::File { .. } => return Err(Errno::Notdir),
+                let target = match &self.get(child)?.kind {
+                    Kind::Symlink { target } => target.clone(),
+                    _ => unreachable!("checked is_symlink"),
+                };
+                let abs = if target.starts_with('/') {
+                    path::normalize("/", &target)
+                } else {
+                    path::normalize(&cur_dir, &target)
+                };
+                cur = self.walk_path(&abs, true, depth)?;
+                cur_dir = abs;
+            } else {
+                cur = child;
+                cur_dir = path::normalize(&cur_dir, comp);
             }
         }
         Ok(cur)
     }
 
-    /// Resolve the parent directory of `path`, returning (parent_ino, last_component).
+    /// Resolve the parent directory of `path` (following symlinks in the parent
+    /// portion), returning (parent_ino, last_component).
     fn resolve_parent<'a>(&self, path: &'a str) -> SysResult<(Ino, &'a str)> {
         let (parent, name) = path::split(path).ok_or(Errno::Inval)?;
         let parent_ino = self.resolve_ino(parent)?;
@@ -259,7 +348,43 @@ impl MemVfs {
     fn dir_entries(&self, ino: Ino) -> SysResult<&BTreeMap<String, Ino>> {
         match &self.get(ino)?.kind {
             Kind::Dir { entries } => Ok(entries),
-            Kind::File { .. } => Err(Errno::Notdir),
+            _ => Err(Errno::Notdir),
+        }
+    }
+
+    /// Build a [`Metadata`] for an inode (shared by `stat`/`lstat`).
+    fn metadata_of(&self, ino: Ino) -> SysResult<Metadata> {
+        let inode = self.get(ino)?;
+        let (file_type, size) = match &inode.kind {
+            Kind::File { data } => (FileType::File, data.len() as u64),
+            Kind::Dir { .. } => (FileType::Dir, 0),
+            Kind::Symlink { target } => (FileType::Symlink, target.len() as u64),
+        };
+        Ok(Metadata {
+            ino,
+            file_type,
+            size,
+            mtime: inode.mtime,
+            ctime: inode.ctime,
+            btime: inode.btime,
+            nlink: inode.nlink,
+        })
+    }
+
+    /// Stamp `ino`'s mtime+ctime to the current clock (content/target change).
+    fn touch_mtime(&mut self, ino: Ino) {
+        let now = self.now;
+        if let Ok(inode) = self.get_mut(ino) {
+            inode.mtime = now;
+            inode.ctime = now;
+        }
+    }
+
+    /// Stamp `ino`'s ctime only (metadata change: link count, rename).
+    fn touch_ctime(&mut self, ino: Ino) {
+        let now = self.now;
+        if let Ok(inode) = self.get_mut(ino) {
+            inode.ctime = now;
         }
     }
 
@@ -336,6 +461,13 @@ impl MemVfs {
                         put_bytes(out, data);
                     }
                 }
+                Kind::Symlink { target } => {
+                    if !ephemeral {
+                        out.push(2);
+                        put_bytes(out, child_path.as_bytes());
+                        put_bytes(out, target.as_bytes());
+                    }
+                }
                 Kind::Dir { entries: sub } => {
                     if !ephemeral && sub.is_empty() {
                         out.push(0);
@@ -383,6 +515,15 @@ impl MemVfs {
                     let ino = self.open(&path, opts)?;
                     self.write_at(ino, 0, &data)?;
                     self.close(ino)?;
+                }
+                2 => {
+                    let target = std::str::from_utf8(take_bytes(bytes, &mut p)?)
+                        .map_err(|_| Errno::Inval)?
+                        .to_string();
+                    if let Some((parent, _)) = path::split(&path) {
+                        self.mkdir_p(parent)?;
+                    }
+                    self.symlink(&target, &path)?;
                 }
                 _ => return Err(Errno::Inval),
             }
@@ -438,22 +579,46 @@ fn take_bytes<'a>(bytes: &'a [u8], p: &mut usize) -> SysResult<&'a [u8]> {
 }
 
 impl Vfs for MemVfs {
+    fn set_time(&mut self, now_ms: u64) {
+        self.now = now_ms;
+    }
+
     fn resolve(&self, path: &str) -> SysResult<Ino> {
         self.resolve_ino(path)
     }
 
     fn stat(&self, path: &str) -> SysResult<Metadata> {
         let ino = self.resolve_ino(path)?;
-        let inode = self.get(ino)?;
-        let (file_type, size) = match &inode.kind {
-            Kind::File { data } => (FileType::File, data.len() as u64),
-            Kind::Dir { .. } => (FileType::Dir, 0),
-        };
-        Ok(Metadata {
-            ino,
-            file_type,
-            size,
-        })
+        self.metadata_of(ino)
+    }
+
+    fn lstat(&self, path: &str) -> SysResult<Metadata> {
+        let ino = self.resolve_ino_nofollow(path)?;
+        self.metadata_of(ino)
+    }
+
+    fn symlink(&mut self, target: &str, linkpath: &str) -> SysResult<Ino> {
+        let (parent_ino, name) = self.resolve_parent(linkpath)?;
+        path::validate_component(name)?;
+        if self.dir_entries(parent_ino)?.contains_key(name) {
+            return Err(Errno::Exist);
+        }
+        let now = self.now;
+        let ino = self.alloc(Inode::new_symlink(target.to_string(), now))?;
+        if let Kind::Dir { entries } = &mut self.get_mut(parent_ino)?.kind {
+            entries.insert(name.to_string(), ino);
+        }
+        self.touch_mtime(parent_ino);
+        self.bump();
+        Ok(ino)
+    }
+
+    fn readlink(&self, path: &str) -> SysResult<String> {
+        let ino = self.resolve_ino_nofollow(path)?;
+        match &self.get(ino)?.kind {
+            Kind::Symlink { target } => Ok(target.clone()),
+            _ => Err(Errno::Inval),
+        }
     }
 
     fn mkdir(&mut self, path: &str) -> SysResult<Ino> {
@@ -462,13 +627,15 @@ impl Vfs for MemVfs {
         if self.dir_entries(parent_ino)?.contains_key(name) {
             return Err(Errno::Exist);
         }
-        let ino = self.alloc(Inode::new_dir())?;
+        let now = self.now;
+        let ino = self.alloc(Inode::new_dir(now))?;
         match &mut self.get_mut(parent_ino)?.kind {
             Kind::Dir { entries } => {
                 entries.insert(name.to_string(), ino);
             }
-            Kind::File { .. } => unreachable!("checked above"),
+            _ => unreachable!("checked above"),
         }
+        self.touch_mtime(parent_ino);
         self.bump();
         Ok(ino)
     }
@@ -503,7 +670,9 @@ impl Vfs for MemVfs {
         if let Kind::Dir { entries } = &mut self.get_mut(parent_ino)?.kind {
             entries.remove(name);
         }
+        self.touch_ctime(child);
         self.unlink_ino(child)?;
+        self.touch_mtime(parent_ino);
         self.bump();
         Ok(())
     }
@@ -515,7 +684,7 @@ impl Vfs for MemVfs {
             .get(name)
             .ok_or(Errno::Noent)?;
         match &self.get(child)?.kind {
-            Kind::File { .. } => return Err(Errno::Notdir),
+            Kind::File { .. } | Kind::Symlink { .. } => return Err(Errno::Notdir),
             Kind::Dir { entries } => {
                 if !entries.is_empty() {
                     return Err(Errno::Notempty);
@@ -526,6 +695,7 @@ impl Vfs for MemVfs {
             entries.remove(name);
         }
         self.unlink_ino(child)?;
+        self.touch_mtime(parent_ino);
         self.bump();
         Ok(())
     }
@@ -558,6 +728,9 @@ impl Vfs for MemVfs {
         if let Kind::Dir { entries } = &mut self.get_mut(to_parent)?.kind {
             entries.insert(to_name.to_string(), child);
         }
+        self.touch_mtime(from_parent);
+        self.touch_mtime(to_parent);
+        self.touch_ctime(child);
         self.bump();
         Ok(())
     }
@@ -574,10 +747,12 @@ impl Vfs for MemVfs {
             Err(Errno::Noent) if opts.create => {
                 let (parent_ino, name) = self.resolve_parent(path)?;
                 path::validate_component(name)?;
-                let ino = self.alloc(Inode::new_file())?;
+                let now = self.now;
+                let ino = self.alloc(Inode::new_file(now))?;
                 if let Kind::Dir { entries } = &mut self.get_mut(parent_ino)?.kind {
                     entries.insert(name.to_string(), ino);
                 }
+                self.touch_mtime(parent_ino);
                 changed = true;
                 ino
             }
@@ -598,6 +773,9 @@ impl Vfs for MemVfs {
         inode.open_count += 1;
         // Borrow of `inode` ends here; release the truncated bytes from the quota.
         self.used_bytes = self.used_bytes.saturating_sub(freed);
+        if freed > 0 {
+            self.touch_mtime(ino);
+        }
         if changed || freed > 0 {
             self.bump();
         }
@@ -620,6 +798,7 @@ impl Vfs for MemVfs {
                 Ok(n)
             }
             Kind::Dir { .. } => Err(Errno::Isdir),
+            Kind::Symlink { .. } => Err(Errno::Inval),
         }
     }
 
@@ -645,9 +824,11 @@ impl Vfs for MemVfs {
                     growth
                 }
                 Kind::Dir { .. } => return Err(Errno::Isdir),
+                Kind::Symlink { .. } => return Err(Errno::Inval),
             }
         };
         self.used_bytes += growth;
+        self.touch_mtime(ino);
         self.bump();
         Ok(src.len())
     }
@@ -656,6 +837,7 @@ impl Vfs for MemVfs {
         match &self.get(ino)?.kind {
             Kind::File { data } => Ok(data.len() as u64),
             Kind::Dir { .. } => Err(Errno::Isdir),
+            Kind::Symlink { target } => Ok(target.len() as u64),
         }
     }
 }
@@ -996,6 +1178,136 @@ mod tests {
         let mut buf = [0u8; 4];
         vfs.read_at(ino, 0, &mut buf).unwrap();
         assert_eq!(vfs.generation(), g2, "read leaves generation unchanged");
+    }
+
+    // --- Symlinks -----------------------------------------------------------
+
+    #[test]
+    fn symlink_create_and_readlink() {
+        let mut vfs = fs();
+        write_file(&mut vfs, "/target.txt", b"payload");
+        vfs.symlink("/target.txt", "/link").unwrap();
+        assert_eq!(vfs.readlink("/link").unwrap(), "/target.txt");
+        // lstat sees the link; stat follows to the target.
+        assert_eq!(vfs.lstat("/link").unwrap().file_type, FileType::Symlink);
+        assert_eq!(vfs.stat("/link").unwrap().file_type, FileType::File);
+        // Reading through the link opens the target's bytes.
+        assert_eq!(read_file(&vfs, "/link"), b"payload");
+    }
+
+    #[test]
+    fn symlink_size_is_target_length() {
+        let mut vfs = fs();
+        vfs.symlink("/a/b/c", "/l").unwrap();
+        assert_eq!(vfs.lstat("/l").unwrap().size, "/a/b/c".len() as u64);
+    }
+
+    #[test]
+    fn relative_symlink_resolves_against_link_dir() {
+        let mut vfs = fs();
+        write_file(&mut vfs, "/dir/data.txt", b"rel");
+        // /dir/link -> data.txt  (relative to /dir)
+        vfs.symlink("data.txt", "/dir/link").unwrap();
+        assert_eq!(read_file(&vfs, "/dir/link"), b"rel");
+    }
+
+    #[test]
+    fn symlink_target_with_dotdot() {
+        let mut vfs = fs();
+        write_file(&mut vfs, "/top.txt", b"up");
+        vfs.mkdir("/dir").unwrap();
+        // /dir/link -> ../top.txt
+        vfs.symlink("../top.txt", "/dir/link").unwrap();
+        assert_eq!(read_file(&vfs, "/dir/link"), b"up");
+    }
+
+    #[test]
+    fn symlink_to_directory_is_traversable() {
+        let mut vfs = fs();
+        write_file(&mut vfs, "/real/inner.txt", b"deep");
+        vfs.symlink("/real", "/aliased").unwrap();
+        // Walk *through* the symlink to a file beneath the target dir.
+        assert_eq!(read_file(&vfs, "/aliased/inner.txt"), b"deep");
+        assert_eq!(vfs.stat("/aliased").unwrap().file_type, FileType::Dir);
+    }
+
+    #[test]
+    fn dangling_symlink_errors_on_follow_but_not_lstat() {
+        let mut vfs = fs();
+        vfs.symlink("/nowhere", "/link").unwrap();
+        assert_eq!(vfs.resolve("/link").unwrap_err(), Errno::Noent);
+        assert_eq!(vfs.lstat("/link").unwrap().file_type, FileType::Symlink);
+        assert_eq!(vfs.readlink("/link").unwrap(), "/nowhere");
+    }
+
+    #[test]
+    fn symlink_cycle_is_eloop() {
+        let mut vfs = fs();
+        vfs.symlink("/b", "/a").unwrap();
+        vfs.symlink("/a", "/b").unwrap();
+        assert_eq!(vfs.resolve("/a").unwrap_err(), Errno::Loop);
+    }
+
+    #[test]
+    fn unlink_removes_symlink_not_target() {
+        let mut vfs = fs();
+        write_file(&mut vfs, "/target.txt", b"keep");
+        vfs.symlink("/target.txt", "/link").unwrap();
+        vfs.unlink("/link").unwrap();
+        assert_eq!(vfs.resolve("/link").unwrap_err(), Errno::Noent);
+        // Target survives.
+        assert_eq!(read_file(&vfs, "/target.txt"), b"keep");
+    }
+
+    #[test]
+    fn readlink_on_non_symlink_is_einval() {
+        let mut vfs = fs();
+        write_file(&mut vfs, "/f", b"x");
+        assert_eq!(vfs.readlink("/f").unwrap_err(), Errno::Inval);
+    }
+
+    // --- Timestamps ---------------------------------------------------------
+
+    #[test]
+    fn create_and_write_stamp_mtime_from_host_clock() {
+        let mut vfs = fs();
+        vfs.set_time(1000);
+        let ino = vfs
+            .open("/f", OpenOptions { create: true, ..Default::default() })
+            .unwrap();
+        let m0 = vfs.stat("/f").unwrap();
+        assert_eq!(m0.btime, 1000);
+        assert_eq!(m0.mtime, 1000);
+        // A later write advances mtime to the new clock.
+        vfs.set_time(2000);
+        vfs.write_at(ino, 0, b"data").unwrap();
+        let m1 = vfs.stat("/f").unwrap();
+        assert_eq!(m1.mtime, 2000);
+        assert_eq!(m1.btime, 1000, "btime is stable");
+    }
+
+    #[test]
+    fn rename_updates_ctime_not_btime() {
+        let mut vfs = fs();
+        vfs.set_time(500);
+        write_file(&mut vfs, "/a", b"x");
+        vfs.set_time(900);
+        vfs.rename("/a", "/b").unwrap();
+        let m = vfs.lstat("/b").unwrap();
+        assert_eq!(m.ctime, 900, "rename bumps ctime");
+        assert_eq!(m.btime, 500, "btime unchanged by rename");
+    }
+
+    #[test]
+    fn mkdir_updates_parent_mtime() {
+        let mut vfs = fs();
+        vfs.set_time(100);
+        vfs.mkdir("/d").unwrap();
+        let root0 = vfs.stat("/").unwrap().mtime;
+        assert_eq!(root0, 100);
+        vfs.set_time(200);
+        vfs.mkdir("/d2").unwrap();
+        assert_eq!(vfs.stat("/").unwrap().mtime, 200, "new entry bumps dir mtime");
     }
 
     #[test]

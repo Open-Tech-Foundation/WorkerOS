@@ -506,6 +506,29 @@ impl Kernel {
         self.ports.accept(&mut self.pipes, ctx, listener)
     }
 
+    /// Register a context-only "host" process (no backing worker) for the network
+    /// injector (ADR-021). It owns the client ends of injected preview
+    /// connections and drives them through the ordinary `sys_read`/`sys_write`/
+    /// `sys_close` path, so the injector needs no special data-path API — it is
+    /// just a process the host, not a guest worker, speaks for. Not resolved from
+    /// the VFS and never scheduled.
+    pub fn register_host_process(&mut self) -> Pid {
+        let caps = CapabilitySet::default();
+        let pid = self.processes.create(SpawnRequest {
+            ppid: 0,
+            argv: vec!["net-injector".into()],
+            env: Vec::new(),
+            cwd: "/".into(),
+            start_time: 0,
+            caps: caps.clone(),
+        });
+        self.contexts.insert(
+            pid,
+            ProcessCtx::new(pid, vec!["net-injector".into()], Vec::new(), "/".into(), caps, self.limits.max_open_fds),
+        );
+        pid
+    }
+
     /// Client `fs.write`: create parent directories as needed, then write the
     /// file (create + truncate). Convenience for seeding the VFS from the host.
     pub fn fs_write(&mut self, file_path: &str, data: &[u8]) -> SysResult<()> {
@@ -655,7 +678,8 @@ impl Kernel {
         let abs = path::normalize(cwd, target);
         match self.vfs.stat(&abs)?.file_type {
             vfs::FileType::Dir => Ok(abs),
-            vfs::FileType::File => Err(Errno::Notdir),
+            // `stat` follows symlinks, so a symlink-to-dir already resolved to Dir.
+            vfs::FileType::File | vfs::FileType::Symlink => Err(Errno::Notdir),
         }
     }
 }
@@ -767,6 +791,40 @@ mod tests {
             k.sys_write(pid, FD_STDERR, b"boom").unwrap(),
             WriteEffect::Stderr(b"boom".to_vec())
         );
+    }
+
+    #[test]
+    fn host_processes_talk_over_a_port_via_kernel_net() {
+        // Drives the wasm-facing Kernel net API (ADR-021) end to end using two
+        // context-only host processes — the same path the injector uses.
+        let mut k = boot();
+        let server = k.register_host_process();
+        let client = k.register_host_process();
+        let lid = k.net_listen(server, 5173).unwrap();
+        // Client connects and sends before the server accepts (bytes buffer).
+        let c = k.net_connect(client, 5173).unwrap();
+        k.sys_write(client, c.wfd, b"ping").unwrap();
+        let a = match k.net_accept(server, lid).unwrap() {
+            AcceptOutcome::Ready(conn) => conn,
+            other => panic!("expected Ready, got {other:?}"),
+        };
+        // Server reads the request and replies; client reads the reply.
+        assert_eq!(k.sys_read(server, a.rfd, 64).unwrap(), ReadResult::Data(b"ping".to_vec()));
+        k.sys_write(server, a.wfd, b"pong").unwrap();
+        assert_eq!(k.sys_read(client, c.rfd, 64).unwrap(), ReadResult::Data(b"pong".to_vec()));
+        // The port is held while the server lives.
+        assert_eq!(k.net_listen(client, 5173).unwrap_err(), Errno::Addrinuse);
+        // Server exits → its write end closes (client sees EOF) and the port frees.
+        k.mark_exited(server, 0);
+        assert_eq!(k.sys_read(client, c.rfd, 64).unwrap(), ReadResult::Eof);
+        assert!(k.net_listen(client, 5173).is_ok(), "port freed on server exit");
+    }
+
+    #[test]
+    fn net_connect_to_dead_port_is_refused() {
+        let mut k = boot();
+        let client = k.register_host_process();
+        assert_eq!(k.net_connect(client, 9999).unwrap_err(), Errno::Connrefused);
     }
 
     #[test]
