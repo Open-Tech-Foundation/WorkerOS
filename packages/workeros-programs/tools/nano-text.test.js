@@ -26,6 +26,7 @@ import {
   wrapSegments,
   detectLang,
   tokenizeLine,
+  detectIndent,
 } from "../src/nano/nano-program.js";
 
 const cp = (s) => s.codePointAt(0);
@@ -222,4 +223,15 @@ test("tokenizeLine: language-specific rules (py, json, yaml, md)", () => {
 test("tokenizeLine: unknown language leaves text uncolored", () => {
   assert.equal(hlMap("const x = 1", "nope"), "...........");
   assert.equal(hlMap("const x = 1", null), "...........");
+});
+
+test("detectIndent: spaces (size), tabs, and no-evidence", () => {
+  assert.deepEqual(
+    detectIndent(["function f() {", "    return 1;", "    if (x) {", "        y();", "    }", "}"]),
+    { expandTab: true, size: 4 },
+  );
+  assert.deepEqual(detectIndent(["a:", "  b:", "    c: 1", "  d: 2"]), { expandTab: true, size: 2 });
+  assert.deepEqual(detectIndent(["func f() {", "\treturn 1", "\tif x {", "\t\ty()"]), { expandTab: false, size: null });
+  assert.equal(detectIndent(["no", "indent", "here"]), null); // no evidence → caller keeps default
+  assert.equal(detectIndent([""]), null);
 });

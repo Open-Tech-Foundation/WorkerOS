@@ -37,7 +37,7 @@ function osc52(text) {
   write(`\x1b]52;c;${b64}\x1b\\`);
 }
 
-const TABSTOP = 8;
+let tabWidth = 8; // display width of a literal \t (settable; also the tabs-mode indent size)
 
 // ---- path helpers (same normalization the coreutils/curl use) --------------
 function joinPath(...parts) {
@@ -69,6 +69,8 @@ let mark = null; // selection anchor { cy, cx }, or null (^6 sets/clears)
 let showLineNumbers = true; // left gutter with line numbers (toggle: M-N)
 let autoIndent = true; // carry leading whitespace onto a new line (toggle: M-I)
 let softWrap = false; // wrap long lines onto extra screen rows (toggle: M-$)
+let expandTab = true; // Tab inserts spaces (VSCode insertSpaces); false = a real \t
+let indentSize = 4; // spaces per indent level in spaces mode (M-t sets it)
 let syntax = true; // syntax highlighting on (toggle: M-y); real work needs a lang
 let lang = null; // detected language key (by file extension), or null for plain
 let hl = []; // per-row highlight cache: { text, start, colors, end } (see refresh)
@@ -165,7 +167,7 @@ export function prevLen(line, i) {
 export function cxToRx(line, col) {
   let rx = 0, i = 0;
   while (i < col && i < line.length) {
-    if (line[i] === "\t") { rx += TABSTOP - (rx % TABSTOP); i += 1; continue; }
+    if (line[i] === "\t") { rx += tabWidth - (rx % tabWidth); i += 1; continue; }
     const cp = line.codePointAt(i);
     rx += charWidth(cp);
     i += cp > 0xffff ? 2 : 1;
@@ -190,7 +192,7 @@ export function visibleSlice(line, startCol, width, colors) {
   while (i < line.length) {
     const isTab = line[i] === "\t";
     let cp = 0, adv = 1, w, ctrl = false;
-    if (isTab) w = TABSTOP - (col % TABSTOP);
+    if (isTab) w = tabWidth - (col % tabWidth);
     else {
       cp = line.codePointAt(i);
       adv = cp > 0xffff ? 2 : 1;
@@ -245,7 +247,7 @@ export function rxToCx(line, rx) {
   let col = 0, i = 0;
   while (i < line.length) {
     let w, adv;
-    if (line[i] === "\t") { w = TABSTOP - (col % TABSTOP); adv = 1; }
+    if (line[i] === "\t") { w = tabWidth - (col % tabWidth); adv = 1; }
     else { const cp = line.codePointAt(i); w = charWidth(cp); adv = cp > 0xffff ? 2 : 1; }
     if (col + w > rx) break; // rx lands inside this cell → cursor sits before it
     col += w;
@@ -447,6 +449,25 @@ export function detectLang(name) {
   for (const [k, spec] of Object.entries(LANGS))
     if (spec.ext && spec.ext.split(" ").includes(ext)) return k;
   return null;
+}
+
+// Guess a file's indentation (VSCode's "detect indentation"): tabs vs spaces, and
+// for spaces the step (2/4/8). Returns { expandTab, size } or null when there's no
+// evidence (caller keeps its default). `size` is null for tab-indented files.
+export function detectIndent(rows) {
+  let tabs = 0, spaces = 0;
+  const votes = { 2: 0, 4: 0, 8: 0 };
+  for (const line of rows) {
+    const m = line.match(/^(\t+| +)(?=[^\s])/); // leading indent before real content
+    if (!m) continue;
+    if (m[1][0] === "\t") { tabs++; continue; }
+    spaces++;
+    for (const s of [2, 4, 8]) if (m[1].length % s === 0) votes[s]++;
+  }
+  if (tabs > spaces) return { expandTab: false, size: null };
+  if (spaces === 0) return null;
+  const size = [8, 4, 2].find((s) => votes[s] >= spaces * 0.7) ?? 4; // largest that fits, bias 4
+  return { expandTab: true, size };
 }
 
 const isWordCh = (ch) => ch !== undefined && /[A-Za-z0-9_$]/.test(ch);
@@ -664,8 +685,15 @@ function refresh() {
   }
   for (; sl < textRows; sl++) out += "\x1b[K\r\n"; // blank rows past the buffer
 
-  // Message bar.
-  out += fit(statusmsg, screenCols) + "\r\n";
+  // Message bar: status text on the left, a VSCode-style indent indicator on the
+  // right (`Spaces: 4` / `Tab Size: 8`). The indicator yields to the message when
+  // the screen is too narrow to show both, so a status line is never truncated.
+  const indicator = expandTab ? `Spaces: ${indentSize}` : `Tab Size: ${tabWidth}`;
+  const iw = dispWidth(indicator);
+  const room = screenCols - iw - 1;
+  if (room >= 0 && dispWidth(statusmsg) <= room)
+    out += fit(statusmsg, room) + " " + indicator + "\r\n";
+  else out += fit(statusmsg, screenCols) + "\r\n";
 
   // Two shortcut bars.
   const bar1 = [
@@ -821,6 +849,13 @@ function insertChar(ch) {
   cx += ch.length;
   markDirty();
 }
+// Tab key: a real \t (tabs mode) or spaces out to the next indent stop (spaces
+// mode, VSCode insertSpaces). Aligns to the stop so it works mid-line too.
+function insertIndent() {
+  if (!expandTab) { insertChar("\t"); return; }
+  const rx = cxToRx(rows[cy], cx);
+  insertChar(" ".repeat(indentSize - (rx % indentSize)));
+}
 function insertNewline() {
   pushUndo(null);
   const line = rows[cy];
@@ -839,6 +874,16 @@ function insertNewline() {
 }
 function backspace() {
   if (cx > 0 || cy > 0) pushUndo("delete");
+  // Unindent: in spaces mode, when the cursor sits in leading spaces, one
+  // Backspace removes a whole soft-tab back to the previous indent stop.
+  const before = rows[cy].slice(0, cx);
+  if (expandTab && cx > 0 && before.endsWith(" ") && /^ +$/.test(before)) {
+    const del = ((cx - 1) % indentSize) + 1;
+    rows[cy] = rows[cy].slice(del);
+    cx -= del;
+    markDirty();
+    return;
+  }
   if (cx > 0) {
     const l = prevLen(rows[cy], cx); // whole char (2 units for a surrogate pair)
     rows[cy] = rows[cy].slice(0, cx - l) + rows[cy].slice(cx);
@@ -1089,6 +1134,23 @@ async function promptYesNo(label) {
   }
 }
 
+// M-t: change indentation (VSCode's status-bar menu). Ask tabs/spaces, then a
+// size; blank keeps the current value. Updates the tabs-mode display width too.
+async function setIndent() {
+  const t = await promptLine("Indent [t]abs / [s]paces: ", expandTab ? "s" : "t");
+  if (t === null) { setMsg("Cancelled"); return; }
+  const toTabs = /^t/i.test(t.trim());
+  const cur = toTabs ? tabWidth : indentSize;
+  const sz = await promptLine("Indent size (2/4/8): ", String(cur));
+  if (sz === null) { setMsg("Cancelled"); return; }
+  const n = parseInt(sz.trim(), 10);
+  const size = Number.isFinite(n) && n >= 1 && n <= 16 ? n : cur;
+  expandTab = !toTabs;
+  if (toTabs) tabWidth = size;
+  else { indentSize = size; tabWidth = size; } // keep a stray \t aligned to the unit
+  setMsg(expandTab ? `Spaces: ${indentSize}` : `Tab Size: ${tabWidth}`);
+}
+
 // ---- file I/O --------------------------------------------------------------
 // Read a whole VFS file into a Uint8Array (throws if it can't be opened/read).
 async function readFileBytes(path) {
@@ -1124,6 +1186,8 @@ async function loadFile(path) {
     // A trailing newline yields a phantom empty final element; drop it.
     if (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();
     rows = parts.length ? parts : [""];
+    const det = detectIndent(rows); // adopt the file's own indentation, if any
+    if (det) { expandTab = det.expandTab; if (det.size) indentSize = det.size; }
     const fmt = lineEnding === "\r\n" ? " [DOS]" : lineEnding === "\r" ? " [Mac]" : "";
     setMsg(`Read ${rows.length} line${rows.length === 1 ? "" : "s"}${fmt}`);
   } catch {
@@ -1371,7 +1435,7 @@ async function main() {
           syntax = !syntax;
           setMsg(!syntax ? "Syntax highlighting off"
             : lang ? `Syntax highlighting on (${lang})` : "Syntax highlighting on (plain)");
-        }
+        } else if (k.alt === "t") await setIndent();
       } else if (k.ctrl) {
         switch (k.ctrl) {
           case "X": if (await tryExit()) return; break; // finally restores the TTY
@@ -1382,7 +1446,7 @@ async function main() {
           case "^": toggleMark(); break; // ^6 : set/clear the selection mark
           case "K": isCut = cutLine(); break;
           case "U": pasteCut(); break;
-          case "G": setMsg("^O save ^R insert ^W find ^\\ replace ^6 mark M-6 copy M-U/M-E undo/redo M-y syntax ^X exit"); break;
+          case "G": setMsg("^O save ^R insert ^W find ^\\ replace ^6 mark M-6 copy M-U/M-E undo/redo M-y syntax M-t indent ^X exit"); break;
           case "C": cursorPosition(); break;
           case "A": gotoHome(); break;
           case "E": gotoEnd(); break;
@@ -1394,6 +1458,7 @@ async function main() {
           default: break;
         }
       } else if (k.paste !== undefined) insertText(k.paste); // literal block, no auto-indent
+      else if (k.char === "\t") insertIndent(); // tabs-vs-spaces per current setting
       else if (k.char) insertChar(k.char);
       else {
         switch (k.key) {

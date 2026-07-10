@@ -8,6 +8,13 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`nano` tabs-vs-spaces indentation** (VSCode-style). Tab inserts spaces or a real
+  `\t` per the current mode; in spaces mode one Backspace over leading whitespace
+  removes a whole soft-tab. The mode + size are **detected** from the file on open
+  (`detectIndent`), falling back to **spaces / 4**. A right-aligned message-bar
+  indicator shows `Spaces: 4` / `Tab Size: 8` (it yields to status text on a narrow
+  screen). `M-t` opens a prompt to change type then size; the chosen size is also the
+  tab display width. The hardcoded `TABSTOP` is now a settable `tabWidth`.
 - **`nano` syntax highlighting** (`M-y` toggles; on by file extension). A single
   generic, heuristic tokenizer driven by a per-language *data* table — adding a
   language is ~10 lines of data, not code. Ships JS/TS, JSON, shell, Python, Go,

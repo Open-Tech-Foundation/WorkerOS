@@ -372,6 +372,41 @@ test("nano: mark (^6) + copy (M-6) + paste (^U) duplicates a selection", opts, a
   assert.equal(buf.saved, "hello world\nhello world\n", "the copied selection was pasted on the new line");
 });
 
+test("nano: Tab inserts spaces by default (VSCode-style) and shows the indicator", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /indent.txt\r");
+    await waitFor("nano");
+    const hadIndicator = out.includes("Spaces: 4"); // default indicator on the message bar
+    os.input("\tx");    // Tab then 'x' — Tab should become 4 spaces, not a \t
+    await sleep(100);
+    os.input("\x7f");   // Backspace over 'x'
+    os.input("\x7f");   // Backspace at the soft-tab → removes all 4 spaces at once
+    await sleep(100);
+    os.input("done");   // prove the line is back at column 0
+    await sleep(80);
+    os.input("\x0f"); await waitFor("File Name to Write"); os.input("\r"); await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/indent.txt")), hadIndicator };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.hadIndicator, true, "the message bar shows the VSCode-style 'Spaces: 4' indicator");
+  // Tab→4 spaces, Backspace removes 'x', a second Backspace clears the whole 4-space
+  // soft-tab, leaving column 0 for "done".
+  assert.equal(buf.saved, "done\n");
+});
+
 test("nano: syntax highlighting colors a .js file (and M-y toggles it off)", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();
