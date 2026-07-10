@@ -777,6 +777,13 @@ async function nextKey() {
 // After ESC: recognize CSI (ESC [ …) and SS3 (ESC O …) navigation sequences,
 // and Meta/Alt chords (ESC <char>, e.g. M-U undo / M-E redo).
 async function parseEsc() {
+  // A real CSI/SS3/Alt sequence is delivered atomically with its ESC (the TTY
+  // hands a program the whole keystroke's bytes in one read), so its bytes are
+  // already buffered here. A bare ESC arrives on its own with nothing behind it —
+  // so an empty buffer means the user pressed Escape. Return it now instead of
+  // blocking on a continuation byte that will never come (which would hang the
+  // key until the *next* press and misread ESC+key as an Alt chord).
+  if (inbuf.length === 0) return { key: "esc" };
   const c = await nextByte();
   if (c === -1) return { key: "esc" };
   if (c === 0x7f || c === 0x08) return { key: "wdelback" }; // M-Backspace: del word

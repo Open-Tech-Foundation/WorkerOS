@@ -585,6 +585,41 @@ test("nano: M-p command palette filters and runs a command", opts, async () => {
   assert.equal(buf.ok, true);
 });
 
+test("nano: a bare ESC closes the command palette (no continuation byte)", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/e.txt", "abc\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /e.txt\r");
+    await waitFor("Read 1 line");
+    os.input("\x1bp"); // M-p: open the palette
+    await waitFor("Command Palette");
+    // Press Escape as its own keystroke — the byte arrives alone, so the decoder
+    // must not block waiting for a continuation. This should dismiss the palette.
+    os.input("\x1b");
+    await sleep(150);
+    // Back in the buffer: a typed char must edit text (if the palette were still
+    // up it would filter commands instead), and ^O must reach the save prompt.
+    os.input("Z");
+    await sleep(80);
+    os.input("\x0f"); await waitFor("File Name to Write"); os.input("\r"); await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/e.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "Zabc\n", "ESC closed the palette and editing resumed (Z inserted at the cursor)");
+});
+
 test("nano: Tab inserts spaces by default (VSCode-style) and shows the indicator", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();

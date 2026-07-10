@@ -188,6 +188,13 @@ guest runtime. Format:
   - **In-prompt line editing & completion** — message-bar prompts gain `←`/`→`,
     `Home`/`End`, and `Del` (surrogate-safe), and `Tab` completes a filename to
     the longest common prefix of the directory (appending `/` for a lone dir).
+  - **`Esc` dismisses overlays reliably.** The key decoder no longer blocks after
+    a lone `ESC` byte waiting for a continuation that never comes (which hung the
+    keypress until the next one and misread `ESC`+key as an Alt chord). Because the
+    TTY hands a program a whole keystroke's bytes in one read, a real CSI/SS3/Alt
+    sequence already has its bytes buffered when `ESC` is seen, while a bare `ESC`
+    arrives alone — so an empty buffer is treated as Escape immediately. `Esc` now
+    closes the command palette (`M-p`), the file finder (`^P`), and prompts.
   - **Word motion & deletion** — `Ctrl-←`/`Ctrl-→` move by word; `M-Backspace`
     and `M-Del` delete the word before/after the cursor.
   - **Auto-indent** (on by default, `M-I` toggles) carries a line's leading
