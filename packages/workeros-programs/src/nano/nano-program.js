@@ -69,6 +69,10 @@ let mark = null; // selection anchor { cy, cx }, or null (^6 sets/clears)
 let showLineNumbers = true; // left gutter with line numbers (toggle: M-N)
 let autoIndent = true; // carry leading whitespace onto a new line (toggle: M-I)
 let softWrap = false; // wrap long lines onto extra screen rows (toggle: M-$)
+let syntax = true; // syntax highlighting on (toggle: M-y); real work needs a lang
+let lang = null; // detected language key (by file extension), or null for plain
+let hl = []; // per-row highlight cache: { text, start, colors, end } (see refresh)
+let hlGood = 0; // rows [0, hlGood) of `hl` are known-valid; edits lower this
 let lineEnding = "\n"; // detected on load ("\n" unix, "\r\n" dos, "\r" mac)
 let lastSearch = ""; // last search needle (empty ^W query repeats it)
 let searchOpts = { caseSens: false, regex: false, backward: false };
@@ -111,7 +115,7 @@ function redo() {
 }
 
 const setMsg = (m) => { statusmsg = m; };
-const markDirty = () => { dirty = true; };
+const markDirty = () => { dirty = true; hlGood = Math.min(hlGood, cy); };
 
 async function updateSize() {
   const ws = await sys.winsize();
@@ -178,9 +182,10 @@ const caret = (cp) => "^" + String.fromCharCode(cp === 0x7f ? 0x3f : cp ^ 0x40);
 // The visible slice of a line for a horizontal window [startCol, startCol+width):
 // tabs expand to spaces, control chars show as inverse caret notation (^X), and a
 // wide glyph clipped by either edge renders as a space for its visible half, so
-// columns line up exactly.
-export function visibleSlice(line, startCol, width) {
-  let col = 0, out = "", i = 0;
+// columns line up exactly. When `colors` (a per-code-unit color-id array from the
+// tokenizer) is given, an SGR is emitted wherever the color changes.
+export function visibleSlice(line, startCol, width, colors) {
+  let col = 0, out = "", i = 0, cur = 0;
   const end = startCol + width;
   while (i < line.length) {
     const isTab = line[i] === "\t";
@@ -199,12 +204,15 @@ export function visibleSlice(line, startCol, width) {
       out += " ".repeat(Math.min(cellEnd, end) - Math.max(cellStart, startCol));
     } else if (ctrl) {
       out += "\x1b[7m" + caret(cp) + "\x1b[0m";
+      cur = 0; // the ^X reset (\x1b[0m) cleared any active color
     } else {
+      if (colors && colors[i] !== cur) { cur = colors[i] || 0; out += hlSgr(cur); }
       out += String.fromCodePoint(cp);
     }
     col = cellEnd;
     i += adv;
   }
+  if (cur !== 0) out += "\x1b[39m"; // restore default fg so color can't bleed
   return out;
 }
 
@@ -370,6 +378,199 @@ function scroll() {
   }
 }
 
+// ---- syntax highlighting ---------------------------------------------------
+// Heuristic, nano-style: a per-language *data* table + one generic tokenizer.
+// This is deliberately NOT a real parser (adding a language is ~10 lines of data,
+// not code); pathological cases — a `/` that's divide-vs-regex, nested template
+// literals — can mis-color, the accepted trade real nano makes too.
+//
+// Color ids (0 = default text); mapped to SGR by `hlSgr`.
+const HL = { COMMENT: 1, STRING: 2, KEYWORD: 3, NUMBER: 4, CONST: 5, TYPE: 6, ACCENT: 7 };
+const KW = (s) => new Set(s.split(/\s+/).filter(Boolean));
+const LANGS = {
+  js: {
+    ext: "js mjs cjs jsx ts tsx mts cts",
+    line: "//", block: ["/*", "*/"],
+    strings: [{ q: '"' }, { q: "'" }, { q: "`", multi: true }],
+    keywords: KW("await break case catch class const continue debugger default delete do else export extends finally for from function get if import in instanceof let new of return set static super switch throw try typeof var void while with yield async as enum type namespace declare readonly public private protected implements interface"),
+    constants: KW("true false null undefined NaN Infinity this"),
+    types: KW("string number boolean object symbol bigint any unknown never void"),
+  },
+  json: { ext: "json", strings: [{ q: '"' }], constants: KW("true false null") },
+  sh: {
+    ext: "sh bash zsh", line: "#",
+    strings: [{ q: '"' }, { q: "'" }],
+    keywords: KW("if then else elif fi for while until do done case esac in function return export local readonly declare set unset shift source"),
+  },
+  py: {
+    ext: "py pyi", line: "#",
+    strings: [{ q: '"""', multi: true }, { q: "'''", multi: true }, { q: '"' }, { q: "'" }],
+    keywords: KW("and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case"),
+    constants: KW("True False None self cls __name__"),
+  },
+  go: {
+    ext: "go", line: "//", block: ["/*", "*/"],
+    strings: [{ q: '"' }, { q: "'" }, { q: "`", multi: true }],
+    keywords: KW("break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var"),
+    constants: KW("true false nil iota"),
+    types: KW("bool byte complex64 complex128 error float32 float64 int int8 int16 int32 int64 rune string uint uint8 uint16 uint32 uint64 uintptr any"),
+  },
+  rust: {
+    ext: "rs", line: "//", block: ["/*", "*/"],
+    strings: [{ q: '"' }],
+    keywords: KW("as async await break const continue crate dyn else enum extern fn for if impl in let loop match mod move mut pub ref return static struct super trait type unsafe use where while"),
+    constants: KW("true false None Some Ok Err self Self"),
+    types: KW("bool char str String i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 Vec Option Result Box"),
+  },
+  c: {
+    ext: "c h cpp cc cxx hpp hh", line: "//", block: ["/*", "*/"],
+    strings: [{ q: '"' }, { q: "'" }],
+    keywords: KW("auto break case char const continue default do double else enum extern float for goto if inline int long register return short signed sizeof static struct switch typedef union unsigned void volatile while class namespace template public private protected virtual new delete using nullptr bool"),
+    constants: KW("true false NULL"),
+  },
+  css: {
+    ext: "css scss less", block: ["/*", "*/"],
+    strings: [{ q: '"' }, { q: "'" }],
+  },
+  yaml: { ext: "yaml yml", line: "#", strings: [{ q: '"' }, { q: "'" }], keyish: ":" },
+  toml: { ext: "toml", line: "#", strings: [{ q: '"' }, { q: "'" }], keyish: "=" },
+  md: { ext: "md markdown mkd", md: true },
+};
+
+// filename → language key (by extension), or null for plain text.
+export function detectLang(name) {
+  if (!name) return null;
+  const base = name.slice(name.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+  if (!ext) return null;
+  for (const [k, spec] of Object.entries(LANGS))
+    if (spec.ext && spec.ext.split(" ").includes(ext)) return k;
+  return null;
+}
+
+const isWordCh = (ch) => ch !== undefined && /[A-Za-z0-9_$]/.test(ch);
+const isDigitCh = (ch) => ch >= "0" && ch <= "9";
+
+// Scan a string literal body from `from` up to `close`; honor `\` escapes unless
+// disabled. Returns { closed, end } — `end` is just past the close (or line end).
+function scanString(text, from, close, esc) {
+  let i = from;
+  while (i < text.length) {
+    if (esc && text[i] === "\\") { i += 2; continue; }
+    if (text.startsWith(close, i)) return { closed: true, end: i + close.length };
+    i++;
+  }
+  return { closed: false, end: text.length };
+}
+
+// Tokenize one line into a per-code-unit color-id array. `startState` carries a
+// multiline construct in from the line above: "" | "block" | "str:<close>".
+// Returns { colors, endState } — endState feeds the next line.
+export function tokenizeLine(text, langKey, startState = "") {
+  const spec = LANGS[langKey];
+  const n = text.length;
+  const colors = new Array(n).fill(0);
+  if (!spec) return { colors, endState: "" };
+  if (spec.md) return { colors: mdColors(text), endState: "" };
+  const paint = (a, b, c) => { for (let k = a; k < b; k++) colors[k] = c; };
+  let i = 0;
+  let state = startState;
+
+  // Resume a multiline block comment / string carried from the previous line.
+  if (state === "block" && spec.block) {
+    const end = text.indexOf(spec.block[1]);
+    if (end < 0) { paint(0, n, HL.COMMENT); return { colors, endState: "block" }; }
+    paint(0, end + spec.block[1].length, HL.COMMENT);
+    i = end + spec.block[1].length;
+    state = "";
+  } else if (state.startsWith("str:")) {
+    const close = state.slice(4);
+    const r = scanString(text, 0, close, true);
+    if (!r.closed) { paint(0, n, HL.STRING); return { colors, endState: state }; }
+    paint(0, r.end, HL.STRING);
+    i = r.end;
+    state = "";
+  }
+
+  // keyish (yaml/toml): color a leading `key:` / `key =` as a type/accent. The
+  // main loop leaves plain identifiers uncolored, so this survives it.
+  if (spec.keyish) {
+    const m = text.match(new RegExp("^(\\s*)([\\w.-]+)\\s*" + spec.keyish));
+    if (m) paint(m[1].length, m[1].length + m[2].length, HL.TYPE);
+  }
+
+  const lineTokens = spec.line ? [].concat(spec.line) : [];
+  while (i < n) {
+    if (lineTokens.some((t) => text.startsWith(t, i))) { paint(i, n, HL.COMMENT); break; }
+    if (spec.block && text.startsWith(spec.block[0], i)) {
+      const end = text.indexOf(spec.block[1], i + spec.block[0].length);
+      if (end < 0) { paint(i, n, HL.COMMENT); state = "block"; break; }
+      paint(i, end + spec.block[1].length, HL.COMMENT);
+      i = end + spec.block[1].length;
+      continue;
+    }
+    const s = spec.strings && spec.strings.find((x) => text.startsWith(x.q, i));
+    if (s) {
+      const r = scanString(text, i + s.q.length, s.q, s.esc !== false);
+      if (!r.closed && s.multi) { paint(i, n, HL.STRING); state = "str:" + s.q; break; }
+      paint(i, r.end, HL.STRING);
+      i = r.end;
+      continue;
+    }
+    const ch = text[i];
+    if (isDigitCh(ch) || (ch === "." && isDigitCh(text[i + 1]))) {
+      let j = i + 1;
+      while (j < n && /[0-9a-fA-FxXoObB._]/.test(text[j])) j++;
+      paint(i, j, HL.NUMBER);
+      i = j;
+      continue;
+    }
+    if (isWordCh(ch) && !isDigitCh(ch)) {
+      let j = i;
+      while (j < n && isWordCh(text[j])) j++;
+      const w = text.slice(i, j);
+      const c = spec.constants && spec.constants.has(w) ? HL.CONST
+        : spec.types && spec.types.has(w) ? HL.TYPE
+        : spec.keywords && spec.keywords.has(w) ? HL.KEYWORD : 0;
+      if (c) paint(i, j, c);
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return { colors, endState: state };
+}
+
+// Markdown is line-shaped, not token-shaped: headings, list markers, inline code
+// and emphasis. (Fenced ``` blocks aren't tracked across lines in v1.)
+function mdColors(text) {
+  const n = text.length;
+  const colors = new Array(n).fill(0);
+  const paint = (a, b, c) => { for (let k = a; k < b; k++) colors[k] = c; };
+  if (/^\s{0,3}#{1,6}\s/.test(text)) { paint(0, n, HL.ACCENT); return colors; }
+  const bullet = text.match(/^(\s*)([-*+]|\d+\.)(\s)/);
+  if (bullet) paint(bullet[1].length, bullet[1].length + bullet[2].length, HL.KEYWORD);
+  for (const re of [/`[^`]+`/g, /\*\*[^*]+\*\*/g, /(?<![*_])[*_][^*_]+[*_](?![*_])/g]) {
+    let m;
+    const col = re.source[0] === "`" ? HL.STRING : HL.TYPE;
+    while ((m = re.exec(text))) paint(m.index, m.index + m[0].length, col);
+  }
+  return colors;
+}
+
+// Color id → SGR. 256-color (widely supported); id 0 resets to default fg.
+const HL_SGR = {
+  1: "\x1b[38;5;245m", // comment  — grey
+  2: "\x1b[38;5;114m", // string   — green
+  3: "\x1b[38;5;111m", // keyword  — blue
+  4: "\x1b[38;5;179m", // number   — amber
+  5: "\x1b[38;5;176m", // constant — purple
+  6: "\x1b[38;5;80m", //  type     — cyan
+  7: "\x1b[38;5;211m", // accent   — pink (md heading, etc.)
+};
+const hlSgr = (c) => (c ? HL_SGR[c] : "\x1b[39m");
+
 const INVERSE = "\x1b[7m";
 const RESET = "\x1b[0m";
 // 24-bit (true-color) SGR helpers. The playground terminal (xterm.js) renders
@@ -397,16 +598,33 @@ function selColsFor(r) {
 }
 // Render one line's visible window, inverting the selected columns. Reuses the
 // (tested) `visibleSlice` by splitting the window into pre / selected / post.
-function renderRowVisible(line, off, tw, sel) {
-  if (!sel) return visibleSlice(line, off, tw);
+function renderRowVisible(line, off, tw, sel, colors) {
+  if (!sel) return visibleSlice(line, off, tw, colors);
   const winHi = off + tw;
   const sLo = Math.max(sel[0], off), sHi = Math.min(sel[1], winHi);
-  if (sLo >= sHi) return visibleSlice(line, off, tw);
+  if (sLo >= sHi) return visibleSlice(line, off, tw, colors);
+  // Selection inverts; syntax color applies only outside it (inverse wins).
   return (
-    visibleSlice(line, off, sLo - off) +
+    visibleSlice(line, off, sLo - off, colors) +
     "\x1b[7m" + visibleSlice(line, sLo, sHi - sLo) + "\x1b[0m" +
-    visibleSlice(line, sHi, winHi - sHi)
+    visibleSlice(line, sHi, winHi - sHi, colors)
   );
+}
+
+// Ensure `hl[0..upto]` is valid, tokenizing only what changed. Each row's colors
+// depend on the previous row's end-state (multiline comments/strings), so we walk
+// forward from the first stale row, reusing a cached entry whenever its source
+// text and carried-in state both still match.
+function ensureHighlight(upto) {
+  let start = hlGood > 0 ? hl[hlGood - 1].end : "";
+  for (let r = hlGood; r <= upto && r < rows.length; r++) {
+    const c = hl[r];
+    if (c && c.text === rows[r] && c.start === start) { start = c.end; continue; }
+    const { colors, endState } = tokenizeLine(rows[r], lang, start);
+    hl[r] = { text: rows[r], start, colors, end: endState };
+    start = endState;
+  }
+  hlGood = Math.max(hlGood, Math.min(rows.length, upto + 1));
 }
 
 // Build one full frame and emit it in a single write (no flicker).
@@ -424,11 +642,14 @@ function refresh() {
   // per line and the window scrolls horizontally by `coloff`.
   const gw = gutterWidth();
   const tw = textWidth();
+  const hlOn = syntax && lang;
+  if (hlOn) ensureHighlight(rowoff + textRows);
   visualMap = new Array(textRows).fill(null);
   let sl = 0; // screen line index within the text area
   for (let r = rowoff; r < rows.length && sl < textRows; r++) {
     const segs = softWrap ? wrapSegments(cxToRx(rows[r], rows[r].length), tw) : [coloff];
     const selCols = selColsFor(r);
+    const cols = hlOn && hl[r] ? hl[r].colors : null;
     for (let si = 0; si < segs.length && sl < textRows; si++) {
       const start = segs[si];
       visualMap[sl] = { r, start };
@@ -436,7 +657,7 @@ function refresh() {
         if (si === 0) out += (r === cy ? GUTTER_CUR : GUTTER_DIM) + String(r + 1).padStart(gw - 1) + " " + RESET;
         else out += " ".repeat(gw); // continuation rows: blank gutter
       }
-      out += renderRowVisible(rows[r], start, tw, selCols);
+      out += renderRowVisible(rows[r], start, tw, selCols, cols);
       out += "\x1b[K\r\n";
       sl++;
     }
@@ -892,6 +1113,8 @@ async function readFileBytes(path) {
 
 async function loadFile(path) {
   filename = path;
+  lang = detectLang(path); // pick syntax rules by extension (null → plain text)
+  hl = []; hlGood = 0;
   try {
     const text = dec.decode(await readFileBytes(path));
     // Detect the line ending so we round-trip DOS/Mac files unchanged, and strip
@@ -1144,6 +1367,10 @@ async function main() {
           softWrap = !softWrap;
           coloff = 0;
           setMsg(softWrap ? "Soft wrap on" : "Soft wrap off");
+        } else if (k.alt === "y") {
+          syntax = !syntax;
+          setMsg(!syntax ? "Syntax highlighting off"
+            : lang ? `Syntax highlighting on (${lang})` : "Syntax highlighting on (plain)");
         }
       } else if (k.ctrl) {
         switch (k.ctrl) {
@@ -1155,7 +1382,7 @@ async function main() {
           case "^": toggleMark(); break; // ^6 : set/clear the selection mark
           case "K": isCut = cutLine(); break;
           case "U": pasteCut(); break;
-          case "G": setMsg("^O save ^R insert ^W find ^\\ replace ^6 mark M-6 copy M-U/M-E undo/redo ^X exit"); break;
+          case "G": setMsg("^O save ^R insert ^W find ^\\ replace ^6 mark M-6 copy M-U/M-E undo/redo M-y syntax ^X exit"); break;
           case "C": cursorPosition(); break;
           case "A": gotoHome(); break;
           case "E": gotoEnd(); break;

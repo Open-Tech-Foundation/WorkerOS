@@ -24,9 +24,19 @@ import {
   findNext,
   findInLine,
   wrapSegments,
+  detectLang,
+  tokenizeLine,
 } from "../src/nano/nano-program.js";
 
 const cp = (s) => s.codePointAt(0);
+
+// Render a tokenized line as a compact color-id map, one char per code unit:
+// "." default, C comment, S string, K keyword, N number, L literal, T type, A accent.
+const NAMES = { 0: ".", 1: "C", 2: "S", 3: "K", 4: "N", 5: "L", 6: "T", 7: "A" };
+const hlMap = (text, lang, start = "") => {
+  const { colors } = tokenizeLine(text, lang, start);
+  return text.split("").map((_, i) => NAMES[colors[i] || 0]).join("");
+};
 
 test("isWide / charWidth: ASCII is 1 column, CJK and emoji are 2", () => {
   assert.equal(charWidth(cp("a")), 1);
@@ -160,4 +170,56 @@ test("wrapSegments breaks a line every `tw` render columns", () => {
   assert.deepEqual(wrapSegments(10, 10), [0]); // exact width, still one row
   assert.deepEqual(wrapSegments(11, 10), [0, 10]);
   assert.deepEqual(wrapSegments(25, 10), [0, 10, 20]);
+});
+
+test("detectLang maps file extensions to language keys", () => {
+  assert.equal(detectLang("app.js"), "js");
+  assert.equal(detectLang("/src/x.tsx"), "js"); // TS/JSX share the JS ruleset
+  assert.equal(detectLang("main.go"), "go");
+  assert.equal(detectLang("lib.rs"), "rust");
+  assert.equal(detectLang("s.py"), "py");
+  assert.equal(detectLang("run.sh"), "sh");
+  assert.equal(detectLang("data.json"), "json");
+  assert.equal(detectLang("k8s.yaml"), "yaml");
+  assert.equal(detectLang("Cargo.toml"), "toml");
+  assert.equal(detectLang("README.md"), "md");
+  assert.equal(detectLang("a.c"), "c");
+  assert.equal(detectLang("style.css"), "css");
+  assert.equal(detectLang("Makefile"), null); // no extension → plain
+  assert.equal(detectLang("notes.xyz"), null); // unknown extension → plain
+  assert.equal(detectLang(null), null);
+});
+
+test("tokenizeLine: JS keywords, strings, comments, numbers", () => {
+  assert.equal(hlMap(`const x = "hi"; // note`, "js"), "KKKKK.....SSSS..CCCCCCC");
+  assert.equal(hlMap("let n = 42", "js"), "KKK.....NN");
+  assert.equal(hlMap("return true", "js"), "KKKKKK.LLLL"); // true = constant
+});
+
+test("tokenizeLine: a block comment carries across lines via endState", () => {
+  const l1 = tokenizeLine("code /* open", "js");
+  assert.equal(l1.endState, "block");
+  assert.equal(hlMap("code /* open", "js"), ".....CCCCCCC");
+  // The next line, fed l1's endState, stays a comment until `*/` then resumes.
+  assert.equal(hlMap("still */ done", "js", l1.endState), "CCCCCCCC.....");
+  assert.equal(tokenizeLine("still */ done", "js", l1.endState).endState, "");
+});
+
+test("tokenizeLine: a multiline template string carries and closes", () => {
+  const l1 = tokenizeLine("s = `a", "js");
+  assert.equal(l1.endState, "str:`");
+  assert.equal(tokenizeLine("b` + 1", "js", l1.endState).endState, "");
+  assert.equal(hlMap("b` + 1", "js", l1.endState), "SS...N");
+});
+
+test("tokenizeLine: language-specific rules (py, json, yaml, md)", () => {
+  assert.equal(hlMap("def f(): return None  # x", "py"), "KKK......KKKKKK.LLLL..CCC");
+  assert.equal(hlMap(`{"a": 12, "b": true}`, "json"), ".SSS..NN..SSS..LLLL.");
+  assert.equal(hlMap("name: value  # c", "yaml"), "TTTT.........CCC"); // key + comment
+  assert.equal(hlMap("## Heading", "md"), "AAAAAAAAAA"); // whole heading accented
+});
+
+test("tokenizeLine: unknown language leaves text uncolored", () => {
+  assert.equal(hlMap("const x = 1", "nope"), "...........");
+  assert.equal(hlMap("const x = 1", null), "...........");
 });

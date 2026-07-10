@@ -8,6 +8,15 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`nano` syntax highlighting** (`M-y` toggles; on by file extension). A single
+  generic, heuristic tokenizer driven by a per-language *data* table — adding a
+  language is ~10 lines of data, not code. Ships JS/TS, JSON, shell, Python, Go,
+  Rust, C/C++, CSS, YAML, TOML and Markdown; unknown extensions stay plain.
+  Multiline constructs (block comments, template/triple-quoted strings) are tracked
+  with a per-line carried state, and only the visible rows are tokenized (cached,
+  invalidated on edit). Colors compose under the selection highlight (inverse wins)
+  and horizontal scroll / soft-wrap. Not a real parser — regex-vs-divide and nested
+  templates can mis-color, the same trade real nano's `.nanorc` rules make.
 - **`nano` copies to the system clipboard (OSC 52).** Cutting (`^K`) and copying
   (`M-6`) now also emit `ESC ] 52 ; c ; <base64> ST` so the selection lands on the
   host clipboard, not just nano's internal cut buffer — the copy-out counterpart to

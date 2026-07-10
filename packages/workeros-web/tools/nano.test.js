@@ -372,6 +372,40 @@ test("nano: mark (^6) + copy (M-6) + paste (^U) duplicates a selection", opts, a
   assert.equal(buf.saved, "hello world\nhello world\n", "the copied selection was pasted on the new line");
 });
 
+test("nano: syntax highlighting colors a .js file (and M-y toggles it off)", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    // A .js file so the extension selects the JS ruleset.
+    await os.fs.write("/hi.js", 'const greeting = "hello";\n');
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /hi.js\r");
+    await waitFor("greeting");
+    await sleep(120);
+    // The keyword color (256-color SGR 111 = blue) should be emitted for `const`.
+    const litOn = out.includes("\x1b[38;5;111m");
+    out = "";
+    os.input("\x1by"); // M-y toggles highlighting off
+    await waitFor("Syntax highlighting off");
+    await sleep(120);
+    const litOff = out.includes("\x1b[38;5;111m");
+    os.input("\x18"); await sleep(100); // ^X (clean buffer, no prompt)
+    return { litOn, litOff };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.litOn, true, "keyword color SGR was emitted while highlighting is on");
+  assert.equal(buf.litOff, false, "no syntax color is emitted after M-y turns it off");
+});
+
 test("nano: copy (M-6) mirrors the selection to the OS clipboard via OSC 52", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();
