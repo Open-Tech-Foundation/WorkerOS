@@ -24,7 +24,21 @@ import { createEventLoop } from "/lib/workeros-node/event-loop.js";
 const enc = new TextEncoder();
 const err = (s) => sys.write(2, enc.encode(s));
 
-const script = sys.argv[1];
+// `-e "code"` / `--eval` runs the argument as source (no file); `-p`/`--print`
+// evaluates an expression and prints it (wrapped in console.log). Otherwise
+// argv[1] is a script path. This makes one-liners like
+// `node -e "require('http').createServer(...).listen(5173)"` work.
+let script = sys.argv[1];
+let evalSource = null;
+if (script === "-e" || script === "--eval" || script === "-p" || script === "--print") {
+  const code = sys.argv[2];
+  if (code == null) {
+    err("node: " + script + " requires an argument\n");
+    sys.exit(1);
+  }
+  evalSource = script === "-p" || script === "--print" ? "console.log(" + code + ")" : code;
+  script = "[eval]";
+}
 if (!script) {
   // Real Node drops into a REPL here; we have no TTY, so say so plainly.
   err("node: no script given (usage: node <file.js> [args…]); REPL is not supported\n");
@@ -197,20 +211,32 @@ const path = builtins.get("path");
 globalThis.global = globalThis;
 globalThis.Buffer = builtins.get("buffer").Buffer;
 
-const entryAbs = path.isAbsolute(script) ? path.normalize(script) : path.join(sys.cwd, script);
-let entryBytes;
-try {
-  entryBytes = fs.readFileSync(entryAbs);
-} catch {
-  err("node: cannot find module '" + script + "'\n");
-  sys.exit(1);
+// For `-e`/`-p`, the entry is synthetic (rooted at cwd so relative requires and
+// imports resolve there); otherwise read the script file from the VFS.
+const entryAbs =
+  evalSource != null
+    ? path.join(sys.cwd, "[eval]")
+    : path.isAbsolute(script)
+      ? path.normalize(script)
+      : path.join(sys.cwd, script);
+let entrySource;
+if (evalSource != null) {
+  entrySource = evalSource;
+} else {
+  let entryBytes;
+  try {
+    entryBytes = fs.readFileSync(entryAbs);
+  } catch {
+    err("node: cannot find module '" + script + "'\n");
+    sys.exit(1);
+  }
+  // A wasm file (`\0asm`) isn't JS — run it directly, not through node.
+  if (entryBytes.length >= 4 && entryBytes[0] === 0x00 && entryBytes[1] === 0x61 && entryBytes[2] === 0x73 && entryBytes[3] === 0x6d) {
+    err("node: " + script + " is a wasm module, not JS (run it directly)\n");
+    sys.exit(1);
+  }
+  entrySource = new TextDecoder().decode(entryBytes);
 }
-// A wasm file (`\0asm`) isn't JS — run it directly, not through node.
-if (entryBytes.length >= 4 && entryBytes[0] === 0x00 && entryBytes[1] === 0x61 && entryBytes[2] === 0x73 && entryBytes[3] === 0x6d) {
-  err("node: " + script + " is a wasm module, not JS (run it directly)\n");
-  sys.exit(1);
-}
-const entrySource = new TextDecoder().decode(entryBytes);
 
 // CommonJS entry (`require`/`module.exports`): run it through the CJS runtime,
 // which resolves the `require` graph out of the VFS and provides the `node:`

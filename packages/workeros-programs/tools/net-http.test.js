@@ -12,7 +12,10 @@ import { createNet } from "../src/node/net.js";
 import { createHttp } from "../src/node/http.js";
 
 globalThis.Buffer = Buffer;
-globalThis.__workerosLoop = { ref() {}, unref() {} };
+// A counting event-loop stub: a listening server must hold a ref so /bin/node
+// doesn't exit the instant the script's top level returns (ADR-021).
+let loopRefs = 0;
+globalThis.__workerosLoop = { ref() { loopRefs++; }, unref() { loopRefs--; } };
 
 // ---- fake kernel: channels (pipes), fds, ports, accept parking --------------
 class Channel {
@@ -135,6 +138,18 @@ test("Connection: Upgrade → 'upgrade' event with the raw socket (ws/HMR path)"
   assert.ok(upgraded);
   assert.equal(upgraded.req.headers.upgrade, "websocket");
   server.close();
+});
+
+test("server.listen refs the event loop synchronously (no immediate exit)", () => {
+  // The regression: ref happened after the async netListen, so whenIdle() — checked
+  // the moment the script's top level returns — saw 0 refs and the process exited
+  // before the server registered. listen() must ref *before* it returns.
+  const before = loopRefs;
+  const server = http.createServer(() => {});
+  server.listen(15179);
+  assert.equal(loopRefs, before + 1, "listen must ref the loop synchronously");
+  server.close();
+  assert.equal(loopRefs, before, "close unrefs the loop");
 });
 
 test("net.connect ⇄ server full-duplex echo", async () => {

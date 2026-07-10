@@ -153,15 +153,20 @@ export function createNet(sys, EventEmitter) {
       if (typeof host === "function") { cb = host; host = undefined; }
       if (cb) this.once("listening", cb);
       this._port = port | 0;
+      // Ref the event loop *synchronously*, before the async netListen: /bin/node
+      // checks whenIdle() the moment the script's top level returns, so a deferred
+      // ref would let the process exit before the server is even registered (the
+      // "node exits immediately" bug). Held until close()/listen error.
+      if (!this._refd) { this._refd = true; loop()?.ref(); }
       (async () => {
         try {
           this._listener = await sys.netListen(this._port);
         } catch (e) {
           this.emit("error", e instanceof Error ? e : new Error(String(e)));
+          if (this._refd) { this._refd = false; loop()?.unref(); }
           return;
         }
         this.listening = true;
-        if (!this._refd) { this._refd = true; loop()?.ref(); }
         this.emit("listening");
         // Accept loop: awaits the next connection; the kernel parks it for us.
         while (this.listening) {

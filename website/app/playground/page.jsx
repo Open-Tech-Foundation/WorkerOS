@@ -17,16 +17,6 @@ const RUNTIME_URL = "/workeros/packages/workeros-web/src/index.js";
 // Hidden from the bundler's static analysis — resolved purely at runtime.
 const loadRuntime = new Function("u", "return import(u)");
 
-const EXAMPLES = [
-  "ls /sbin",
-  "echo hello | cat",
-  "mkdir -p a/b && ls a",
-  "echo hi > /f.txt && cat /f.txt",
-  "env",
-  "pwd",
-  "ps",
-];
-
 // Load a same-origin UMD script once; resolves when the global is installed.
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -71,6 +61,14 @@ export default function Playground() {
   // The preview iframe src ("/__preview__/<port>/"), set when the user opens a
   // port a guest is serving on (ADR-021). Empty until then.
   let previewSrc = $state("");
+
+  // Point the preview iframe at the port in the toolbar input. The cache-bust
+  // param forces a reload even when the same port is re-opened (the Reload button).
+  const openPreview = () => {
+    const input = document.getElementById("preview-port");
+    const port = parseInt((input && input.value) || "0", 10);
+    if (port) previewSrc = `/__preview__/${port}/?t=${Date.now()}`;
+  };
 
   // Refit the terminal to its container. Assigned once the kernel has booted and
   // the xterm instance exists; a no-op before then.
@@ -196,21 +194,6 @@ export default function Playground() {
         term.focus();
         os.startTerminal();
 
-        // Clicking a chip "types" the command and runs it via the same input path.
-        window.__pgRun = (line) => {
-          if (!os) return;
-          term.focus();
-          os.input(line + "\r");
-        };
-
-        // Point the preview iframe at a port a guest is serving on. A cache-bust
-        // param forces a reload even when the same port is re-opened.
-        window.__pgPreview = () => {
-          const input = document.getElementById("preview-port");
-          const port = parseInt((input && input.value) || "0", 10);
-          if (!port) return;
-          previewSrc = `/__preview__/${port}/?t=${Date.now()}`;
-        };
       } catch (err) {
         status = "error";
         statusText = "boot failed";
@@ -247,63 +230,42 @@ export default function Playground() {
       <div class="pg-body">
         <div class="terminal">
           <div id="term-screen" class="term-screen" />
-          {previewSrc && (
-            <div class="preview-pane">
-              <div class="preview-bar">
-                <span class="preview-url">{previewSrc.split("?")[0]}</span>
-                <span class="nav-spacer" style="flex:1" />
-                <button class="chip" onclick={() => (previewSrc = "")}>
-                  close
-                </button>
-              </div>
-              <iframe class="preview-frame" src={previewSrc} title="preview" />
+        </div>
+
+        <div class="preview-pane">
+          <div class="preview-bar">
+            <span class="preview-label">Preview</span>
+            <span class="preview-addr">
+              localhost:
+              <input
+                id="preview-port"
+                class="preview-input"
+                type="number"
+                placeholder="5173"
+                value="5173"
+              />
+            </span>
+            <button class="chip" onclick={() => openPreview()}>
+              Open
+            </button>
+            <button class="chip" onclick={() => openPreview()}>
+              Reload
+            </button>
+            <span class="preview-url">{previewSrc ? previewSrc.split("?")[0] : ""}</span>
+          </div>
+          {previewSrc ? (
+            <iframe class="preview-frame" src={previewSrc} title="preview" />
+          ) : (
+            <div class="preview-empty">
+              <p>Run a server in the terminal, then open its port here.</p>
+              <pre>node -e "require('http').createServer((q,r)=&gt;r.end('&lt;h1&gt;hello from WorkerOS&lt;/h1&gt;')).listen(5173)"</pre>
+              <p class="preview-empty-hint">
+                Then set the port to <b>5173</b> and click <b>Open</b>. HMR/WebSocket
+                isn't wired yet — plain HTTP responses render.
+              </p>
             </div>
           )}
         </div>
-
-        <aside class="pg-side">
-          <h4>Preview a server</h4>
-          <p class="hint">
-            Run a server in the OS (e.g.{" "}
-            <code>node -e "require('http').createServer((_,r)=&gt;r.end('hi')).listen(5173)"</code>
-            ), then open its port:
-          </p>
-          <div class="cmd-list">
-            <input
-              id="preview-port"
-              class="preview-input"
-              type="number"
-              placeholder="5173"
-              value="5173"
-            />
-            <span class="chip" onclick={() => window.__pgPreview()}>
-              open preview
-            </span>
-          </div>
-
-          <h4>Try a command</h4>
-          <div class="cmd-list">
-            {EXAMPLES.map((c) => (
-              <span class="chip" onclick={() => window.__pgRun(c)}>
-                {c}
-              </span>
-            ))}
-          </div>
-          <h4>Built-in coreutils</h4>
-          <p class="hint">
-            <code>echo cat ls cp mv rm mkdir pwd env true false</code> — each runs as
-            a real, <code>ps</code>-visible process.
-          </p>
-          <h4>Terminal</h4>
-          <p class="hint">
-            A real VT/ANSI terminal over a kernel TTY: line editing (Backspace,{" "}
-            <code>Ctrl-U</code>/<code>Ctrl-W</code>), <code>Ctrl-C</code> to
-            interrupt, <code>Ctrl-D</code> EOF, and <code>clear</code>. Pipes{" "}
-            <code>|</code>, redirects <code>&gt;</code>, <code>&amp;&amp;</code>{" "}
-            <code>||</code> <code>;</code>, glob, background <code>&amp;</code>, and{" "}
-            <code>cd</code>.
-          </p>
-        </aside>
       </div>
     </div>
   );
