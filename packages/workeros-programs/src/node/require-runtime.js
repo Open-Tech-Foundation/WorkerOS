@@ -19,6 +19,7 @@ import { createPath } from "./path.js";
 import { createOs } from "./os.js";
 import { createUrl } from "./url.js";
 import { createModule } from "./module.js";
+import { buffer as bufferModule } from "./buffer.js";
 
 // ---- core builtins --------------------------------------------------------
 // `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
@@ -44,6 +45,7 @@ export function makeBuiltins(sys, extras) {
     ["path/posix", path],
     ["os", os],
     ["url", url],
+    ["buffer", bufferModule],
   ]);
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.

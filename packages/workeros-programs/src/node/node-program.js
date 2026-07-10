@@ -186,6 +186,12 @@ const builtins = makeBuiltins(sys, nodeBuiltins);
 const fs = builtins.get("fs");
 const path = builtins.get("path");
 
+// Node globals a browser worker doesn't provide, installed before the script
+// loads: `global` (Node's alias for the global object) and `Buffer` (which a huge
+// amount of npm expects ambient — `Buffer.from(...)` at module top level).
+globalThis.global = globalThis;
+globalThis.Buffer = builtins.get("buffer").Buffer;
+
 const entryAbs = path.isAbsolute(script) ? path.normalize(script) : path.join(sys.cwd, script);
 let entryBytes;
 try {

@@ -8,6 +8,17 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`Buffer` (global + `node:buffer`) and the `global` alias** (`src/node/buffer.js`,
+  `node-program.js`). A browser worker has neither, and a huge share of npm expects
+  `Buffer` ambient (`Buffer.from(...)` at module top level), so both are now
+  installed before the script loads. `buffer.js` is a real Buffer — a `Uint8Array`
+  subclass (as in Node) with memory-sharing `slice`/`subarray`, the `from`/`alloc`
+  factories, encoding-aware `toString`/`write` (utf8, utf16le/ucs2, latin1/binary,
+  ascii, hex, base64, base64url), fixed- and variable-width numeric accessors
+  (8/16/32-bit LE+BE, BigInt64, float/double, plus Node's lowercase `Uint`
+  aliases), and `concat`/`compare`/`equals`/`copy`/`fill`/`indexOf`. Registered in
+  `makeBuiltins`, so `require('buffer')` and `import { Buffer } from 'node:buffer'`
+  resolve too. Unit-tested against Node's own Buffer as the oracle.
 - **Node event-loop keep-alive** (`src/node/event-loop.js`, `node-program.js`).
   `/bin/node` returned to the program worker the instant the script's synchronous
   top level settled, so a top-level `setInterval`/`setTimeout` never fired (the
