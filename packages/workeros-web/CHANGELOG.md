@@ -8,6 +8,14 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **Readline prompt** (`src/shell/readline.js`). The interactive shell prompt is
+  now a raw-mode line editor (like bash/readline) instead of the kernel cooked
+  discipline: ↑/↓ command history, in-line cursor movement (←/→, Home/End,
+  `Ctrl-A`/`E`/`B`/`F`), editing (Backspace, Del, `Ctrl-U`/`K`/`W`), and
+  `Ctrl-L`. While the prompt is active the REPL owns the terminal in raw mode and
+  echoes/redraws itself; a program that reads stdin still gets the kernel cooked
+  discipline. (Single-line only for now — no soft-wrap; UTF-8 across chunks and
+  bracketed paste are follow-ups.)
 - **Cooperative signals + `SIGWINCH`.** New protocol messages `SIGNAL`
   (kernel→program) and `SIGACTION` (program→kernel), and `sys.onSignal`/
   `sys.sighandle` on the ABI. A foreground process that installed a `SIGINT`

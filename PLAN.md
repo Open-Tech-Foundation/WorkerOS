@@ -82,12 +82,16 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
   Phase-5 `isTTY=false` stopgap. **Cooperative signals ✅** — a foreground process
   that installs a `SIGINT` handler catches `Ctrl-C` instead of being killed;
   `SIGWINCH` is delivered on resize (refreshing `process.stdout.columns`/`rows`);
-  `SIGTSTP` is delivered on `Ctrl-Z` (default: ignore). Remaining TTY follow-ups:
-  real **job control** (`SIGTSTP` suspend + `fg`/`bg`, process groups); async
-  signal delivery to **WASI** guests (only JS guests are cooperative today);
-  readline-style history + in-line cursor editing; a `require('tty')`/`node:tty`
-  builtin (gated on the node: builtin registry, Phase 5 §C); WASI termios/
-  window-size are not expressible in Preview 1.
+  `SIGTSTP` is delivered on `Ctrl-Z` (default: ignore). **Readline prompt ✅** —
+  the interactive prompt is a raw-mode line editor (`src/shell/readline.js`):
+  ↑/↓ history, in-line cursor movement (←/→, Home/End, `Ctrl-A`/`E`/`B`/`F`),
+  editing (Backspace, Del, `Ctrl-U`/`K`/`W`), `Ctrl-L`; programs reading stdin
+  still get the kernel cooked discipline. Remaining TTY follow-ups: real **job
+  control** (`SIGTSTP` suspend + `fg`/`bg`, process groups); async signal delivery
+  to **WASI** guests (only JS guests are cooperative today); **UTF-8-aware editing
+  + bracketed paste**, and multi-line/soft-wrap in the readline redraw; a
+  `require('tty')`/`node:tty` builtin (gated on the node: builtin registry, Phase 5
+  §C); WASI termios/window-size are not expressible in Preview 1.
 
 **Exit criteria:** `echo hi | cat > f && cat f` produces `hi`; `ps` lists live processes; a backgrounded job survives and is killable; coreutils pass a behavior test suite.
 

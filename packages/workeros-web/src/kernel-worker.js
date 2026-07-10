@@ -10,6 +10,7 @@
 import init, { WebKernel } from "./kernel-wasm/workeros_web_wasm.js";
 import { MSG } from "./protocol.js";
 import { createShell } from "./shell-exec.js";
+import { createLineEditor } from "./shell/readline.js";
 import { coreutils } from "../../workeros-coreutils/src/index.js";
 import { programs as osPrograms } from "../../workeros-programs/src/index.js";
 import { allocSyncBuffer, readRequest, writeResponse } from "./sync-syscall.js";
@@ -36,6 +37,8 @@ let termStarted = false;
 let execRunning = false; // a foreground command is running under the REPL
 let termWaiter = null; // { resolve } awaiting the next committed input line
 const foreground = new Set(); // pids of the current foreground pipeline (for ^C)
+const history = []; // interactive command history (for the readline prompt)
+let activeReadline = null; // the line editor while the prompt is being edited
 const caughtSignals = new Map(); // pid → Set<signal> the guest installed a handler for
 
 // Deliver a cooperative signal to a live JS program (posted to its worker).
@@ -109,15 +112,32 @@ function prompt() {
   return `${session.cwd === "/" ? "/" : session.cwd} $ `;
 }
 
+// Read one command line through the raw-mode line editor (history + cursor
+// editing). Resolves with the editor's result: a submitted line, an abort (^C),
+// or EOF (^D on an empty line).
+function readCommandLine() {
+  return new Promise((resolve) => {
+    const editor = createLineEditor({
+      prompt: prompt(),
+      history,
+      write: (s) => termOut(enc.encode(s)),
+      done: (r) => { activeReadline = null; resolve(r); },
+    });
+    activeReadline = editor;
+    editor.start();
+  });
+}
+
 // The interactive read-eval-print loop, reading command lines from the TTY.
 async function repl() {
   for (;;) {
-    termOut(enc.encode(prompt()));
-    const lineBytes = await waitForLine();
-    if (lineBytes === INTERRUPT) continue; // ^C at the prompt → fresh prompt
-    const line = dec.decode(lineBytes).replace(/\n$/, "");
+    const res = await readCommandLine();
+    if (res.aborted || res.eof) continue; // ^C / ^D on empty → fresh prompt
+    const line = res.line;
     const trimmed = line.trim();
     if (trimmed === "") continue;
+    // Record non-empty lines in history, collapsing immediate duplicates.
+    if (history[history.length - 1] !== line) history.push(line);
     // Two conveniences the browser page used to own; now terminal-side. `clear`
     // is an ANSI screen wipe; `ps` formats the live process table.
     if (trimmed === "clear") {
@@ -543,14 +563,21 @@ self.onmessage = async (ev) => {
         break;
 
       case MSG.TTY_INPUT: {
-        // Raw keystrokes from xterm → the kernel line discipline. It returns the
-        // bytes to echo and any control-key signal.
+        // While the shell prompt is being edited, the REPL owns the terminal in
+        // raw mode: keystrokes go straight to the line editor (its own echo +
+        // editing), bypassing the kernel's cooked discipline.
+        if (activeReadline) {
+          activeReadline.feed(msg.data);
+          break;
+        }
+        // Otherwise a program (or the `read` builtin) is reading: run keystrokes
+        // through the kernel cooked line discipline (echo + control-key signals).
         const res = kernel.tty_input(msg.data);
         termOut(res.echo);
         if (res.signal === "int") onInterrupt();
         else if (res.signal === "susp") onSusp();
         // A committed line may now unblock a foreground program's read, or the
-        // REPL / `read` builtin waiting on the prompt.
+        // `read` builtin waiting on the prompt.
         retryPendingReads();
         retrySyncPending();
         pumpWaiter();
