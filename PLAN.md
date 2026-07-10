@@ -75,10 +75,14 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
   over the wasm bindings. The kernel worker runs the shell REPL against the TTY; the
   playground renders it with **xterm.js** (vendored same-origin), shipping raw
   keystrokes to `os.input()` and painting `os.onOutput()`. Verified end-to-end in a
-  headless browser (pipes, line editing, `Ctrl-C` interrupt). Remaining TTY follow-ups:
-  `SIGWINCH` delivery to the foreground process, wiring `isatty`/termios/winsize
-  through to WASI guests (`fd_fdstat_get` character-device) and the node layer
-  (`process.stdout.isTTY`, reversing the Phase-5 stopgap), and readline-style history.
+  headless browser (pipes, line editing, `Ctrl-C` interrupt). **Guest terminal
+  awareness ✅** — WASI `isatty(0..2)` returns true (stdio is a non-seekable
+  character device) and the node runtime sets `process.*.isTTY` +
+  `stdout.columns`/`rows` (via new `isatty`/`winsize` syscalls), reversing the
+  Phase-5 `isTTY=false` stopgap. Remaining TTY follow-ups: `SIGWINCH` delivery to
+  the foreground process; readline-style history + in-line cursor editing; a
+  `require('tty')`/`node:tty` builtin (gated on the node: builtin registry, Phase 5
+  §C); WASI termios/window-size are not expressible in Preview 1.
 
 **Exit criteria:** `echo hi | cat > f && cat f` produces `hi`; `ps` lists live processes; a backgrounded job survives and is killable; coreutils pass a behavior test suite.
 

@@ -8,6 +8,9 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`isatty`/`winsize` syscalls** — the program worker's `sys` ABI gains
+  `isatty(fd)` and `winsize()`, serviced by the kernel worker from the kernel TTY,
+  so guests (WASI + the node runtime) can detect the terminal and its size.
 - **`echo -e`/`-E` in the shell** — the `wsh` `echo` builtin now interprets
   backslash escapes under `-e` (`\n \t \r \e \a \b \f \v \\`, `\xHH`, `\0NNN`,
   `\c`), option groups combine (`-ne`), so `echo -e "\e[31m…"` emits real ANSI.

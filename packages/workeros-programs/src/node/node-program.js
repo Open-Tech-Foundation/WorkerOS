@@ -28,7 +28,18 @@ if (!script) {
 // before the script loads so its top-level code sees it.
 const toBytes = (chunk) =>
   typeof chunk === "string" ? enc.encode(chunk) : new Uint8Array(chunk);
-const stream = (fd) => ({ write(chunk) { sys.write(fd, toBytes(chunk)); return true; } });
+// Query the controlling terminal once at startup: is each stdio fd a TTY, and its
+// size. process.std*.isTTY must be a plain boolean (Node code reads it
+// synchronously), so we resolve it here rather than on each access. (This is what
+// makes chalk/ora/readline detect a terminal — reversing the old isTTY=false stub.)
+const [in0, out1, err2, ws] = await Promise.all([
+  sys.isatty(0), sys.isatty(1), sys.isatty(2), sys.winsize(),
+]);
+const stream = (fd, isTTY) => {
+  const s = { write(chunk) { sys.write(fd, toBytes(chunk)); return true; }, isTTY };
+  if (isTTY) { s.columns = ws.cols; s.rows = ws.rows; }
+  return s;
+};
 globalThis.process = {
   // Node convention: argv[0] is the runtime, argv[1] the script.
   argv: ["node", ...sys.argv.slice(1)],
@@ -37,8 +48,9 @@ globalThis.process = {
   // A truthful, non-Node-fidelity version tag (INV-5): we are not Node.
   version: "workeros-node/0.0.0",
   cwd: () => sys.cwd,
-  stdout: stream(1),
-  stderr: stream(2),
+  stdin: { isTTY: in0 },
+  stdout: stream(1, out1),
+  stderr: stream(2, err2),
   // sys.exit reports the code to the kernel and throws to unwind the current tick,
   // exactly like Node's non-returning process.exit.
   exit: (code = 0) => sys.exit(code | 0),

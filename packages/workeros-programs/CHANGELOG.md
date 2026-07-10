@@ -8,6 +8,14 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **Terminal awareness for guests.** WASI programs now see stdio (fd 0/1/2) as a
+  non-seekable character device, so `isatty(0..2)` returns true on the terminal
+  (the WASI host clears the `FD_SEEK`/`FD_TELL` rights that made libc report
+  false). The Node runtime sets `process.stdin/stdout/stderr.isTTY` and, on a TTY,
+  `process.stdout.columns`/`rows` from the kernel window size — reversing the
+  earlier `isTTY=false` stub, so `readline`/`chalk`-style TTY detection works.
+  (WASI termios/window-size ioctls remain out of reach in Preview 1; a
+  `require('tty')` builtin awaits the node: builtin registry.)
 - **Program registry** (`src/index.js`) — one extensible list the kernel worker
   installs into the VFS at boot. Adding a program is a single entry (no package per
   program). Entries carry a `type` (`js` now, `wasm` later).

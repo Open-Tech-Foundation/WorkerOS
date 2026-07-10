@@ -368,6 +368,12 @@ function handleSyscall(pid, msg) {
       case "readdir":
         reply(pid, id, true, kernel.sys_readdir(pid, args.path));
         break;
+      case "isatty":
+        reply(pid, id, true, kernel.isatty(pid, args.fd));
+        break;
+      case "winsize":
+        reply(pid, id, true, kernel.tty_get_winsize());
+        break;
       case "stat":
         reply(pid, id, true, kernel.sys_stat(pid, args.path));
         break;

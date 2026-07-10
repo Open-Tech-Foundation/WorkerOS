@@ -26,6 +26,10 @@ const FILETYPE_CHARACTER_DEVICE = 2;
 const FILETYPE_DIRECTORY = 3;
 const FILETYPE_REGULAR_FILE = 4;
 
+// __wasi_rights_t bits used to decide isatty (a TTY is a non-seekable chardev).
+const RIGHTS_FD_SEEK = 1n << 2n;
+const RIGHTS_FD_TELL = 1n << 5n;
+
 // oflags
 const O_CREAT = 1;
 const O_DIRECTORY = 2;
@@ -146,10 +150,16 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
 
     fd_fdstat_get: (fd, ptr) => {
       const dv = view();
-      const ft = fd <= 2 ? FILETYPE_CHARACTER_DEVICE : fd === PREOPEN_FD ? FILETYPE_DIRECTORY : FILETYPE_REGULAR_FILE;
+      const isTty = fd <= 2;
+      const ft = isTty ? FILETYPE_CHARACTER_DEVICE : fd === PREOPEN_FD ? FILETYPE_DIRECTORY : FILETYPE_REGULAR_FILE;
       dv.setUint8(ptr, ft);
       dv.setUint16(ptr + 2, 0, true);
-      dv.setBigUint64(ptr + 8, 0xffffffffffffffffn, true);
+      // fs_rights_base. wasi-libc's isatty() is `filetype == character_device &&
+      // no FD_SEEK/FD_TELL rights` — a terminal isn't seekable. So for stdio we
+      // advertise all rights *minus* seek/tell, which is what makes isatty(0..2)
+      // return true. Files keep every right (they are seekable).
+      const rights = isTty ? 0xffffffffffffffffn & ~(RIGHTS_FD_SEEK | RIGHTS_FD_TELL) : 0xffffffffffffffffn;
+      dv.setBigUint64(ptr + 8, rights, true);
       dv.setBigUint64(ptr + 16, 0xffffffffffffffffn, true);
       return ERRNO_SUCCESS;
     },

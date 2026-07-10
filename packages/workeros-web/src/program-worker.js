@@ -63,6 +63,10 @@ function makeSys(start) {
     },
     open: (path, opts = {}) => call("open", { path, opts }),
     close: (fd) => call("close", { fd }),
+    // Terminal introspection: is this fd the controlling terminal, and how big is
+    // it. Guests query these once at startup (e.g. process.stdout.isTTY/columns).
+    isatty: (fd) => call("isatty", { fd }),
+    winsize: () => call("winsize", {}),
     readdir: (path) => call("readdir", { path }),
     stat: (path) => call("stat", { path }),
     mkdir: (path) => call("mkdir", { path }),
