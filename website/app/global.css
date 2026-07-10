@@ -267,22 +267,10 @@ pre.code .a { color: var(--accent-soft); }
   min-height: 0; display: flex; flex-direction: column;
   background: #0b0c0f; border-right: 1px solid var(--line-soft);
 }
-.term-screen {
-  flex: 1; overflow-y: auto; padding: 18px 20px;
-  font-family: var(--mono); font-size: 13px; line-height: 1.55;
-  white-space: pre-wrap; word-break: break-word; color: #d7dbe4;
-}
-.term-screen .cmd { color: var(--accent-soft); }
-.term-screen .err { color: var(--red); }
-.term-screen .sys { color: var(--text-faint); }
-.term-screen .ok { color: var(--green); }
-.term-form { display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--line-soft); }
-.term-prompt { color: var(--accent); font-family: var(--mono); font-size: 13px; white-space: pre; user-select: none; }
-.term-input {
-  flex: 1; background: transparent; border: none; outline: none;
-  color: var(--text); font-family: var(--mono); font-size: 13px;
-}
-.term-input:disabled { opacity: 0.4; }
+/* The xterm.js mount: a real VT emulator driven by the kernel TTY. */
+.term-screen { flex: 1; min-height: 0; padding: 12px 8px 12px 14px; }
+.term-screen .xterm { height: 100%; }
+.term-screen .xterm-viewport { background: transparent !important; }
 
 .pg-side { padding: 20px; overflow-y: auto; background: var(--bg-elev); }
 .pg-side h4 { margin: 0 0 10px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); }

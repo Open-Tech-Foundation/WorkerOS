@@ -68,7 +68,17 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 - IPC pipes via `otf:ipc_open` so `A | B` streams concurrently (§6.3, ADR-006).
 - Coreutils as guest programs against the VFS: `ls cat cp mv rm mkdir echo pwd env true false`.
 - `ps` / `jobs` / background `&` reading the process table.
-- xterm-style terminal binding on the host (optional demo).
+- xterm-style terminal binding on the host. **✅ done** — a real **TTY layer**: the
+  kernel owns a controlling-terminal device (`workeros-kernel/tty.rs`) with a line
+  discipline (canonical/raw, echo, editing, `Ctrl-C`/`Ctrl-D`/`Ctrl-Z`, winsize),
+  terminal `stdin` reads block through it, and `isatty`/termios/winsize are exposed
+  over the wasm bindings. The kernel worker runs the shell REPL against the TTY; the
+  playground renders it with **xterm.js** (vendored same-origin), shipping raw
+  keystrokes to `os.input()` and painting `os.onOutput()`. Verified end-to-end in a
+  headless browser (pipes, line editing, `Ctrl-C` interrupt). Remaining TTY follow-ups:
+  `SIGWINCH` delivery to the foreground process, wiring `isatty`/termios/winsize
+  through to WASI guests (`fd_fdstat_get` character-device) and the node layer
+  (`process.stdout.isTTY`, reversing the Phase-5 stopgap), and readline-style history.
 
 **Exit criteria:** `echo hi | cat > f && cat f` produces `hi`; `ps` lists live processes; a backgrounded job survives and is killable; coreutils pass a behavior test suite.
 

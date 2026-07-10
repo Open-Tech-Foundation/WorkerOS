@@ -11,9 +11,14 @@ Notable changes to the WorkerOS website + live playground, built with the
 - **Landing page** (`/`) — hero, feature grid, architecture code sample, and the
   milestone roadmap, in an OTF-flavored dark theme.
 - **Playground** (`/playground`) — boots the real Rust→WASM kernel inside a Web
-  Worker and drives `wsh`: the terminal accepts commands and executes them on
-  Enter, streaming stdout/stderr from real, `ps`-visible processes; includes
-  command history (↑/↓), `clear`, and clickable examples.
+  Worker and drives `wsh` through a **real VT/ANSI terminal** (xterm.js, vendored
+  same-origin under `public/vendor/xterm/`). Keystrokes are shipped raw to the
+  kernel's TTY device (`os.input`), which owns echo, line editing, `Ctrl-C`/
+  `Ctrl-D`, and raw/cooked modes; the page just paints the bytes the kernel
+  streams back (`os.onOutput`) and reports window size on resize (`os.resize`).
+  Programs run as real, `ps`-visible processes; `clear` and `ps` are handled by
+  the kernel-side REPL. (Command history via ↑/↓ is not yet reimplemented on the
+  cooked-TTY path.)
 - **Runtime sync** (`tools/sync-runtime.mjs`) — mirrors the three WorkerOS runtime
   packages into `public/workeros/` (layout preserved so the workers' relative
   imports resolve); runs before `dev`/`build`.
