@@ -372,6 +372,102 @@ test("nano: mark (^6) + copy (M-6) + paste (^U) duplicates a selection", opts, a
   assert.equal(buf.saved, "hello world\nhello world\n", "the copied selection was pasted on the new line");
 });
 
+test("nano: status bar shows Ln/Col, language, and EOL segments", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/sb.js", "let a = 1;\n");
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /sb.js\r");
+    await waitFor("nano");
+    await sleep(120);
+    const atOpen = { pos: out.includes("Ln 1, Col 1"), lang: out.includes("JavaScript"), eol: out.includes("LF") };
+    out = "";
+    os.input("xy"); // move the cursor to column 3
+    await sleep(120);
+    const afterType = out.includes("Ln 1, Col 3");
+    os.input("\x18"); // ^X — buffer is dirty; answer No to discard
+    await sleep(80);
+    os.input("n");
+    await sleep(80);
+    return { atOpen, afterType };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.atOpen.pos, true, "status bar shows Ln 1, Col 1 at open");
+  assert.equal(buf.atOpen.lang, true, "status bar shows the detected language (JavaScript)");
+  assert.equal(buf.atOpen.eol, true, "status bar shows the EOL (LF)");
+  assert.equal(buf.afterType, true, "the Col segment tracks the cursor");
+});
+
+test("nano: ^G opens a shortcuts dialog; any key dismisses it", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /d.txt\r");
+    await waitFor("nano");
+    os.input("\x07"); // ^G
+    await waitFor("Shortcuts");
+    const box = out.includes("┌") && out.includes("Write Out") && out.includes("Command Palette");
+    out = "";
+    os.input(" "); // any key dismisses
+    await sleep(120);
+    const dismissed = !out.includes("Shortcuts");
+    os.input("\x18"); await sleep(100); // clean buffer, exits
+    return { box, dismissed };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.box, true, "the dialog renders a box with shortcut labels");
+  assert.equal(buf.dismissed, true, "a keypress closes the dialog and the editor repaints");
+});
+
+test("nano: M-p command palette filters and runs a command", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /p.txt\r");
+    await waitFor("nano");
+    os.input("\x1bp"); // M-p
+    await waitFor("Command Palette");
+    os.input("soft"); // fuzzy-filters to "Toggle Soft Wrap"
+    await sleep(120);
+    os.input("\r"); // run it
+    await waitFor("Soft wrap on");
+    os.input("\x18"); await sleep(100);
+    return { ok: true };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.ok, true);
+});
+
 test("nano: Tab inserts spaces by default (VSCode-style) and shows the indicator", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();

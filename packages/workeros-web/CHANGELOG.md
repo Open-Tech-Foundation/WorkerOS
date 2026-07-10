@@ -8,6 +8,14 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`nano` modernized chrome** (VSCode-style). The two always-on shortcut bars and
+  the separate message bar are replaced by a **single status bar** on the last row:
+  a transient message / discoverability hint on the left, and `Ln, Col` · indent ·
+  language · EOL (LF/CRLF) segments on the right. This frees **two editing rows**
+  (chrome is now title + status). `^G` opens a centered **shortcuts dialog** over the
+  buffer (any key dismisses); `M-p` opens a fuzzy **command palette** (type to filter,
+  ↑/↓ to select, Enter to run, Esc to cancel). The hardcoded `TABSTOP` having become
+  `tabWidth`, `textRows` is now `screenRows - 2`.
 - **`nano` tabs-vs-spaces indentation** (VSCode-style). Tab inserts spaces or a real
   `\t` per the current mode; in spaces mode one Backspace over leading whitespace
   removes a whole soft-tab. The mode + size are **detected** from the file on open

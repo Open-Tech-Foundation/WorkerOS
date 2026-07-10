@@ -62,7 +62,7 @@ let dirty = false; // unsaved changes?
 let statusmsg = ""; // the message-bar text
 let screenRows = 24;
 let screenCols = 80;
-let textRows = 20; // editable rows = screenRows - 4 chrome rows
+let textRows = 20; // editable rows = screenRows - 2 chrome rows (title + status)
 let cutBuffer = ""; // text held by ^K / copy, re-inserted by ^U (may span lines)
 let lastWasCut = false; // consecutive line ^K accumulate into cutBuffer
 let mark = null; // selection anchor { cy, cx }, or null (^6 sets/clears)
@@ -123,7 +123,7 @@ async function updateSize() {
   const ws = await sys.winsize();
   screenRows = Math.max(ws.rows | 0, 4);
   screenCols = Math.max(ws.cols | 0, 8);
-  textRows = Math.max(screenRows - 4, 1);
+  textRows = Math.max(screenRows - 2, 1); // chrome = title bar + status bar
 }
 
 // ---- width + rendering helpers ---------------------------------------------
@@ -591,9 +591,15 @@ const HL_SGR = {
   7: "\x1b[38;5;211m", // accent   — pink (md heading, etc.)
 };
 const hlSgr = (c) => (c ? HL_SGR[c] : "\x1b[39m");
+const LANG_NAMES = {
+  js: "JavaScript", json: "JSON", sh: "Shell", py: "Python", go: "Go",
+  rust: "Rust", c: "C/C++", css: "CSS", yaml: "YAML", toml: "TOML", md: "Markdown",
+};
 
 const INVERSE = "\x1b[7m";
 const RESET = "\x1b[0m";
+// VSCode-style status bar: bright text on a blue background (256-color).
+const STATUS = "\x1b[48;5;24m\x1b[38;5;231m";
 // 24-bit (true-color) SGR helpers. The playground terminal (xterm.js) renders
 // these directly; a real xterm does too. Used for the line-number gutter.
 const fg = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
@@ -605,6 +611,20 @@ const fit = fitCols;
 
 function shortcut(key, label) {
   return `${INVERSE}${key}${RESET} ${label}`;
+}
+
+// The status-bar text, sized to exactly `screenCols` columns: a message or a
+// discoverability hint on the left, position/indent/language/EOL on the right.
+function statusBar() {
+  const posSeg = `Ln ${cy + 1}, Col ${cx + 1}`;
+  const indSeg = expandTab ? `Spaces: ${indentSize}` : `Tab Size: ${tabWidth}`;
+  const langSeg = lang ? LANG_NAMES[lang] : "Plain Text";
+  const eolSeg = lineEnding === "\r\n" ? "CRLF" : lineEnding === "\r" ? "CR" : "LF";
+  const right = [posSeg, indSeg, langSeg, eolSeg].join("   ");
+  const left = statusmsg || "^G Help   M-p Palette";
+  const leftRoom = screenCols - dispWidth(right) - 2; // 1 gap + 1 right margin
+  if (leftRoom >= 1) return fit(left, leftRoom) + " " + right + " ";
+  return fit(left, screenCols);
 }
 
 // The selected render-column span [lo, hi) on document row `r`, or null. Built
@@ -685,38 +705,11 @@ function refresh() {
   }
   for (; sl < textRows; sl++) out += "\x1b[K\r\n"; // blank rows past the buffer
 
-  // Message bar: status text on the left, a VSCode-style indent indicator on the
-  // right (`Spaces: 4` / `Tab Size: 8`). Keep a one-column right margin so the
-  // indicator never lands in the last cell — where a web terminal's scrollbar /
-  // magic-margin wrap would clip it. It also yields to the message when the screen
-  // is too narrow to show both, so a status line is never truncated.
-  const indicator = expandTab ? `Spaces: ${indentSize}` : `Tab Size: ${tabWidth}`;
-  const iw = dispWidth(indicator);
-  const room = screenCols - iw - 2; // 1 gap before the indicator + 1 margin after
-  if (room >= 0 && dispWidth(statusmsg) <= room)
-    out += fit(statusmsg, room) + " " + indicator + " " + "\r\n";
-  else out += fit(statusmsg, screenCols) + "\r\n";
-
-  // Two shortcut bars.
-  const bar1 = [
-    shortcut("^G", "Help"),
-    shortcut("^O", "Write Out"),
-    shortcut("^W", "Where Is"),
-    shortcut("^\\", "Replace"),
-    shortcut("^K", "Cut"),
-    shortcut("^C", "Cur Pos"),
-  ].join("  ");
-  const bar2 = [
-    shortcut("^X", "Exit"),
-    shortcut("^U", "Paste"),
-    shortcut("M-U", "Undo"),
-    shortcut("M-E", "Redo"),
-    shortcut("^E", "End"),
-    shortcut("^_", "Go To Line"),
-  ].join("  ");
-  // fit() can't count the invisible ANSI, so just clear-to-EOL after each.
-  out += bar1 + "\x1b[K\r\n";
-  out += bar2 + "\x1b[K";
+  // Status bar (last row, VSCode-style): a transient message or a discoverability
+  // hint on the left; position / indent / language / EOL segments on the right. A
+  // one-column right margin keeps the last segment clear of a scrollbar/magic
+  // margin. The right side yields to the message only if the screen is too narrow.
+  out += `\x1b[${screenRows};1H` + STATUS + fit(statusBar(), screenCols) + RESET;
 
   // Place the cursor: find the screen row in visualMap whose segment holds it.
   const rx = cxToRx(rows[cy], cx);
@@ -1073,8 +1066,8 @@ function handleMouse(m) {
 async function promptLine(label, initial = "", complete = null) {
   let s = initial, p = s.length; // text and cursor index (code units)
   const draw = () => {
-    write(`\x1b[${screenRows - 2};1H${INVERSE}${fit(label + s, screenCols)}${RESET}` +
-      `\x1b[${screenRows - 2};${Math.min(dispWidth(label + s.slice(0, p)) + 1, screenCols)}H\x1b[?25h`);
+    write(`\x1b[${screenRows};1H${INVERSE}${fit(label + s, screenCols)}${RESET}` +
+      `\x1b[${screenRows};${Math.min(dispWidth(label + s.slice(0, p)) + 1, screenCols)}H\x1b[?25h`);
   };
   promptRedraw = draw;
   try {
@@ -1121,7 +1114,7 @@ async function completeFilename(s) {
 }
 // A yes/no/cancel prompt. Returns true (yes), false (no), or null (cancel).
 async function promptYesNo(label) {
-  const draw = () => write(`\x1b[${screenRows - 2};1H${INVERSE}${fit(label + " [Y/N]", screenCols)}${RESET}`);
+  const draw = () => write(`\x1b[${screenRows};1H${INVERSE}${fit(label + " [Y/N]", screenCols)}${RESET}`);
   promptRedraw = draw;
   try {
     for (;;) {
@@ -1151,6 +1144,117 @@ async function setIndent() {
   if (toTabs) tabWidth = size;
   else { indentSize = size; tabWidth = size; } // keep a stray \t aligned to the unit
   setMsg(expandTab ? `Spaces: ${indentSize}` : `Tab Size: ${tabWidth}`);
+}
+
+// ---- overlays: shortcuts dialog + command palette --------------------------
+// A centered, box-drawn modal painted over the buffer with absolute cursor moves.
+// `lines` are the body; `footer` (optional) is centered under a blank separator.
+function overlayBox(title, lines, footer) {
+  const PANEL = "\x1b[48;5;236m\x1b[38;5;253m"; // grey panel
+  const ACCENT = "\x1b[48;5;236m\x1b[38;5;117m"; // cyan title/footer
+  const bodyW = Math.max(
+    dispWidth(title) + 2, footer ? dispWidth(footer) : 0, ...lines.map(dispWidth), 20,
+  );
+  const innerW = bodyW + 2; // 1 space of padding on each side of the body
+  const boxH = lines.length + (footer ? 2 : 0) + 2;
+  const top = Math.max(1, Math.floor((screenRows - boxH) / 2) + 1);
+  const leftCol = Math.max(1, Math.floor((screenCols - (innerW + 2)) / 2) + 1);
+  const at = (r) => `\x1b[${top + r};${leftCol}H`;
+  const tt = ` ${title} `;
+  const pad = innerW - dispWidth(tt), lp = Math.floor(pad / 2);
+  let r = 0, s = "";
+  s += at(r++) + PANEL + "┌" + "─".repeat(lp) + ACCENT + tt + PANEL + "─".repeat(pad - lp) + "┐" + RESET;
+  for (const ln of lines) s += at(r++) + PANEL + "│ " + fit(ln, innerW - 2) + " │" + RESET;
+  if (footer) {
+    s += at(r++) + PANEL + "│ " + fit("", innerW - 2) + " │" + RESET;
+    const fpad = innerW - dispWidth(footer), flp = Math.floor(fpad / 2);
+    s += at(r++) + PANEL + "│" + " ".repeat(flp) + ACCENT + footer + PANEL + " ".repeat(fpad - flp) + "│" + RESET;
+  }
+  s += at(r++) + PANEL + "└" + "─".repeat(innerW) + "┘" + RESET;
+  return s + "\x1b[?25l"; // keep the cursor hidden while a modal is up
+}
+
+// ^G: a two-column keybinding cheat-sheet, dismissed by any key.
+async function showShortcuts() {
+  const SC = [
+    ["^O", "Write Out"], ["^R", "Insert File"],
+    ["^W", "Where Is"], ["^\\", "Replace"],
+    ["^6", "Mark"], ["M-6", "Copy"],
+    ["^K", "Cut"], ["^U", "Paste"],
+    ["M-U", "Undo"], ["M-E", "Redo"],
+    ["^_", "Go To Line"], ["^C", "Cursor Pos"],
+    ["M-y", "Syntax"], ["M-t", "Indent"],
+    ["M-n", "Line Numbers"], ["M-i", "Auto-indent"],
+    ["M-$", "Soft Wrap"], ["M-p", "Command Palette"],
+    ["^X", "Exit"],
+  ];
+  const cell = ([k, l]) => (k ? fit(k, 4) + l : "");
+  const lines = [];
+  for (let i = 0; i < SC.length; i += 2)
+    lines.push(fit(cell(SC[i]), 20) + cell(SC[i + 1] || ["", ""]));
+  write(overlayBox("Shortcuts", lines, "press any key"));
+  await nextKey();
+}
+
+// The commands offered by the palette (M-p). `exit` unwinds the main loop.
+function paletteCommands() {
+  return [
+    { name: "Save", run: () => writeOut() },
+    { name: "Insert File", run: () => insertFile() },
+    { name: "Find", run: () => search() },
+    { name: "Replace", run: () => replace() },
+    { name: "Go to Line", run: () => gotoLine() },
+    { name: "Copy", run: () => copySelection() },
+    { name: "Cut Line/Selection", run: () => { cutLine(); } },
+    { name: "Paste", run: () => pasteCut() },
+    { name: "Undo", run: () => undo() },
+    { name: "Redo", run: () => redo() },
+    { name: "Cursor Position", run: () => cursorPosition() },
+    { name: "Set Indentation…", run: () => setIndent() },
+    { name: "Toggle Syntax Highlighting", run: () => { syntax = !syntax; setMsg(`Syntax ${syntax ? "on" : "off"}`); } },
+    { name: "Toggle Line Numbers", run: () => { showLineNumbers = !showLineNumbers; setMsg(`Line numbers ${showLineNumbers ? "on" : "off"}`); } },
+    { name: "Toggle Auto-indent", run: () => { autoIndent = !autoIndent; setMsg(`Auto-indent ${autoIndent ? "on" : "off"}`); } },
+    { name: "Toggle Soft Wrap", run: () => { softWrap = !softWrap; coloff = 0; setMsg(`Soft wrap ${softWrap ? "on" : "off"}`); } },
+    { name: "Exit", run: () => {}, exit: true },
+  ];
+}
+// Case-insensitive subsequence filter (keeps list order) — the usual fuzzy match.
+function fuzzyFilter(items, q) {
+  if (!q) return items;
+  const ql = q.toLowerCase();
+  return items.filter((it) => {
+    let j = 0;
+    const n = it.name.toLowerCase();
+    for (const ch of ql) { j = n.indexOf(ch, j); if (j < 0) return false; j += 1; }
+    return true;
+  });
+}
+// M-p: a fuzzy command palette. Returns the chosen command, or null if cancelled.
+async function commandPalette() {
+  const all = paletteCommands();
+  let q = "", sel = 0;
+  const draw = () => {
+    const matches = fuzzyFilter(all, q);
+    if (sel >= matches.length) sel = Math.max(0, matches.length - 1);
+    const rows = matches.slice(0, 8).map((m, i) => (i === sel ? "› " : "  ") + m.name);
+    refresh(); // repaint the buffer so a shrinking box leaves no artifacts
+    write(overlayBox("Command Palette", [`> ${q}`].concat(rows.length ? rows : ["  (no matches)"])));
+  };
+  promptRedraw = draw;
+  try {
+    for (;;) {
+      draw();
+      const k = await nextKey();
+      if (k.key === "esc" || k.ctrl === "C") return null;
+      if (k.key === "enter") return fuzzyFilter(all, q)[sel] || null;
+      else if (k.key === "up") sel = Math.max(0, sel - 1);
+      else if (k.key === "down") sel += 1;
+      else if (k.key === "backspace") { q = q.slice(0, -1); sel = 0; }
+      else if (k.char && k.char !== "\t") { q += k.char; sel = 0; }
+    }
+  } finally {
+    promptRedraw = null;
+  }
 }
 
 // ---- file I/O --------------------------------------------------------------
@@ -1252,8 +1356,8 @@ async function promptSearch(label, opts) {
   const draw = () => {
     const flags =
       (opts.caseSens ? " [Case]" : "") + (opts.regex ? " [Regex]" : "") + (opts.backward ? " [Back]" : "");
-    write(`\x1b[${screenRows - 2};1H${INVERSE}${fit(label + s + flags, screenCols)}${RESET}` +
-      `\x1b[${screenRows - 2};${Math.min(dispWidth(label + s.slice(0, p)) + 1, screenCols)}H\x1b[?25h`);
+    write(`\x1b[${screenRows};1H${INVERSE}${fit(label + s + flags, screenCols)}${RESET}` +
+      `\x1b[${screenRows};${Math.min(dispWidth(label + s.slice(0, p)) + 1, screenCols)}H\x1b[?25h`);
   };
   promptRedraw = draw;
   try {
@@ -1290,7 +1394,7 @@ async function search() {
 }
 // A yes/no/all/cancel prompt for the replace loop.
 async function promptReplace() {
-  const draw = () => write(`\x1b[${screenRows - 2};1H${INVERSE}${fit("Replace this instance? [Y/N/A]", screenCols)}${RESET}`);
+  const draw = () => write(`\x1b[${screenRows};1H${INVERSE}${fit("Replace this instance? [Y/N/A]", screenCols)}${RESET}`);
   promptRedraw = draw;
   try {
     for (;;) {
@@ -1438,6 +1542,10 @@ async function main() {
           setMsg(!syntax ? "Syntax highlighting off"
             : lang ? `Syntax highlighting on (${lang})` : "Syntax highlighting on (plain)");
         } else if (k.alt === "t") await setIndent();
+        else if (k.alt === "p") {
+          const cmd = await commandPalette();
+          if (cmd) { if (cmd.exit) { if (await tryExit()) return; } else await cmd.run(); }
+        }
       } else if (k.ctrl) {
         switch (k.ctrl) {
           case "X": if (await tryExit()) return; break; // finally restores the TTY
@@ -1448,7 +1556,7 @@ async function main() {
           case "^": toggleMark(); break; // ^6 : set/clear the selection mark
           case "K": isCut = cutLine(); break;
           case "U": pasteCut(); break;
-          case "G": setMsg("^O save ^R insert ^W find ^\\ replace ^6 mark M-6 copy M-U/M-E undo/redo M-y syntax M-t indent ^X exit"); break;
+          case "G": await showShortcuts(); break; // centered dialog of keybindings
           case "C": cursorPosition(); break;
           case "A": gotoHome(); break;
           case "E": gotoEnd(); break;
