@@ -71,7 +71,10 @@ test("cooked prompt: echoes typed input and runs a pipeline", opts, async () => 
   assert.match(buf, /hello/, "runs the pipeline and shows its output");
 });
 
-test("line editing: Backspace rubs out the last character", opts, async () => {
+test("kernel cooked discipline: Backspace editing when a program reads stdin", opts, async () => {
+  // The prompt uses raw-mode readline, but a program that reads stdin gets the
+  // kernel's cooked line discipline — including the \b \b rub-out echo. Exercise
+  // it through `cat`, which reads a line and writes it back.
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();
     const dec = new TextDecoder();
@@ -87,22 +90,50 @@ test("line editing: Backspace rubs out the last character", opts, async () => {
       throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out));
     };
     await waitFor("$");
-    // "echX" then DEL (0x7f) then "o edited" → runs `echo edited`.
-    os.input("echX");
-    os.input(String.fromCharCode(0x7f));
-    os.input("o edited\r");
-    await waitFor("edited");
+    os.input("cat\r"); // cat now reads stdin under the cooked discipline
+    await new Promise((r) => setTimeout(r, 250));
+    os.input("heX");
+    os.input(String.fromCharCode(0x7f)); // Backspace erases the X
+    os.input("llo\r"); // commits "hello\n"; cat echoes it back
+    await waitFor("hello");
+    os.input(String.fromCharCode(0x04)); // Ctrl-D ends cat
     return out;
   });
   assert.deepEqual(pageErrors, []);
-  // The rubout is echoed as backspace-space-backspace (the raw stream still
-  // contains the typed "X" — that is what a real terminal emits — but it is
-  // immediately erased)…
-  assert.ok(buf.includes("\b \b"), "Backspace echoes a rub-out (\\b \\b)");
-  // …and, crucially, the command that ran was `echo edited`, not a corrupted
-  // `echXo`: the output is clean and there is no command-not-found.
-  assert.match(buf, /edited/);
-  assert.doesNotMatch(buf, /echXo|not found|NotFound/, "the edited-out char never reached argv");
+  assert.ok(buf.includes("\b \b"), "kernel cooked mode echoes a rub-out (\\b \\b)");
+  assert.match(buf, /hello/, "cat received the edited line");
+  assert.doesNotMatch(buf, /heXllo/, "the deleted char never reached the program");
+});
+
+test("prompt readline: history recall + in-line editing", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out));
+    };
+    await waitFor("$");
+    os.input("echo first\r");
+    await waitFor("first");
+    // Up-arrow recalls "echo first"; Backspace ×5 removes "first"; type "second".
+    os.input("\x1b[A");
+    for (let i = 0; i < 5; i++) os.input(String.fromCharCode(0x7f));
+    os.input("second\r");
+    await waitFor("second");
+    return out;
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.match(buf, /second/, "recalled + edited command ran");
+  // The edited command was `echo second`, not `echo firstsecond`.
+  assert.doesNotMatch(buf, /firstsecond/, "history line was edited before running");
 });
 
 test("control bytes and arrow keys never leak into argv", opts, async () => {
