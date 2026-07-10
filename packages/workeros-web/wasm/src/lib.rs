@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use workeros_kernel::caps::CapabilitySet;
 use workeros_kernel::errno::Errno;
+use workeros_kernel::net::{AcceptOutcome, ListenerId};
 use workeros_kernel::process::Pid;
 use workeros_kernel::resolver::{ModuleGraph, ModuleKind};
 use workeros_kernel::shell::{self, AndOrOp, RedirectOp};
@@ -242,6 +243,34 @@ impl WebKernel {
         workeros_kernel::ABI.to_string()
     }
 
+    // --- Persistence (ADR-022) ---------------------------------------------
+
+    /// The VFS mutation counter. The host debounces a persist whenever this
+    /// advances past the value it last stored to IndexedDB.
+    #[wasm_bindgen(js_name = fsGeneration)]
+    pub fn fs_generation(&self) -> f64 {
+        self.inner.fs_generation() as f64
+    }
+
+    /// Serialize the durable portion of the filesystem to bytes for the host to
+    /// store (ephemeral subtrees — `/tmp`, OS trees — are excluded).
+    #[wasm_bindgen]
+    pub fn snapshot(&self) -> Vec<u8> {
+        self.inner.snapshot()
+    }
+
+    /// Replay a stored snapshot blob into the filesystem at boot.
+    #[wasm_bindgen]
+    pub fn hydrate(&mut self, bytes: &[u8]) -> Result<(), JsError> {
+        self.inner.hydrate(bytes).map_err(errno_to_js)
+    }
+
+    /// Mark a subtree ephemeral (discarded on close) or persistent.
+    #[wasm_bindgen]
+    pub fn mount(&mut self, prefix: String, ephemeral: bool) {
+        self.inner.mount(&prefix, ephemeral);
+    }
+
     /// `otf:spawn` — resolve `argv`'s invocation + import graph, register the
     /// process, wire its stdio per `plan`, and return `{ pid, interpreter, graph }`.
     /// `env` is an array of `[key, value]` pairs; `plan` is the stdio wiring (or
@@ -409,6 +438,49 @@ impl WebKernel {
     #[wasm_bindgen]
     pub fn pipe_open(&mut self) -> PipeId {
         self.inner.pipe_open()
+    }
+
+    // ---- otf:net_* — port-keyed loopback sockets (ADR-021) ----
+
+    /// `otf:net_listen(port)`: claim `port` for `pid`. Returns the listener id;
+    /// `EADDRINUSE` if held, `ENOTSUP` if the process lacks the capability.
+    #[wasm_bindgen]
+    pub fn net_listen(&mut self, pid: Pid, port: u16) -> Result<ListenerId, JsError> {
+        self.inner.net_listen(pid, port).map_err(errno_to_js)
+    }
+
+    /// `otf:net_connect(port)`: loopback-connect `pid` to the listener on `port`,
+    /// binding the client connection fds. Returns `{ rfd, wfd }`; `ECONNREFUSED`
+    /// if nobody listens. This is the call the host injector drives for a preview
+    /// `fetch` — not outbound internet (ADR-021).
+    #[wasm_bindgen]
+    pub fn net_connect(&mut self, pid: Pid, port: u16) -> Result<JsValue, JsError> {
+        let c = self.inner.net_connect(pid, port).map_err(errno_to_js)?;
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(&obj, &JsValue::from_str("rfd"), &JsValue::from_f64(c.rfd as f64)).unwrap();
+        js_sys::Reflect::set(&obj, &JsValue::from_str("wfd"), &JsValue::from_f64(c.wfd as f64)).unwrap();
+        Ok(obj.into())
+    }
+
+    /// `otf:net_accept(listener)`: bind the next pending connection's server fds.
+    /// Returns `{ status: "ready", rfd, wfd }`, or `{ status: "again" }` when the
+    /// backlog is empty (the host parks and retries, like a would-block read).
+    #[wasm_bindgen]
+    pub fn net_accept(&mut self, pid: Pid, listener: ListenerId) -> Result<JsValue, JsError> {
+        let outcome = self.inner.net_accept(pid, listener).map_err(errno_to_js)?;
+        let obj = js_sys::Object::new();
+        let set = |k: &str, v: &JsValue| {
+            js_sys::Reflect::set(&obj, &JsValue::from_str(k), v).unwrap();
+        };
+        match outcome {
+            AcceptOutcome::Ready(c) => {
+                set("status", &JsValue::from_str("ready"));
+                set("rfd", &JsValue::from_f64(c.rfd as f64));
+                set("wfd", &JsValue::from_f64(c.wfd as f64));
+            }
+            AcceptOutcome::WouldBlock => set("status", &JsValue::from_str("again")),
+        }
+        Ok(obj.into())
     }
 
     // ---- guest file syscalls (coreutils) ----

@@ -137,23 +137,56 @@ The goal is that **real npm packages and their bins run on the host JS engine** 
 
 ---
 
-## Phase 6 — Preview / networking simulation · [post-MVP]
+## Phase 6 — Preview / networking simulation · [post-MVP] · [ADR-021]
 
-**Goal:** "Servers" that a browser can actually hit.
+**Goal:** "Servers" that a browser can actually hit — culminating in a real **Vite** dev server whose preview renders in an iframe with live HMR.
 
-- `otf:preview` + Service Worker interception: a guest "server" registers routes; SW routes `fetch` on the preview URL into the kernel/handler (§8).
-- HTTP-server shim in the guest node layer (`workeros-programs/node`) mapping `http.createServer` onto the route registry.
-- Target: a Vite dev server boots and its preview URL renders in an iframe.
+**Shape (ADR-021):** the kernel moves *opaque bytes* over port-keyed sockets that are just pipe pairs (`otf:net_listen/accept/connect`); **all** HTTP/1.1 and WebSocket parsing/framing is guest userland (`workeros-programs/node`) — the kernel stays protocol-agnostic (INV-1). A same-origin Service Worker turns an intercepted preview `fetch` into a loopback connection via a kernel-worker *injector*. Built as four gated sub-phases:
 
-**Exit criteria:** a Vite (or equivalent) project runs `dev` and the preview URL serves the app through the Service Worker; HMR-style reload optional.
+### Phase 6a — Kernel sockets · 🚧 (native-testable foundation)
+- `workeros-kernel/net.rs`: a `port → (pid, listener)` registry + a connection = two `PipeId`s, reusing `PipeTable` for the data path (no new data-path syscall). `net_listen` (→ `EADDRINUSE`), `net_connect` (loopback; → `ECONNREFUSED`), `net_accept` (→ bound `{rfd, wfd}`, `WouldBlock` when the accept queue is empty). New `Errno::Addrinuse`/`Connrefused`, `OtfCall::NetListen` capability. Listeners + half-open pipes freed through the existing reap seam (`close_all_io`).
+- **Exit:** native `cargo test` — `listen→connect→accept→byte-transfer→close`, `EADDRINUSE`, `ECONNREFUSED`, port-freed-on-reap. *Two OS processes talk over a loopback port with zero HTTP in the kernel.*
+
+### Phase 6b — Guest `http` + static preview
+- wasm bindings + kernel-worker `pendingAccepts` park list (async accept, ADR-016) + the host-side **injector** (inject request bytes → parked accept → collect response bytes).
+- Guest `node:net` (`Server`/`Socket` over connection fds) and `node:http` (HTTP/1.1 parser → `IncomingMessage`; `ServerResponse` serializer; keep-alive, chunked). Event-loop ref-count for an open listener so the server process stays alive.
+- `preview-sw.js` (same-origin, extends `coi-serviceworker.js`) intercepts `/__preview__/<port>/*` → request bytes → injector → `Response`; a preview `<iframe>` on the playground.
+- **Exit:** `http.createServer((_,res)=>res.end("hi")).listen(5173)` renders in the preview iframe.
+
+### Phase 6c — Outbound `http` + `ws`/HMR tunnel
+- `http.request`/`http.get` (outbound) mapped onto `fetch` (CORS-bound, curl's forbidden-header rules).
+- `ws` unmodified via `http.Server` `'upgrade'` (raw byte stream). Injected client shim tunneling the HMR WebSocket over `BroadcastChannel`/`postMessage` → `net_connect`+`upgrade` (the honest INV-5 deviation, ADR-021).
+- **Exit:** a `ws` echo server round-trips; the HMR channel delivers a server→client message into the preview iframe.
+
+### Phase 6d — Vite
+- Land the adjacent Node-compat gaps Vite needs (tracked here, not strictly "networking"): **`fs.watch`** (start with chokidar `usePolling`; a kernel watch/notify syscall is a follow-up), **`crypto`** (`createHash`/`randomBytes` — sync hash or the SAB path), **`worker_threads`** (single-threaded/`worker:false` fallback, as the esbuild spike used), optional **`zlib`** (Compression Streams). esbuild-wasm on the standard `npm`+`node` path (Phase 4/5 note) is Vite's transform/deps step.
+- **Exit (Phase 6 exit criterion):** a real Vite project runs `dev`, the preview URL serves the app through the Service Worker, and an edit triggers HMR live in the iframe.
+
+**Exit criteria:** a Vite (or equivalent) project runs `dev` and the preview URL serves the app through the Service Worker; HMR reload works via the tunneled transport (ADR-021).
 
 ---
 
-## Phase 7 — Persistence & isolation hardening · [post-MVP]
+## Phase 7 — Persistence & isolation hardening · [post-MVP] · 🚧 persistence done
 
 **Goal:** Durability and stronger sandboxing options.
 
-- IndexedDB `Vfs` implementation behind the existing trait; snapshot / COW overlay for "reset project" (§9, ADR-011).
+- **Durable filesystem ✅** (ADR-022) — reworked from ADR-011's "IndexedDB `Vfs`
+  behind the trait" into an **authoritative in-memory tree + write-behind
+  projection**: the kernel serializes its durable subtree to a byte blob
+  (`Kernel::snapshot`), the host stores it in IndexedDB (`src/persistence.js`)
+  and **rehydrates** at boot (`Kernel::hydrate`) before serving. Durability is
+  **path-based** — a `MountTable` (`vfs/mount.rs`, longest-prefix match) with the
+  default policy persisting root `/` and treating `/tmp` (scratch) + the
+  boot-reinstalled OS trees (`/bin`,`/sbin`,`/lib`) as ephemeral, so a project
+  scaffolded in `/tmp` (`npm install` and all) is discarded on close while source
+  files at `/` survive. A `generation` counter drives the write-behind (idle → no
+  I/O); a `visibilitychange`/`pagehide` flush trims loss. Native-tested (mount
+  policy, snapshot/hydrate round-trip, ephemeral pruning, generation) + a
+  headless-browser reload-survival test (`tools/persistence.test.js`). Honest
+  limit (INV-5): eventually-consistent (~2s window), whole-tree blob (per-file
+  keying/deltas deferred), no symlinks/perms/mtimes.
+- Snapshot / COW overlay for "reset project" (§9, ADR-011) — ⏳ layers on the
+  snapshot primitive above.
 - `Membrane` execution level: frozen intrinsics + proxied global / `ShadowRealm` (§7.1, ADR-009).
 - (Optional, later) `Wasm` execution level via a pure-Rust JS engine for strong capability isolation.
 - **Protected system paths** (ADR-018): a kernel-level protected-prefix / read-only-subtree check so `/sbin` (system binaries) and other protected paths reject mutating syscalls with `EPERM` — turning today's `/sbin` *convention* into real enforcement.
@@ -201,5 +234,5 @@ The goal is that **real npm packages and their bins run on the host JS engine** 
 | **M3 — Usable shell** | 3 | `wsh`, pipes, coreutils, `ps` |
 | **M4 — WASM apps** | 4 | Unmodified WASI binaries + WASM-library build step + PGlite as processes — 🚧 wasm32-wasip1 runs with stdio/exit + VFS reads + blocking stdin (sync-syscall channel done); esbuild-wasm build step proven as a spike but deferred to the `npm`+`node` path (Node compat); PGlite + off-the-shelf CLI pending |
 | **M5 — Ecosystem** | 5–6 | npm install + Vite dev preview — 🚧 `npm` registry install + `node` CommonJS `require` done; **Node compat: sync `fs`, core builtins (`fs`/`path`/`os`/`url`/`module`), ESM resolution (`node:` builtins + `node_modules` `exports`/subpaths), CJS-in-ESM interop, and npm bin-linking+PATH — done** (Phase 5·A–E); pending: preview + lockfiles |
-| **M6 — Durable & hardened** | 7 | Persistence + membrane isolation |
+| **M6 — Durable & hardened** | 7 | Persistence + membrane isolation — 🚧 durable filesystem done (in-memory tree + IndexedDB write-behind, path-based durability per ADR-022); membrane isolation + protected paths pending |
 | **M7 — Bounded & contained** | 8 | Resource limits + deterministic fault reaping — INV-6/ADR-020 (pull ahead of M4–M6 for untrusted-code deployments) — 🚧 kernel accounting caps done (proc 128 / fd 256 / VFS 256 MiB · 100k inodes, native-tested); host memory/CPU-time watchdog + fault-path reaping + host-override API pending |

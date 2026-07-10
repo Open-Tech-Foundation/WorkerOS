@@ -22,6 +22,8 @@ import { createModule } from "./module.js";
 import { buffer as bufferModule } from "./buffer.js";
 import { EventEmitter } from "./events.js";
 import { util as utilModule } from "./util.js";
+import { createNet } from "./net.js";
+import { createHttp } from "./http.js";
 
 // ---- core builtins --------------------------------------------------------
 // `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
@@ -40,6 +42,10 @@ export function makeBuiltins(sys, extras) {
   const path = createPath();
   const os = createOs();
   const url = createUrl();
+  // Networking (ADR-021): net is the socket layer, http is built on it. Both are
+  // pure over `sys` (async `otf:net_*` calls) — the kernel only moves bytes.
+  const net = createNet(sys, EventEmitter);
+  const http = createHttp(sys, EventEmitter, net);
   const reg = new Map([
     ["fs", fs],
     ["fs/promises", fs.promises],
@@ -50,6 +56,8 @@ export function makeBuiltins(sys, extras) {
     ["buffer", bufferModule],
     ["events", EventEmitter],
     ["util", utilModule],
+    ["net", net],
+    ["http", http],
   ]);
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.

@@ -14,11 +14,38 @@ import { createLineEditor } from "./shell/readline.js";
 import { coreutils } from "../../workeros-coreutils/src/index.js";
 import { programs as osPrograms, libraries as osLibraries } from "../../workeros-programs/src/index.js";
 import { allocSyncBuffer, readRequest, requestBytes, writeResponse } from "./sync-syscall.js";
+import { openPersistence } from "./persistence.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 let kernel = null;
 let shell = null;
+
+// Durable filesystem write-behind (ADR-022). `persistence` is the IndexedDB
+// store; we re-snapshot only when the kernel's mutation counter advances past
+// what we last stored, so an idle OS does no I/O.
+let persistence = null;
+let lastPersistedGen = 0;
+let saving = false;
+const AUTOSAVE_MS = 2000;
+
+// Snapshot the durable tree to IndexedDB if it changed since the last save.
+// Coalesces concurrent calls; safe to call on a timer and on demand (tab hide).
+async function persistNow() {
+  if (!kernel || !persistence || !persistence.available || saving) return;
+  const gen = kernel.fsGeneration();
+  if (gen === lastPersistedGen) return;
+  saving = true;
+  try {
+    const bytes = kernel.snapshot(); // sync copy; no writes can interleave
+    await persistence.save(bytes);
+    lastPersistedGen = gen;
+  } catch (err) {
+    console.warn("[workeros] snapshot save failed:", err && err.message);
+  } finally {
+    saving = false;
+  }
+}
 
 // The interactive shell session state (cwd/env), persisted across exec lines.
 // TERM/COLORTERM advertise the host xterm's ANSI color support so color-detecting
@@ -33,6 +60,9 @@ const session = {
 const programs = new Map();
 // Parked pipe reads awaiting data/EOF: { pid, id, fd, max }.
 let pendingReads = [];
+// Parked net accepts awaiting an inbound connection: { pid, id, listener }
+// (ADR-021). Retried whenever a connection is added to some listener's backlog.
+let pendingAccepts = [];
 
 // ---- interactive terminal (the kernel-owned TTY REPL) ----------------------
 // The controlling terminal is a single stream to the host (xterm). The kernel
@@ -255,6 +285,7 @@ function handleExit(pid, code) {
   }
   caughtSignals.delete(pid);
   pendingReads = pendingReads.filter((pr) => pr.pid !== pid);
+  pendingAccepts = pendingAccepts.filter((pa) => pa.pid !== pid);
   try {
     rec.onExit(code);
   } catch {}
@@ -293,6 +324,26 @@ function retryPendingReads() {
     else reply(pr.pid, pr.id, true, res);
   }
   pendingReads = still;
+}
+
+/** Re-attempt parked net accepts after a connection may have been queued. */
+function retryPendingAccepts() {
+  if (pendingAccepts.length === 0) return;
+  const still = [];
+  for (const pa of pendingAccepts) {
+    const rec = programs.get(pa.pid);
+    if (!rec || rec.done) continue;
+    let res;
+    try {
+      res = kernel.net_accept(pa.pid, pa.listener);
+    } catch (e) {
+      reply(pa.pid, pa.id, false, String(e.message || e));
+      continue;
+    }
+    if (res.status === "again") still.push(pa);
+    else reply(pa.pid, pa.id, true, res);
+  }
+  pendingAccepts = still;
 }
 
 // Parked synchronous reads (WASI) that would block: re-serviced when data/EOF
@@ -493,6 +544,24 @@ function handleSyscall(pid, msg) {
         // `path` so a userland runtime (e.g. /bin/node) can evaluate it in-process.
         reply(pid, id, true, kernel.resolve_graph(args.cwd, args.path));
         break;
+      // ---- otf:net_* — port-keyed loopback sockets (ADR-021) ----
+      case "net_listen":
+        reply(pid, id, true, { listener: kernel.net_listen(pid, args.port) });
+        break;
+      case "net_connect": {
+        const conn = kernel.net_connect(pid, args.port);
+        reply(pid, id, true, conn);
+        // A connection is now queued on the listener's backlog — wake any accept
+        // parked on it (guest server, or the host injector's own accept).
+        retryPendingAccepts();
+        break;
+      }
+      case "net_accept": {
+        const res = kernel.net_accept(pid, args.listener);
+        if (res.status === "again") pendingAccepts.push({ pid, id, listener: args.listener });
+        else reply(pid, id, true, res);
+        break;
+      }
       case "exec": {
         // system(3)-style: run a command line via the shell driver and route its
         // output to the caller's process streams. Replies with the exit code when
@@ -542,6 +611,21 @@ self.onmessage = async (ev) => {
         for (const lib of osLibraries) {
           kernel.fs_write(lib.path, enc.encode(await lib.source()));
         }
+        // Restore the durable filesystem (ADR-022) on top of the freshly
+        // installed OS. The stored snapshot holds only persistent paths (the OS
+        // trees /bin,/sbin,/lib and /tmp are ephemeral, so they never conflict).
+        persistence = await openPersistence();
+        try {
+          const snap = await persistence.load();
+          if (snap && snap.length) kernel.hydrate(snap);
+        } catch (err) {
+          console.warn("[workeros] snapshot hydrate failed:", err && err.message);
+        }
+        // Baseline the mutation counter *after* all boot writes + hydration so we
+        // don't immediately re-persist the just-restored state; only genuine user
+        // changes from here advance it. Then start the write-behind timer.
+        lastPersistedGen = kernel.fsGeneration();
+        setInterval(persistNow, AUTOSAVE_MS);
         shell = createShell({ kernel, startProcess, session, readLine: readLineFromTty });
         post({ type: MSG.BOOTED, version: kernel.version, abi: kernel.abi });
         break;
@@ -557,6 +641,13 @@ self.onmessage = async (ev) => {
         post({ type: MSG.FS_READ, id: msg.id, data });
         break;
       }
+
+      case MSG.FS_FLUSH:
+        // Best-effort durable flush (tab hidden/closing). Awaited so a caller
+        // that can delay unload (visibilitychange) gives the write a chance.
+        await persistNow();
+        if (msg.id != null) post({ type: MSG.FS_FLUSH, id: msg.id, ok: true });
+        break;
 
       case MSG.SPAWN: {
         const spawned = spawnKernel(msg.argv, msg.env, msg.cwd || session.cwd, null);

@@ -18,7 +18,10 @@
 use crate::errno::{Errno, SysResult};
 use std::collections::BTreeMap;
 
+pub mod mount;
 pub mod path;
+
+use mount::MountTable;
 
 /// An inode number. Stable for the lifetime of the inode.
 pub type Ino = usize;
@@ -151,6 +154,11 @@ pub struct MemVfs {
     /// Storage quota: byte and inode ceilings. Breach → `ENOSPC`.
     max_bytes: u64,
     max_inodes: usize,
+    /// Monotonic mutation counter (ADR-022). Bumped on every content/structure
+    /// change so the host write-behind layer knows when a re-snapshot is due.
+    /// A dumb "something changed" signal — it does not distinguish persistent
+    /// from ephemeral changes (the snapshot walk prunes ephemeral paths anyway).
+    generation: u64,
 }
 
 impl Default for MemVfs {
@@ -178,7 +186,19 @@ impl MemVfs {
             inode_count: 1,
             max_bytes,
             max_inodes,
+            generation: 0,
         }
+    }
+
+    /// The current mutation counter (ADR-022). The host persists a fresh
+    /// snapshot whenever this advances past the last-persisted value.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Record a structural or content mutation.
+    fn bump(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn get(&self, ino: Ino) -> SysResult<&Inode> {
@@ -266,6 +286,157 @@ impl MemVfs {
     }
 }
 
+// --- Persistence: snapshot / hydrate (ADR-022) ------------------------------
+//
+// The authoritative filesystem is this in-memory tree; persistence is a
+// *projection* of it. `snapshot` serializes only the durable paths (pruning
+// ephemeral subtrees via the mount policy) into a compact, dependency-free byte
+// blob the host stores in IndexedDB; `hydrate` replays such a blob into a fresh
+// tree at boot. The kernel never touches IndexedDB — it moves bytes, the host
+// supplies the async storage mechanism (the ADR-015/-020 discipline).
+//
+// Wire format: `b"WOFS"` + version byte, then a sequence of records:
+//   file: 0x01, u32 path_len (LE), path (UTF-8), u32 data_len (LE), data
+//   dir:  0x00, u32 path_len (LE), path (UTF-8)          (empty dirs only)
+// Non-empty directories are implied by their file entries' parents, which
+// `hydrate` creates on demand — only *empty* durable directories need a record.
+
+const SNAPSHOT_MAGIC: &[u8; 4] = b"WOFS";
+const SNAPSHOT_VERSION: u8 = 1;
+
+impl MemVfs {
+    /// Serialize the durable portion of the tree to a byte blob (ADR-022).
+    /// Ephemeral subtrees (per `mounts`) are excluded and, when they contain no
+    /// persistent carve-out, not even walked.
+    pub fn snapshot(&self, mounts: &MountTable) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(SNAPSHOT_MAGIC);
+        out.push(SNAPSHOT_VERSION);
+        self.snapshot_walk("/", ROOT_INO, mounts, &mut out);
+        out
+    }
+
+    fn snapshot_walk(&self, dir_path: &str, dir_ino: Ino, mounts: &MountTable, out: &mut Vec<u8>) {
+        let entries = match self.slots.get(dir_ino).and_then(|s| s.as_ref()) {
+            Some(Inode { kind: Kind::Dir { entries }, .. }) => entries,
+            _ => return,
+        };
+        for (name, &child) in entries {
+            let child_path = join_path(dir_path, name);
+            let inode = match self.slots.get(child).and_then(|s| s.as_ref()) {
+                Some(i) => i,
+                None => continue,
+            };
+            let ephemeral = mounts.is_ephemeral(&child_path);
+            match &inode.kind {
+                Kind::File { data } => {
+                    if !ephemeral {
+                        out.push(1);
+                        put_bytes(out, child_path.as_bytes());
+                        put_bytes(out, data);
+                    }
+                }
+                Kind::Dir { entries: sub } => {
+                    if !ephemeral && sub.is_empty() {
+                        out.push(0);
+                        put_bytes(out, child_path.as_bytes());
+                    }
+                    // Descend unless this ephemeral subtree can hold no carve-out.
+                    if !ephemeral || mounts.has_persistent_under(&child_path) {
+                        self.snapshot_walk(&child_path, child, mounts, out);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Replay a [`snapshot`](Self::snapshot) blob into this filesystem (ADR-022).
+    /// Intended to run once on a freshly booted tree, before serving syscalls.
+    /// Malformed input returns `EINVAL` rather than panicking (the blob comes
+    /// from browser storage and may be truncated/corrupt).
+    pub fn hydrate(&mut self, bytes: &[u8]) -> SysResult<()> {
+        if bytes.len() < 5 || &bytes[0..4] != SNAPSHOT_MAGIC || bytes[4] != SNAPSHOT_VERSION {
+            return Err(Errno::Inval);
+        }
+        let mut p = 5usize;
+        while p < bytes.len() {
+            let kind = bytes[p];
+            p += 1;
+            let path = std::str::from_utf8(take_bytes(bytes, &mut p)?)
+                .map_err(|_| Errno::Inval)?
+                .to_string();
+            match kind {
+                0 => {
+                    self.mkdir_p(&path)?;
+                }
+                1 => {
+                    let data = take_bytes(bytes, &mut p)?.to_vec();
+                    if let Some((parent, _)) = path::split(&path) {
+                        self.mkdir_p(parent)?;
+                    }
+                    let opts = OpenOptions {
+                        create: true,
+                        exclusive: false,
+                        truncate: true,
+                        directory: false,
+                    };
+                    let ino = self.open(&path, opts)?;
+                    self.write_at(ino, 0, &data)?;
+                    self.close(ino)?;
+                }
+                _ => return Err(Errno::Inval),
+            }
+        }
+        Ok(())
+    }
+
+    /// `mkdir -p`: create every missing component of an absolute path.
+    fn mkdir_p(&mut self, path: &str) -> SysResult<()> {
+        let mut cur = String::new();
+        for comp in path::components(path) {
+            cur.push('/');
+            cur.push_str(comp);
+            match self.mkdir(&cur) {
+                Ok(_) | Err(Errno::Exist) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Join a directory path and a single component (the parent is normalized).
+fn join_path(dir: &str, name: &str) -> String {
+    if dir == "/" {
+        format!("/{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// Append a `u32` length-prefixed byte string (little-endian length).
+fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+    out.extend_from_slice(b);
+}
+
+/// Read a `u32` length-prefixed byte string at `*p`, advancing `*p`. Bounds- and
+/// overflow-checked so corrupt input yields `EINVAL` instead of a panic.
+fn take_bytes<'a>(bytes: &'a [u8], p: &mut usize) -> SysResult<&'a [u8]> {
+    if *p + 4 > bytes.len() {
+        return Err(Errno::Inval);
+    }
+    let len = u32::from_le_bytes(bytes[*p..*p + 4].try_into().unwrap()) as usize;
+    *p += 4;
+    let end = p.checked_add(len).ok_or(Errno::Inval)?;
+    if end > bytes.len() {
+        return Err(Errno::Inval);
+    }
+    let slice = &bytes[*p..end];
+    *p = end;
+    Ok(slice)
+}
+
 impl Vfs for MemVfs {
     fn resolve(&self, path: &str) -> SysResult<Ino> {
         self.resolve_ino(path)
@@ -298,6 +469,7 @@ impl Vfs for MemVfs {
             }
             Kind::File { .. } => unreachable!("checked above"),
         }
+        self.bump();
         Ok(ino)
     }
 
@@ -331,7 +503,9 @@ impl Vfs for MemVfs {
         if let Kind::Dir { entries } = &mut self.get_mut(parent_ino)?.kind {
             entries.remove(name);
         }
-        self.unlink_ino(child)
+        self.unlink_ino(child)?;
+        self.bump();
+        Ok(())
     }
 
     fn rmdir(&mut self, path: &str) -> SysResult<()> {
@@ -351,7 +525,9 @@ impl Vfs for MemVfs {
         if let Kind::Dir { entries } = &mut self.get_mut(parent_ino)?.kind {
             entries.remove(name);
         }
-        self.unlink_ino(child)
+        self.unlink_ino(child)?;
+        self.bump();
+        Ok(())
     }
 
     fn rename(&mut self, from: &str, to: &str) -> SysResult<()> {
@@ -382,10 +558,12 @@ impl Vfs for MemVfs {
         if let Kind::Dir { entries } = &mut self.get_mut(to_parent)?.kind {
             entries.insert(to_name.to_string(), child);
         }
+        self.bump();
         Ok(())
     }
 
     fn open(&mut self, path: &str, opts: OpenOptions) -> SysResult<Ino> {
+        let mut changed = false;
         let ino = match self.resolve_ino(path) {
             Ok(ino) => {
                 if opts.create && opts.exclusive {
@@ -400,6 +578,7 @@ impl Vfs for MemVfs {
                 if let Kind::Dir { entries } = &mut self.get_mut(parent_ino)?.kind {
                     entries.insert(name.to_string(), ino);
                 }
+                changed = true;
                 ino
             }
             Err(e) => return Err(e),
@@ -419,6 +598,9 @@ impl Vfs for MemVfs {
         inode.open_count += 1;
         // Borrow of `inode` ends here; release the truncated bytes from the quota.
         self.used_bytes = self.used_bytes.saturating_sub(freed);
+        if changed || freed > 0 {
+            self.bump();
+        }
         Ok(ino)
     }
 
@@ -466,6 +648,7 @@ impl Vfs for MemVfs {
             }
         };
         self.used_bytes += growth;
+        self.bump();
         Ok(src.len())
     }
 
@@ -708,5 +891,122 @@ mod tests {
         let mut vfs = fs();
         vfs.open("/f", OpenOptions { create: true, ..Default::default() }).unwrap();
         assert_eq!(vfs.resolve("/f/x").unwrap_err(), Errno::Notdir);
+    }
+
+    // --- Persistence: snapshot / hydrate (ADR-022) --------------------------
+
+    /// Create `path` (with parents) holding `data`.
+    fn write_file(vfs: &mut MemVfs, path: &str, data: &[u8]) {
+        // Create parent dirs.
+        if let Some((parent, _)) = path::split(path) {
+            let mut cur = String::new();
+            for comp in path::components(parent) {
+                cur.push('/');
+                cur.push_str(comp);
+                let _ = vfs.mkdir(&cur);
+            }
+        }
+        let ino = vfs
+            .open(path, OpenOptions { create: true, truncate: true, ..Default::default() })
+            .unwrap();
+        vfs.write_at(ino, 0, data).unwrap();
+        vfs.close(ino).unwrap();
+    }
+
+    fn read_file(vfs: &MemVfs, path: &str) -> Vec<u8> {
+        let ino = vfs.resolve(path).unwrap();
+        let size = vfs.size(ino).unwrap() as usize;
+        let mut buf = vec![0u8; size];
+        let n = vfs.read_at(ino, 0, &mut buf).unwrap();
+        buf.truncate(n);
+        buf
+    }
+
+    #[test]
+    fn snapshot_round_trips_persistent_tree() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        write_file(&mut vfs, "/project/main.js", b"console.log(1)");
+        write_file(&mut vfs, "/project/src/util.js", b"export const x = 2");
+        write_file(&mut vfs, "/notes.txt", b"hello");
+        vfs.mkdir("/emptydir").unwrap();
+
+        let blob = vfs.snapshot(&mounts);
+
+        // Replay into a fresh filesystem.
+        let mut restored = fs();
+        restored.hydrate(&blob).unwrap();
+        assert_eq!(read_file(&restored, "/project/main.js"), b"console.log(1)");
+        assert_eq!(read_file(&restored, "/project/src/util.js"), b"export const x = 2");
+        assert_eq!(read_file(&restored, "/notes.txt"), b"hello");
+        // Empty persistent dir is preserved.
+        assert_eq!(restored.stat("/emptydir").unwrap().file_type, FileType::Dir);
+    }
+
+    #[test]
+    fn snapshot_excludes_ephemeral_paths() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        write_file(&mut vfs, "/keep.js", b"durable");
+        // /tmp and OS trees are ephemeral by default.
+        write_file(&mut vfs, "/tmp/app/index.js", b"scratch");
+        write_file(&mut vfs, "/tmp/app/node_modules/dep/index.js", b"dep");
+        write_file(&mut vfs, "/bin/mytool", b"binary");
+
+        let mut restored = fs();
+        restored.hydrate(&vfs.snapshot(&mounts)).unwrap();
+
+        assert_eq!(read_file(&restored, "/keep.js"), b"durable");
+        assert_eq!(restored.resolve("/tmp/app/index.js").unwrap_err(), Errno::Noent);
+        assert_eq!(
+            restored.resolve("/tmp/app/node_modules/dep/index.js").unwrap_err(),
+            Errno::Noent
+        );
+        assert_eq!(restored.resolve("/bin/mytool").unwrap_err(), Errno::Noent);
+    }
+
+    #[test]
+    fn snapshot_keeps_persistent_carveout_under_ephemeral() {
+        let mut mounts = mount::MountTable::default();
+        mounts.mount("/tmp/keep", mount::Durability::Persist);
+        let mut vfs = fs();
+        write_file(&mut vfs, "/tmp/scratch.js", b"gone");
+        write_file(&mut vfs, "/tmp/keep/data.json", b"{\"a\":1}");
+
+        let mut restored = fs();
+        restored.hydrate(&vfs.snapshot(&mounts)).unwrap();
+
+        assert_eq!(read_file(&restored, "/tmp/keep/data.json"), b"{\"a\":1}");
+        assert_eq!(restored.resolve("/tmp/scratch.js").unwrap_err(), Errno::Noent);
+    }
+
+    #[test]
+    fn generation_advances_on_mutation_only() {
+        let mut vfs = fs();
+        let g0 = vfs.generation();
+        let ino = vfs
+            .open("/f", OpenOptions { create: true, ..Default::default() })
+            .unwrap();
+        let g1 = vfs.generation();
+        assert!(g1 > g0, "create bumps generation");
+        vfs.write_at(ino, 0, b"data").unwrap();
+        assert!(vfs.generation() > g1, "write bumps generation");
+        // A pure read does not.
+        let g2 = vfs.generation();
+        let mut buf = [0u8; 4];
+        vfs.read_at(ino, 0, &mut buf).unwrap();
+        assert_eq!(vfs.generation(), g2, "read leaves generation unchanged");
+    }
+
+    #[test]
+    fn hydrate_rejects_corrupt_blob() {
+        let mut vfs = fs();
+        assert_eq!(vfs.hydrate(b"nope").unwrap_err(), Errno::Inval);
+        // Valid header, truncated record.
+        let mut bad = Vec::from(&b"WOFS"[..]);
+        bad.push(1); // version
+        bad.push(1); // file record
+        bad.extend_from_slice(&99u32.to_le_bytes()); // claims 99-byte path, absent
+        assert_eq!(vfs.hydrate(&bad).unwrap_err(), Errno::Inval);
     }
 }

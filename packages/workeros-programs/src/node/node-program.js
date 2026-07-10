@@ -154,6 +154,11 @@ const loop = createEventLoop({
 });
 loop.install(globalThis);
 const whenIdle = loop.whenIdle;
+// Published for the network layer (node:net/http, ADR-021): an open listener or
+// live connection holds the process alive via loop.ref()/unref(), exactly as a
+// pending socket does in Node. Read at listen/close time, so ordering vs. the
+// builtin construction below doesn't matter.
+globalThis.__workerosLoop = loop;
 
 // Deliver kernel signals to process listeners. SIGWINCH refreshes the cached
 // terminal size first, so a handler (and later reads of stdout.columns) see the

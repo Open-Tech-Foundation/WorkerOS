@@ -11,11 +11,17 @@
 pub enum Errno {
     /// No error occurred.
     Success = 0,
+    /// Address already in use — a `net_listen` on a port another process holds
+    /// (ADR-021).
+    Addrinuse = 3,
     /// Resource temporarily unavailable — e.g. a spawn refused by the
     /// process-count cap (POSIX `fork` under `RLIMIT_NPROC`). (ADR-020)
     Again = 6,
     /// Bad file descriptor.
     Badf = 8,
+    /// Connection refused — a `net_connect` to a port with no live listener
+    /// (ADR-021).
+    Connrefused = 14,
     /// File exists.
     Exist = 20,
     /// Invalid argument.

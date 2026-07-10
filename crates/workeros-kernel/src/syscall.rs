@@ -283,6 +283,33 @@ impl ProcessCtx {
         self.fds.insert(fd, Handle::Pipe { id, end });
     }
 
+    /// Allocate a *fresh* fd bound to a pipe end and attach to the pipe. The
+    /// dynamic sibling of [`bind_stdio_pipe`] (which targets a fixed stdio fd):
+    /// used by the socket layer (`net.rs`, ADR-021) to hand a connection's two
+    /// pipe ends to a server/client process. Enforces the open-fd cap (`EMFILE`).
+    pub fn bind_pipe_fd(&mut self, pipes: &mut PipeTable, id: PipeId, end: PipeEnd) -> SysResult<Fd> {
+        let fd = self.alloc_fd(Handle::Pipe { id, end })?;
+        pipes.attach(id, end);
+        Ok(fd)
+    }
+
+    /// Close a pipe fd, detaching from the pipe. A vfs-free counterpart to
+    /// [`fd_close`](Self::fd_close) for the socket layer's rollback path (`net.rs`),
+    /// where no `Vfs` is in hand. Errors if `fd` is not a pipe end.
+    pub fn close_pipe_fd(&mut self, pipes: &mut PipeTable, fd: Fd) -> SysResult<()> {
+        match self.fds.get(&fd) {
+            Some(Handle::Pipe { .. }) => match self.fds.remove(&fd) {
+                Some(Handle::Pipe { id, end }) => {
+                    pipes.detach(id, end);
+                    Ok(())
+                }
+                _ => unreachable!(),
+            },
+            Some(_) => Err(Errno::Inval),
+            None => Err(Errno::Badf),
+        }
+    }
+
     // ---- filesystem ----
 
     pub fn path_open(&mut self, vfs: &mut dyn Vfs, path_arg: &str, opts: OpenOptions) -> SysResult<Fd> {

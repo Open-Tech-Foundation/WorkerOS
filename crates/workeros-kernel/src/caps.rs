@@ -16,6 +16,10 @@ pub enum OtfCall {
     Kill,
     /// `otf:ipc_open` — open an IPC channel fd.
     IpcOpen,
+    /// `otf:net_listen` — claim a port and accept loopback connections (ADR-021).
+    /// (`net_connect` is loopback-only and ungated in v1; `net_listen` is the
+    /// capability a "server" needs.)
+    NetListen,
 }
 
 /// The set of capabilities granted to a process.
@@ -50,7 +54,7 @@ impl Default for CapabilitySet {
             stdin: true,
             stdout: true,
             stderr: true,
-            otf: vec![OtfCall::Spawn, OtfCall::Kill, OtfCall::IpcOpen],
+            otf: vec![OtfCall::Spawn, OtfCall::Kill, OtfCall::IpcOpen, OtfCall::NetListen],
         }
     }
 }

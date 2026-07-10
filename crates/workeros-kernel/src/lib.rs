@@ -18,6 +18,7 @@
 pub mod caps;
 pub mod errno;
 pub mod limits;
+pub mod net;
 pub mod process;
 pub mod resolver;
 pub mod ringbuf;
@@ -29,6 +30,7 @@ pub mod vfs;
 use caps::CapabilitySet;
 use errno::{Errno, SysResult};
 use limits::ResourceLimits;
+use net::{AcceptOutcome, Connection, ListenerId, PortTable};
 use process::{Pid, ProcState, SpawnRequest};
 use resolver::{Interpreter, ModuleGraph, ResolveError, DEFAULT_PATH};
 use std::collections::BTreeMap;
@@ -158,12 +160,18 @@ pub struct Kernel {
     contexts: BTreeMap<Pid, ProcessCtx>,
     /// Kernel-owned IPC pipes backing `otf:ipc_open` and shell pipelines.
     pipes: PipeTable,
+    /// Port-keyed loopback sockets backing `otf:net_*` — a "server" registers a
+    /// port here; a connection is a pipe pair the injector/clients drive (ADR-021).
+    ports: PortTable,
     /// The single controlling terminal: line discipline, termios, and winsize.
     /// Every process whose stdin is the terminal (`Inherit`) reads from here.
     tty: Tty,
     /// The resource caps this instance enforces (INV-6, ADR-020). Hardcoded to
     /// [`ResourceLimits::default`] in v1; a host-override API is post-v1.
     limits: ResourceLimits,
+    /// Path-based durability policy (ADR-022): which subtrees the host persists
+    /// vs. discards on close. Drives [`Kernel::snapshot`].
+    mounts: vfs::mount::MountTable,
 }
 
 impl Kernel {
@@ -183,14 +191,48 @@ impl Kernel {
                 processes: process::ProcessTable::new(),
                 contexts: BTreeMap::new(),
                 pipes: PipeTable::new(),
+                ports: PortTable::new(),
                 tty: Tty::new(),
                 limits,
+                mounts: vfs::mount::MountTable::default(),
             },
             Handshake {
                 version: VERSION,
                 abi: ABI,
             },
         )
+    }
+
+    // --- Persistence (ADR-022) ---------------------------------------------
+
+    /// The VFS mutation counter. The host persists a fresh snapshot whenever
+    /// this advances past the value it last stored.
+    pub fn fs_generation(&self) -> u64 {
+        self.vfs.generation()
+    }
+
+    /// Serialize the durable portion of the filesystem to a byte blob for the
+    /// host to store (ephemeral subtrees excluded per the mount policy).
+    pub fn snapshot(&self) -> Vec<u8> {
+        self.vfs.snapshot(&self.mounts)
+    }
+
+    /// Replay a stored snapshot blob into the filesystem at boot. Malformed
+    /// input returns `EINVAL` (the blob comes from browser storage).
+    pub fn hydrate(&mut self, bytes: &[u8]) -> SysResult<()> {
+        self.vfs.hydrate(bytes)
+    }
+
+    /// Mark a subtree ephemeral (discarded on close) or persistent. Lets an
+    /// embedder adjust the durability policy beyond the built-in defaults
+    /// (`/tmp` + OS trees ephemeral, everything else persistent).
+    pub fn mount(&mut self, prefix: &str, ephemeral: bool) {
+        let d = if ephemeral {
+            vfs::mount::Durability::Ephemeral
+        } else {
+            vfs::mount::Durability::Persist
+        };
+        self.mounts.mount(prefix, d);
     }
 
     /// Resolve an invocation (interpreter + entry + import graph), register a
@@ -401,6 +443,9 @@ impl Kernel {
                 ctx.close_all_io(&mut self.vfs, &mut self.pipes);
             }
         }
+        // Free any ports the process was listening on so a crashed/killed server
+        // releases its port and pending clients see EOF (ADR-021, INV-6).
+        self.ports.reap_pid(pid);
         self.processes.set_exited(pid, code)
     }
 
@@ -428,6 +473,37 @@ impl Kernel {
         let code = self.processes.reap(pid)?;
         self.contexts.remove(&pid);
         Some(code)
+    }
+
+    // ---- otf:net_* — port-keyed loopback sockets (ADR-021) --------------------
+
+    /// `otf:net_listen`: claim `port` for `pid` (gated by `OtfCall::NetListen`).
+    /// `EADDRINUSE` if another process holds it. Returns the listener handle the
+    /// process passes to `net_accept`.
+    pub fn net_listen(&mut self, pid: Pid, port: u16) -> SysResult<ListenerId> {
+        let ctx = self.contexts.get(&pid).ok_or(Errno::Badf)?;
+        if !ctx.caps.allows(caps::OtfCall::NetListen) {
+            return Err(Errno::Notsup);
+        }
+        self.ports.listen(pid, port)
+    }
+
+    /// `otf:net_connect`: loopback-connect `pid` to whoever listens on `port`,
+    /// binding the client-side connection fds into its table. `ECONNREFUSED` if
+    /// nobody listens. This is the call the host-side injector drives on behalf of
+    /// an intercepted preview `fetch` (ADR-021); it is *not* outbound internet.
+    pub fn net_connect(&mut self, pid: Pid, port: u16) -> SysResult<Connection> {
+        let ctx = self.contexts.get_mut(&pid).ok_or(Errno::Badf)?;
+        self.ports.connect(&mut self.pipes, ctx, port)
+    }
+
+    /// `otf:net_accept`: bind the next pending connection's server-side fds into
+    /// the listening process's table. `AcceptOutcome::WouldBlock` when the backlog
+    /// is empty — the kernel worker parks and retries, exactly like a would-block
+    /// pipe read (ADR-016).
+    pub fn net_accept(&mut self, pid: Pid, listener: ListenerId) -> SysResult<AcceptOutcome> {
+        let ctx = self.contexts.get_mut(&pid).ok_or(Errno::Badf)?;
+        self.ports.accept(&mut self.pipes, ctx, listener)
     }
 
     /// Client `fs.write`: create parent directories as needed, then write the

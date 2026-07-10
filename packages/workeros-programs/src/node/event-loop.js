@@ -81,5 +81,11 @@ export function createEventLoop(native) {
     refCount <= 0 ? Promise.resolve() : new Promise((r) => { notifyIdle = r; });
   const install = (target) => { for (const k of Object.keys(api)) target[k] = api[k]; };
 
-  return { install, whenIdle, api, activeRefs: () => refCount };
+  // Manual keep-alive for non-timer work (an open network listener/connection —
+  // ADR-021): `ref()` holds the loop open the way a pending socket does in Node,
+  // `unref()` releases it. Symmetric with a timer's ref/unref on the same count.
+  const ref = () => bump(1);
+  const unref = () => bump(-1);
+
+  return { install, whenIdle, api, activeRefs: () => refCount, ref, unref };
 }
