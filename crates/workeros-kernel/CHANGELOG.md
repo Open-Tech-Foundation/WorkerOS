@@ -6,6 +6,14 @@ a release yet, so everything lives under **Unreleased**.
 
 ## [Unreleased]
 
+### Fixed
+- **TTY line discipline drops stray control bytes.** In canonical mode the cooked
+  line now ignores unhandled control characters (`< 0x20`, DEL) and swallows whole
+  terminal escape sequences (`ESC [ …` / `ESC O …`, i.e. arrow/navigation keys), so
+  a stray `^V`/arrow key can no longer leak into the line — and thus into `argv`
+  (fixes `spawn: NotFound("\u{16}echo")`). Raw mode still passes everything through
+  for TUIs.
+
 ### Added
 - **TTY device (`tty` module)** — the controlling terminal with a real line
   discipline: canonical (cooked) and raw modes, echo, line editing (Backspace,

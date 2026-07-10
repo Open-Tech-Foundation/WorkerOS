@@ -24,7 +24,19 @@ const CR: u8 = 0x0d; // \r     → translated to \n (icrnl)
 const CTRL_U: u8 = 0x15; // KILL  → erase whole line
 const CTRL_W: u8 = 0x17; // WERASE→ erase previous word
 const CTRL_Z: u8 = 0x1a; // SUSP  → SIGTSTP
+const ESC: u8 = 0x1b; // \e     → introduces a terminal escape sequence
 const DEL: u8 = 0x7f; // ^?     → erase (most terminals send this for Backspace)
+
+/// Where we are inside a terminal escape sequence while parsing cooked input.
+/// Arrow keys and friends arrive as `ESC [ …` (CSI) or `ESC O …` (SS3); in
+/// canonical mode we swallow the whole sequence so it can't corrupt the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscState {
+    None,
+    Esc, // just saw ESC
+    Csi, // saw `ESC [`
+    Ss3, // saw `ESC O`
+}
 
 /// termios-lite: the subset of line-discipline flags WorkerOS honors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +113,8 @@ pub struct Tty {
     line: Vec<u8>,
     /// A pending one-shot EOF (Ctrl-D on an empty line).
     eof: bool,
+    /// Escape-sequence parser state (canonical mode only).
+    esc: EscState,
     pub termios: Termios,
     pub winsize: Winsize,
 }
@@ -111,6 +125,7 @@ impl Default for Tty {
             ready: VecDeque::new(),
             line: Vec::new(),
             eof: false,
+            esc: EscState::None,
             termios: Termios::default(),
             winsize: Winsize::default(),
         }
@@ -129,6 +144,12 @@ impl Tty {
     pub fn input(&mut self, bytes: &[u8]) -> TtyInput {
         let mut out = TtyInput::default();
         for &b in bytes {
+            // Mid escape sequence (canonical only): swallow until the sequence ends
+            // so arrow keys / function keys never land in the cooked line.
+            if self.esc != EscState::None {
+                self.consume_escape(b);
+                continue;
+            }
             // INTR/SUSP fire in either mode when `isig` is set (a raw program that
             // wants the raw byte clears isig, as termios requires).
             if self.termios.isig && b == CTRL_C {
@@ -148,9 +169,15 @@ impl Tty {
             }
 
             if self.termios.canonical {
+                if b == ESC {
+                    // Begin swallowing an escape sequence (see `consume_escape`).
+                    self.esc = EscState::Esc;
+                    continue;
+                }
                 self.canonical_byte(b, &mut out.echo);
             } else {
-                // Raw: deliver the byte as-is; echo it verbatim if echo is on.
+                // Raw: deliver the byte as-is (escape sequences included, for TUIs);
+                // echo it verbatim if echo is on.
                 self.ready.push_back(b);
                 if self.termios.echo {
                     out.echo.push(b);
@@ -158,6 +185,25 @@ impl Tty {
             }
         }
         out
+    }
+
+    /// Advance the escape-sequence parser by one byte, discarding the sequence.
+    /// Handles the common `ESC [ … final` (CSI) and `ESC O final` (SS3) shapes
+    /// that arrow/navigation keys use; a lone `ESC` + byte (e.g. Alt-key) is
+    /// dropped too. Nothing is inserted or echoed.
+    fn consume_escape(&mut self, b: u8) {
+        self.esc = match self.esc {
+            EscState::Esc => match b {
+                b'[' => EscState::Csi,
+                b'O' => EscState::Ss3,
+                _ => EscState::None, // lone ESC + key: discard both
+            },
+            // CSI: parameter/intermediate bytes until a final byte (0x40..=0x7e).
+            EscState::Csi if (0x40..=0x7e).contains(&b) => EscState::None,
+            EscState::Csi => EscState::Csi,
+            EscState::Ss3 => EscState::None, // single final byte (e.g. arrow)
+            EscState::None => EscState::None,
+        };
     }
 
     /// Process one byte in canonical mode: handle editing keys, else buffer +
@@ -203,10 +249,15 @@ impl Tty {
                     self.ready.extend(self.line.drain(..));
                 }
             }
-            _ => {
-                self.line.push(b);
-                if self.termios.echo {
-                    echo.push(b);
+            other => {
+                // Only printable text enters the cooked line. Unhandled control
+                // bytes (< 0x20 and DEL) are dropped so a stray ^V/^A/etc. can't
+                // corrupt the line (and thus argv); UTF-8 bytes (>= 0x80) pass.
+                if other >= 0x20 && other != DEL {
+                    self.line.push(other);
+                    if self.termios.echo {
+                        echo.push(other);
+                    }
                 }
             }
         }
@@ -261,6 +312,7 @@ impl Tty {
         self.ready.clear();
         self.line.clear();
         self.eof = false;
+        self.esc = EscState::None;
     }
 }
 
@@ -421,6 +473,45 @@ mod tests {
         feed(&mut tty, "\r");
         assert_eq!(tty.read_line(), Some(b"cmd\n".to_vec()));
         assert_eq!(tty.read_line(), None);
+    }
+
+    #[test]
+    fn unhandled_control_bytes_do_not_enter_the_line() {
+        let mut tty = Tty::new();
+        // A stray ^V (0x16) between letters must not corrupt the command.
+        feed(&mut tty, "e");
+        tty.input(&[0x16]);
+        feed(&mut tty, "cho\r");
+        assert_eq!(tty.read(64), TtyRead::Data(b"echo\n".to_vec()));
+    }
+
+    #[test]
+    fn arrow_keys_are_swallowed_in_canonical_mode() {
+        let mut tty = Tty::new();
+        feed(&mut tty, "ls");
+        // Up arrow = ESC [ A. It (and its bytes) must not land in the line.
+        let out = tty.input(&[0x1b, b'[', b'A']);
+        assert_eq!(out.echo, Vec::<u8>::new());
+        feed(&mut tty, "\r");
+        assert_eq!(tty.read(64), TtyRead::Data(b"ls\n".to_vec()));
+    }
+
+    #[test]
+    fn ss3_and_lone_escape_sequences_are_swallowed() {
+        let mut tty = Tty::new();
+        feed(&mut tty, "a");
+        tty.input(&[0x1b, b'O', b'H']); // SS3 Home
+        tty.input(&[0x1b, b'x']); // lone ESC + key (Alt-x)
+        feed(&mut tty, "b\r");
+        assert_eq!(tty.read(64), TtyRead::Data(b"ab\n".to_vec()));
+    }
+
+    #[test]
+    fn raw_mode_passes_escape_sequences_through_untouched() {
+        let mut tty = Tty::new();
+        tty.termios.canonical = false;
+        tty.input(&[0x1b, b'[', b'A']); // a TUI wants the raw arrow bytes
+        assert_eq!(tty.read(64), TtyRead::Data(vec![0x1b, b'[', b'A']));
     }
 
     #[test]
