@@ -18,10 +18,16 @@ export const MSG = Object.freeze({
   PS: "ps",
   KILL: "kill",
   STDIN: "stdin",
+  // main → kernel: persist the durable filesystem now (e.g. tab hidden/closing).
+  FS_FLUSH: "fs_flush",
   // main → kernel: interactive terminal (xterm) channel
   TTY_INPUT: "tty_input", // raw keystrokes → the kernel line discipline
   RESIZE: "resize", // terminal window size changed
   TERM_START: "term_start", // begin the interactive shell REPL
+  // main → kernel: a preview HTTP request to inject into a listening process
+  // (ADR-021). Carries { id, port, bytes } (raw HTTP/1.1 request); the reply is
+  // PREVIEW_RESPONSE with the raw HTTP/1.1 response bytes.
+  PREVIEW_REQUEST: "preview_request",
   // kernel → main
   TERM_OUTPUT: "term_output", // bytes for the terminal display (prompt/echo/stdout)
   BOOTED: "booted",
@@ -33,6 +39,9 @@ export const MSG = Object.freeze({
   EXEC_STDERR: "exec_stderr",
   EXEC_DONE: "exec_done",
   PS_RESULT: "ps_result",
+  // kernel → main: the raw HTTP/1.1 response bytes for a PREVIEW_REQUEST (ADR-021),
+  // as { id, ok, bytes?, error? }.
+  PREVIEW_RESPONSE: "preview_response",
   ERROR: "error",
 
   // kernel worker → program worker

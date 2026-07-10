@@ -73,6 +73,23 @@ export class WorkerOS {
     };
 
     worker.addEventListener("message", (ev) => this._dispatch(ev.data));
+
+    // Persist the durable filesystem when the tab is hidden or unloading
+    // (ADR-022). `visibilitychange → hidden` is the reliable pre-close signal on
+    // desktop and mobile; `pagehide` covers bfcache/navigation. The write-behind
+    // timer in the worker already bounds loss to a couple seconds; this trims it.
+    if (typeof document !== "undefined" && document.addEventListener) {
+      const flushOnHide = () => {
+        if (document.visibilityState === "hidden") this.flush();
+      };
+      document.addEventListener("visibilitychange", flushOnHide);
+      addEventListener("pagehide", () => this.flush());
+    }
+  }
+
+  /** Force a durable snapshot of the filesystem now. Resolves when stored. */
+  flush() {
+    return this._request(MSG.FS_FLUSH, {});
   }
 
   _request(type, payload) {
@@ -87,6 +104,7 @@ export class WorkerOS {
     switch (msg.type) {
       case MSG.SPAWNED:
       case MSG.FS_WRITE:
+      case MSG.FS_FLUSH:
       case MSG.FS_READ:
       case MSG.PS_RESULT: {
         const p = this._pending.get(msg.id);
@@ -96,6 +114,17 @@ export class WorkerOS {
           else if (msg.type === MSG.FS_READ) p.resolve(msg.data);
           else if (msg.type === MSG.PS_RESULT) p.resolve(msg.procs);
           else p.resolve();
+        }
+        break;
+      }
+      case MSG.PREVIEW_RESPONSE: {
+        // The kernel injector's raw HTTP response bytes for a preview request
+        // (ADR-021); resolve with the bytes or reject (e.g. ECONNREFUSED).
+        const p = this._pending.get(msg.id);
+        if (p) {
+          this._pending.delete(msg.id);
+          if (msg.ok) p.resolve(msg.bytes);
+          else p.reject(new Error(msg.error || "preview failed"));
         }
         break;
       }
@@ -180,6 +209,16 @@ export class WorkerOS {
   /** `ps` — a snapshot of the live process table. */
   ps() {
     return this._request(MSG.PS, {});
+  }
+
+  /**
+   * Inject a raw HTTP/1.1 request (Uint8Array) into the process listening on
+   * `port` and resolve with the raw response bytes (ADR-021). The Service-Worker
+   * preview bridge (`installPreviewBridge`) drives this; rejects on ECONNREFUSED
+   * (nothing listening) or a kernel error.
+   */
+  preview(port, bytes) {
+    return this._request(MSG.PREVIEW_REQUEST, { port, bytes });
   }
 
   // ---- interactive terminal (kernel-owned TTY) ----

@@ -63,6 +63,18 @@ let pendingReads = [];
 // Parked net accepts awaiting an inbound connection: { pid, id, listener }
 // (ADR-021). Retried whenever a connection is added to some listener's backlog.
 let pendingAccepts = [];
+// The host-side network injector (ADR-021): a context-only kernel process whose
+// fds carry the client end of each injected preview connection. `injectWaiters`
+// are resolvers parked in `injectConnection`'s read loop, woken whenever a pipe
+// may have advanced (a server write/close/exit).
+let injectorPid = -1;
+let injectWaiters = [];
+function retryInjectReads() {
+  if (injectWaiters.length === 0) return;
+  const w = injectWaiters;
+  injectWaiters = [];
+  for (const r of w) r();
+}
 
 // ---- interactive terminal (the kernel-owned TTY REPL) ----------------------
 // The controlling terminal is a single stream to the host (xterm). The kernel
@@ -272,6 +284,7 @@ function handleExit(pid, code) {
   kernel.mark_exited(pid, code); // idempotent; closes its pipe/file fds → EOF downstream
   retryPendingReads(); // downstream pipe readers may now see EOF
   retrySyncPending();
+  retryInjectReads(); // an injected preview connection may now see EOF/data
   kernel.reap(pid);
   rec.worker.terminate();
   programs.delete(pid);
@@ -346,6 +359,57 @@ function retryPendingAccepts() {
   pendingAccepts = still;
 }
 
+/**
+ * The host-side network injector (ADR-021): open a loopback connection to the
+ * process listening on `port`, write the raw HTTP/1.1 request bytes, and collect
+ * the raw response bytes until the server closes its side. Drives the connection
+ * through the ordinary kernel syscalls on the injector pseudo-process, so the
+ * kernel needs no host-specific data path. Returns `{ ok, bytes }` or
+ * `{ ok:false, error }` (e.g. `ECONNREFUSED` when nothing listens on `port`).
+ */
+async function injectConnection(port, reqBytes) {
+  if (injectorPid < 0) return { ok: false, error: "injector not ready" };
+  let conn;
+  try {
+    conn = kernel.net_connect(injectorPid, port);
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+  // Deliver the request and wake the server's parked accept + reads.
+  try {
+    kernel.sys_write(injectorPid, conn.wfd, reqBytes);
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+  retryPendingAccepts();
+  retryPendingReads();
+  retrySyncPending();
+
+  // Read the response until EOF (the request carries `Connection: close`, so the
+  // server closes its write end when done). Parks on "again" between server writes.
+  const chunks = [];
+  for (;;) {
+    let r;
+    try {
+      r = kernel.sys_read(injectorPid, conn.rfd, 1 << 16);
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+    if (r.status === "data") { chunks.push(r.data); continue; }
+    if (r.status === "eof") break;
+    await new Promise((res) => injectWaiters.push(res)); // "again": await advance
+  }
+  try { kernel.sys_close(injectorPid, conn.wfd); } catch {}
+  try { kernel.sys_close(injectorPid, conn.rfd); } catch {}
+
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const bytes = new Uint8Array(n);
+  let off = 0;
+  for (const c of chunks) { bytes.set(c, off); off += c.length; }
+  return { ok: true, bytes };
+}
+
 // Parked synchronous reads (WASI) that would block: re-serviced when data/EOF
 // arrives, at which point the response is written to the SAB and the program
 // worker's Atomics.wait is released.
@@ -402,6 +466,7 @@ function serviceSync(pid) {
         else if (eff.target === "stderr") rec.sink.stderr(bytes);
         retryPendingReads(); // a pipe may have gained data
         retrySyncPending();
+        retryInjectReads();
         writeResponse(rec.syncSab, 0, { nwritten: eff.nwritten });
         break;
       }
@@ -482,6 +547,7 @@ function handleSyscall(pid, msg) {
         }
         retryPendingReads(); // a pipe may have gained data
         retrySyncPending();
+        retryInjectReads();
         break; // fire-and-forget: no reply
       }
       case "read": {
@@ -496,6 +562,11 @@ function handleSyscall(pid, msg) {
       case "close":
         kernel.sys_close(pid, args.fd);
         reply(pid, id, true, null);
+        // Closing a pipe write end lets a drained reader observe EOF — wake any
+        // parked reader (a downstream guest, or the injector's response reader).
+        retryPendingReads();
+        retrySyncPending();
+        retryInjectReads();
         break;
       case "readdir":
         reply(pid, id, true, kernel.sys_readdir(pid, args.path));
@@ -593,6 +664,9 @@ self.onmessage = async (ev) => {
       case MSG.BOOT: {
         await init({ module_or_path: msg.wasmUrl });
         kernel = WebKernel.boot();
+        // The network injector's pseudo-process (ADR-021): host-side endpoint the
+        // Service Worker's preview requests are driven through.
+        injectorPid = kernel.register_host_process();
         // Install the coreutils into /sbin (system binaries, kept apart from the
         // /bin OS programs) so the shell can resolve them via PATH.
         for (const [path, source] of Object.entries(coreutils)) {
@@ -698,6 +772,20 @@ self.onmessage = async (ev) => {
         retryPendingReads();
         retrySyncPending();
         break;
+
+      case MSG.PREVIEW_REQUEST: {
+        // A Service-Worker preview request (ADR-021): inject the raw HTTP bytes
+        // into the process listening on `msg.port`, stream the response back.
+        const result = await injectConnection(msg.port, msg.bytes);
+        post({
+          type: MSG.PREVIEW_RESPONSE,
+          id: msg.id,
+          ok: result.ok,
+          bytes: result.ok ? result.bytes : undefined,
+          error: result.ok ? undefined : result.error,
+        });
+        break;
+      }
 
       case MSG.TTY_INPUT: {
         // While the shell prompt is being edited, the REPL owns the terminal in

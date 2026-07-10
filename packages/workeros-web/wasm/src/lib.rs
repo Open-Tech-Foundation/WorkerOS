@@ -442,6 +442,14 @@ impl WebKernel {
 
     // ---- otf:net_* — port-keyed loopback sockets (ADR-021) ----
 
+    /// Register the host-side network injector's pseudo-process; returns its pid.
+    /// The kernel worker calls this once at boot, then drives preview connections
+    /// through the ordinary `net_connect`/`sys_write`/`sys_read` path on this pid.
+    #[wasm_bindgen]
+    pub fn register_host_process(&mut self) -> Pid {
+        self.inner.register_host_process()
+    }
+
     /// `otf:net_listen(port)`: claim `port` for `pid`. Returns the listener id;
     /// `EADDRINUSE` if held, `ENOTSUP` if the process lacks the capability.
     #[wasm_bindgen]
