@@ -18,7 +18,12 @@ export const MSG = Object.freeze({
   PS: "ps",
   KILL: "kill",
   STDIN: "stdin",
+  // main → kernel: interactive terminal (xterm) channel
+  TTY_INPUT: "tty_input", // raw keystrokes → the kernel line discipline
+  RESIZE: "resize", // terminal window size changed
+  TERM_START: "term_start", // begin the interactive shell REPL
   // kernel → main
+  TERM_OUTPUT: "term_output", // bytes for the terminal display (prompt/echo/stdout)
   BOOTED: "booted",
   SPAWNED: "spawned",
   STDOUT: "stdout",

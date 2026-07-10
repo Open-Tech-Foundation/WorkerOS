@@ -61,6 +61,8 @@ export class WorkerOS {
     this._pending = new Map(); // request id → {resolve, reject}
     this._procs = new Map(); // pid → Process
     this._execs = new Map(); // exec id → {onStdout, onStderr, resolve}
+    this._termListeners = []; // terminal-output subscribers (Uint8Array chunks)
+    this._termBuffer = []; // output emitted before a listener attached
 
     /** @type {{ write: (path: string, data: Uint8Array|string) => Promise<void>,
      *           read: (path: string) => Promise<Uint8Array> }} */
@@ -120,6 +122,11 @@ export class WorkerOS {
         if (proc) proc._emit(msg.type === MSG.STDOUT ? "stdout" : "stderr", msg.data);
         break;
       }
+      case MSG.TERM_OUTPUT: {
+        if (this._termListeners.length === 0) this._termBuffer.push(msg.data);
+        else for (const cb of this._termListeners) cb(msg.data);
+        break;
+      }
       case MSG.EXIT: {
         const proc = this._procs.get(msg.pid);
         if (proc) proc._finish(msg.code);
@@ -173,6 +180,40 @@ export class WorkerOS {
   /** `ps` — a snapshot of the live process table. */
   ps() {
     return this._request(MSG.PS, {});
+  }
+
+  // ---- interactive terminal (kernel-owned TTY) ----
+
+  /**
+   * Subscribe to terminal-display output (Uint8Array chunks: prompt, echo, and
+   * program stdout/stderr). Any output buffered before the first listener
+   * attaches is flushed immediately. Returns an unsubscribe fn.
+   */
+  onOutput(cb) {
+    this._termListeners.push(cb);
+    if (this._termBuffer.length) {
+      const buffered = this._termBuffer;
+      this._termBuffer = [];
+      for (const chunk of buffered) cb(chunk);
+    }
+    return () => {
+      this._termListeners = this._termListeners.filter((f) => f !== cb);
+    };
+  }
+
+  /** Send raw keystrokes to the terminal (through the kernel line discipline). */
+  input(data) {
+    this._send({ type: MSG.TTY_INPUT, data: toBytes(data) });
+  }
+
+  /** Report a new terminal window size (rows/cols in character cells). */
+  resize(rows, cols) {
+    this._send({ type: MSG.RESIZE, rows: rows | 0, cols: cols | 0 });
+  }
+
+  /** Start the interactive shell REPL. Call after attaching `onOutput`. */
+  startTerminal() {
+    this._send({ type: MSG.TERM_START });
   }
 
   /** Send a signal to a process by pid (defaults to SIGKILL). */

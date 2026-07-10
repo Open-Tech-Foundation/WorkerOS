@@ -23,8 +23,10 @@ let tmpSeq = 0;
  * @param {*} deps.kernel        the wasm WebKernel
  * @param {Function} deps.startProcess  ({argv, env, cwd, plan, sink}) => {pid, exited}
  * @param {{cwd: string, env: Record<string,string>}} deps.session  mutable shell state
+ * @param {() => Promise<string|null>} [deps.readLine]  read one interactive line
+ *        from the controlling terminal (kernel TTY); null on EOF/^C.
  */
-export function createShell({ kernel, startProcess, session }) {
+export function createShell({ kernel, startProcess, session, readLine }) {
   // Join a possibly-relative path against cwd (no symlinks; `.`/`..` collapsed).
   function absPath(cwd, p) {
     const base = p.startsWith("/") ? p : (cwd === "/" ? "" : cwd) + "/" + p;
@@ -114,9 +116,10 @@ export function createShell({ kernel, startProcess, session }) {
       } catch { return []; }
     },
     resolveDir: (cwd, target) => kernel.resolve_dir(cwd, target),
-    // Interactive `read` from the terminal isn't plumbed through MSG.EXEC yet;
-    // piped `read` works fully. Return EOF so a prompt-read fails cleanly.
-    readLine: async () => null,
+    // Interactive `read` from the controlling terminal, backed by the kernel TTY
+    // line discipline. Falls back to EOF when no terminal is attached (e.g. the
+    // programmatic `os.exec` path, which has no interactive input).
+    readLine: readLine || (async () => null),
   };
 
   const interp = createInterpreter({ runtime, session });

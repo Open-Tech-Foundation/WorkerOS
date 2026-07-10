@@ -15,6 +15,7 @@ import { programs as osPrograms } from "../../workeros-programs/src/index.js";
 import { allocSyncBuffer, readRequest, writeResponse } from "./sync-syscall.js";
 
 const enc = new TextEncoder();
+const dec = new TextDecoder();
 let kernel = null;
 let shell = null;
 
@@ -25,6 +26,111 @@ const session = { cwd: "/", env: { HOME: "/", PATH: "/bin:/sbin" } };
 const programs = new Map();
 // Parked pipe reads awaiting data/EOF: { pid, id, fd, max }.
 let pendingReads = [];
+
+// ---- interactive terminal (the kernel-owned TTY REPL) ----------------------
+// The controlling terminal is a single stream to the host (xterm). The kernel
+// owns the line discipline (echo/editing); this side runs the shell prompt loop
+// and delivers control-key signals to the foreground pipeline.
+const INTERRUPT = Symbol("tty-interrupt");
+let termStarted = false;
+let execRunning = false; // a foreground command is running under the REPL
+let termWaiter = null; // { resolve } awaiting the next committed input line
+const foreground = new Set(); // pids of the current foreground pipeline (for ^C)
+
+// Send bytes to the terminal display (main thread → xterm).
+function termOut(bytes) {
+  if (bytes && bytes.length) post({ type: MSG.TERM_OUTPUT, data: bytes });
+}
+
+// Resolve a parked line-waiter if a full line has cleared the line discipline.
+function pumpWaiter() {
+  if (!termWaiter) return;
+  const line = kernel.tty_read_line(); // Uint8Array, or null if no full line yet
+  if (line != null) {
+    const w = termWaiter;
+    termWaiter = null;
+    w.resolve(line);
+  }
+}
+
+// Await the next committed input line (the REPL prompt and the shell `read`
+// builtin share this). Resolves with the line bytes, or INTERRUPT on ^C.
+function waitForLine() {
+  return new Promise((resolve) => {
+    termWaiter = { resolve };
+    pumpWaiter();
+  });
+}
+
+// A ^C from the line discipline: interrupt the foreground pipeline if one is
+// running, else cancel the line being typed at the prompt.
+function onInterrupt() {
+  if (execRunning) {
+    for (const pid of [...foreground]) handleExit(pid, 130); // 128 + SIGINT
+    if (termWaiter) {
+      const w = termWaiter;
+      termWaiter = null;
+      w.resolve(INTERRUPT); // unblock a `read` builtin so it doesn't hang
+    }
+  } else if (termWaiter) {
+    const w = termWaiter;
+    termWaiter = null;
+    w.resolve(INTERRUPT);
+  }
+}
+
+function prompt() {
+  return `${session.cwd === "/" ? "/" : session.cwd} $ `;
+}
+
+// The interactive read-eval-print loop, reading command lines from the TTY.
+async function repl() {
+  for (;;) {
+    termOut(enc.encode(prompt()));
+    const lineBytes = await waitForLine();
+    if (lineBytes === INTERRUPT) continue; // ^C at the prompt → fresh prompt
+    const line = dec.decode(lineBytes).replace(/\n$/, "");
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    // Two conveniences the browser page used to own; now terminal-side. `clear`
+    // is an ANSI screen wipe; `ps` formats the live process table.
+    if (trimmed === "clear") {
+      termOut(enc.encode("\x1b[2J\x1b[H"));
+      continue;
+    }
+    if (trimmed === "ps") {
+      const rows = kernel
+        .list_processes()
+        .map((p) => `${String(p.pid).padStart(4)} ${p.state.padEnd(8)} ${p.argv.join(" ")}`);
+      termOut(enc.encode((rows.join("\r\n") || "(no live processes)") + "\r\n"));
+      continue;
+    }
+    execRunning = true;
+    try {
+      await shell.exec(line, termSink);
+    } catch (e) {
+      termOut(enc.encode("wsh: " + (e && e.message ? e.message : e) + "\r\n"));
+    } finally {
+      execRunning = false;
+    }
+  }
+}
+
+// The REPL's output sink: program stdout/stderr both flow to the single terminal
+// stream. \n is normalized to \r\n so a bare-LF program lands the cursor at col 0.
+const crlf = (b) => {
+  const s = dec.decode(b);
+  return s.includes("\n") && !s.includes("\r\n") ? enc.encode(s.replace(/\n/g, "\r\n")) : b;
+};
+const termSink = { stdout: (b) => termOut(crlf(b)), stderr: (b) => termOut(crlf(b)) };
+
+// The shell `read` builtin / prompts read a line from the terminal. Returns the
+// line text (newline stripped), or null on EOF / ^C.
+async function readLineFromTty() {
+  const b = await waitForLine();
+  if (b === INTERRUPT || b == null) return null;
+  return dec.decode(b).replace(/\n$/, "");
+}
 
 const PROGRAM_WORKER_URL = new URL("./program-worker.js", import.meta.url);
 
@@ -68,6 +174,9 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
 /** Used by the shell driver: spawn one command with a stdio plan + sink. */
 function startProcess({ argv, env, cwd, plan, sink }) {
   const spawned = spawnKernel(argv, env, cwd, plan);
+  // Shell-run programs form the terminal's foreground pipeline, so ^C can
+  // interrupt them. (Client `spawn` uses startWorker directly and is not tracked.)
+  foreground.add(spawned.pid);
   const exited = startWorker(spawned, { argv, env, cwd, sink, onExit: () => {} });
   return { pid: spawned.pid, exited };
 }
@@ -83,6 +192,7 @@ function handleExit(pid, code) {
   kernel.reap(pid);
   rec.worker.terminate();
   programs.delete(pid);
+  foreground.delete(pid);
   pendingReads = pendingReads.filter((pr) => pr.pid !== pid);
   try {
     rec.onExit(code);
@@ -326,7 +436,7 @@ self.onmessage = async (ev) => {
           if (data == null) continue; // a wasm program not built in this environment
           kernel.fs_write(prog.bin, typeof data === "string" ? enc.encode(data) : new Uint8Array(data));
         }
-        shell = createShell({ kernel, startProcess, session });
+        shell = createShell({ kernel, startProcess, session, readLine: readLineFromTty });
         post({ type: MSG.BOOTED, version: kernel.version, abi: kernel.abi });
         break;
       }
@@ -390,6 +500,34 @@ self.onmessage = async (ev) => {
         kernel.feed_stdin(msg.pid, msg.data);
         retryPendingReads();
         retrySyncPending();
+        break;
+
+      case MSG.TTY_INPUT: {
+        // Raw keystrokes from xterm → the kernel line discipline. It returns the
+        // bytes to echo and any control-key signal.
+        const res = kernel.tty_input(msg.data);
+        termOut(res.echo);
+        if (res.signal === "int") onInterrupt();
+        // A committed line may now unblock a foreground program's read, or the
+        // REPL / `read` builtin waiting on the prompt.
+        retryPendingReads();
+        retrySyncPending();
+        pumpWaiter();
+        break;
+      }
+
+      case MSG.RESIZE:
+        kernel.tty_set_winsize(msg.rows | 0, msg.cols | 0);
+        // (SIGWINCH delivery to the foreground process is future work.)
+        break;
+
+      case MSG.TERM_START:
+        if (!termStarted) {
+          termStarted = true;
+          repl().catch((e) =>
+            termOut(enc.encode("wsh: repl crashed: " + (e && e.message ? e.message : e) + "\r\n")),
+          );
+        }
         break;
 
       default:

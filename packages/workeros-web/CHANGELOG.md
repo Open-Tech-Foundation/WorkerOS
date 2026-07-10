@@ -8,6 +8,14 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **Interactive terminal over the kernel TTY.** The kernel worker now runs the
+  shell REPL itself, reading command lines from the kernel's TTY line discipline
+  and streaming a single terminal output channel back to the main thread. New
+  protocol messages `TTY_INPUT`/`RESIZE`/`TERM_START` (main→kernel) and
+  `TERM_OUTPUT` (kernel→main); new client API `os.onOutput()`, `os.input()`,
+  `os.resize()`, `os.startTerminal()`. `Ctrl-C` interrupts the foreground
+  pipeline; the shell `read` builtin/prompts now read real interactive input
+  (`shell-exec` gained a `readLine` dep, replacing the EOF stub).
 - **`resolveGraph` syscall** — the program worker's `sys` ABI can ask the kernel to
   resolve a script's module graph, so the userland `/bin/node` runtime evaluates the
   script in its own worker instead of the kernel special-casing a `node` interpreter.
