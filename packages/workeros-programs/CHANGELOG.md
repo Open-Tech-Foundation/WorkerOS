@@ -41,6 +41,14 @@ guest runtime. Format:
     scrolls. No kernel/host change — xterm forwards the events and the raw TTY
     passes them through; disabled again on exit. `rxToCx`, `gutterWidthFor`, and
     `parseMouse` are exported and unit-tested; a real click is covered by e2e.
+  - **Robust rendering & DOS/Mac files** — control characters now show as inverse
+    caret notation (`^M`, `^A`, `^?`) instead of being emitted raw, so a stray CR
+    can no longer move the cursor or blank a row. Line endings are detected on load
+    (`\n`/`\r\n`/`\r`), stripped from the buffer, and re-applied on save, so a DOS or
+    Mac file round-trips unchanged (`Read N lines [DOS]`). The chrome bars (title,
+    message, prompts) now measure and pad by **display columns** (`dispWidth`/
+    `fitCols`), so a wide-character filename no longer misaligns them. A `SIGWINCH`
+    while a prompt is open repaints the prompt instead of clobbering it.
 - **`process` signal handling.** The node runtime gains a minimal EventEmitter on
   `process` (and its streams): `process.on('SIGINT'|'SIGWINCH'|'SIGTSTP'…, cb)`,
   `once`/`off`/`emit`/`listenerCount`. Registering a signal handler tells the

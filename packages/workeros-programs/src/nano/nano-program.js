@@ -46,6 +46,7 @@ let textRows = 20; // editable rows = screenRows - 4 chrome rows
 let cutBuffer = []; // lines held by ^K, pasted by ^U
 let lastWasCut = false; // consecutive ^K accumulate into cutBuffer
 let showLineNumbers = true; // left gutter with line numbers (toggle: M-N)
+let lineEnding = "\n"; // detected on load ("\n" unix, "\r\n" dos, "\r" mac)
 
 // Undo/redo: whole-document snapshots. `coalesceKey` groups a run of like edits
 // (a burst of typing, a run of backspaces) into one undo step; any other action
@@ -143,22 +144,36 @@ export function cxToRx(line, col) {
   return rx;
 }
 
+// Is `cp` a control character we must not emit raw (it would move the cursor or
+// clear the line)? C0 controls (except tab, handled separately) and DEL.
+const isCtrl = (cp) => (cp < 0x20 && cp !== 0x09) || cp === 0x7f;
+// Caret notation for a control char: ^@ ^A … ^? (DEL). Two columns wide.
+const caret = (cp) => "^" + String.fromCharCode(cp === 0x7f ? 0x3f : cp ^ 0x40);
+
 // The visible slice of a line for a horizontal window [startCol, startCol+width):
-// tabs expand to spaces and a wide glyph clipped by either edge renders as a
-// space for its visible half, so columns line up exactly.
+// tabs expand to spaces, control chars show as inverse caret notation (^X), and a
+// wide glyph clipped by either edge renders as a space for its visible half, so
+// columns line up exactly.
 export function visibleSlice(line, startCol, width) {
   let col = 0, out = "", i = 0;
   const end = startCol + width;
   while (i < line.length) {
     const isTab = line[i] === "\t";
-    let cp = 0, adv = 1, w;
+    let cp = 0, adv = 1, w, ctrl = false;
     if (isTab) w = TABSTOP - (col % TABSTOP);
-    else { cp = line.codePointAt(i); w = charWidth(cp); adv = cp > 0xffff ? 2 : 1; }
+    else {
+      cp = line.codePointAt(i);
+      adv = cp > 0xffff ? 2 : 1;
+      if (isCtrl(cp)) { ctrl = true; w = 2; } // caret notation ^X is two columns
+      else w = charWidth(cp);
+    }
     const cellStart = col, cellEnd = col + w;
     if (cellEnd <= startCol) { col = cellEnd; i += adv; continue; }
     if (cellStart >= end) break;
     if (isTab || cellStart < startCol || cellEnd > end) {
       out += " ".repeat(Math.min(cellEnd, end) - Math.max(cellStart, startCol));
+    } else if (ctrl) {
+      out += "\x1b[7m" + caret(cp) + "\x1b[0m";
     } else {
       out += String.fromCodePoint(cp);
     }
@@ -166,6 +181,29 @@ export function visibleSlice(line, startCol, width) {
     i += adv;
   }
   return out;
+}
+
+// Display width of a plain string (no tabs assumed): wide glyphs count as two,
+// control chars as their two-column caret form. Used to lay out the chrome bars.
+export function dispWidth(s) {
+  let w = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    w += isCtrl(cp) ? 2 : charWidth(cp);
+  }
+  return w;
+}
+// Pad/truncate a string to exactly `n` display columns (column-accurate `fit`).
+export function fitCols(s, n) {
+  let out = "", w = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    const cw = isCtrl(cp) ? 2 : charWidth(cp);
+    if (w + cw > n) break;
+    out += isCtrl(cp) ? caret(cp) : ch;
+    w += cw;
+  }
+  return out + " ".repeat(Math.max(0, n - w));
 }
 
 // Inverse of cxToRx: the code-unit index whose cell contains render column `rx`
@@ -221,8 +259,8 @@ const fg = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
 const GUTTER_DIM = fg(105, 112, 128); // inactive line numbers
 const GUTTER_CUR = fg(255, 150, 80); // the current line's number (accent)
 
-// Pad/truncate a plain string to exactly `n` columns.
-const fit = (s, n) => (s.length > n ? s.slice(0, n) : s + " ".repeat(n - s.length));
+// Pad/truncate to exactly `n` display columns (column-accurate, wide/ctrl aware).
+const fit = fitCols;
 
 function shortcut(key, label) {
   return `${INVERSE}${key}${RESET} ${label}`;
@@ -282,6 +320,10 @@ function refresh() {
   out += `\x1b[${screenRow};${screenCol}H\x1b[?25h`;
   write(out);
 }
+
+// While a message-bar prompt is active this holds its redraw closure, so a
+// SIGWINCH repaints the prompt instead of the main frame (which it would clobber).
+let promptRedraw = null;
 
 // ---- input: decode raw bytes into keys -------------------------------------
 let inbuf = []; // pending input bytes not yet consumed into a key
@@ -473,25 +515,39 @@ function handleMouse(m) {
 // cancelled (^C / ESC). Handles printable input, backspace, and Enter.
 async function promptLine(label, initial = "") {
   let s = initial;
-  for (;;) {
+  const draw = () => {
     const shown = label + s;
     write(`\x1b[${screenRows - 2};1H${INVERSE}${fit(shown, screenCols)}${RESET}` +
-      `\x1b[${screenRows - 2};${Math.min(shown.length + 1, screenCols)}H\x1b[?25h`);
-    const k = await nextKey();
-    if (k.key === "enter") return s;
-    if (k.key === "esc" || (k.ctrl === "C")) return null;
-    if (k.key === "backspace") s = s.slice(0, -1);
-    else if (k.char) s += k.char;
+      `\x1b[${screenRows - 2};${Math.min(dispWidth(shown) + 1, screenCols)}H\x1b[?25h`);
+  };
+  promptRedraw = draw;
+  try {
+    for (;;) {
+      draw();
+      const k = await nextKey();
+      if (k.key === "enter") return s;
+      if (k.key === "esc" || (k.ctrl === "C")) return null;
+      if (k.key === "backspace") s = s.slice(0, -1);
+      else if (k.char) s += k.char;
+    }
+  } finally {
+    promptRedraw = null;
   }
 }
 // A yes/no/cancel prompt. Returns true (yes), false (no), or null (cancel).
 async function promptYesNo(label) {
-  write(`\x1b[${screenRows - 2};1H${INVERSE}${fit(label + " [Y/N]", screenCols)}${RESET}`);
-  for (;;) {
-    const k = await nextKey();
-    if (k.char === "y" || k.char === "Y") return true;
-    if (k.char === "n" || k.char === "N") return false;
-    if (k.key === "esc" || k.ctrl === "C") return null;
+  const draw = () => write(`\x1b[${screenRows - 2};1H${INVERSE}${fit(label + " [Y/N]", screenCols)}${RESET}`);
+  promptRedraw = draw;
+  try {
+    for (;;) {
+      draw();
+      const k = await nextKey();
+      if (k.char === "y" || k.char === "Y") return true;
+      if (k.char === "n" || k.char === "N") return false;
+      if (k.key === "esc" || k.ctrl === "C") return null;
+    }
+  } finally {
+    promptRedraw = null;
   }
 }
 
@@ -515,11 +571,16 @@ async function loadFile(path) {
     const buf = new Uint8Array(n);
     let o = 0;
     for (const c of chunks) { buf.set(c, o); o += c.length; }
-    const parts = dec.decode(buf).split("\n");
+    const text = dec.decode(buf);
+    // Detect the line ending so we round-trip DOS/Mac files unchanged, and strip
+    // it from the buffer so a stray CR can't corrupt the on-screen rendering.
+    lineEnding = /\r\n/.test(text) ? "\r\n" : /\r/.test(text) ? "\r" : "\n";
+    const parts = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
     // A trailing newline yields a phantom empty final element; drop it.
     if (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();
     rows = parts.length ? parts : [""];
-    setMsg(`Read ${rows.length} line${rows.length === 1 ? "" : "s"}`);
+    const fmt = lineEnding === "\r\n" ? " [DOS]" : lineEnding === "\r" ? " [Mac]" : "";
+    setMsg(`Read ${rows.length} line${rows.length === 1 ? "" : "s"}${fmt}`);
   } catch {
     rows = [""];
     setMsg("New File");
@@ -531,8 +592,9 @@ async function saveFile(path) {
     path = await promptLine("File Name to Write: ", filename || "");
     if (path === null || path === "") { setMsg("Cancelled"); return false; }
   }
-  // Join with newlines; a non-empty buffer gets a trailing newline (POSIX text).
-  const body = rows.length === 1 && rows[0] === "" ? "" : rows.join("\n") + "\n";
+  // Join with the buffer's detected line ending (DOS/Mac files round-trip); a
+  // non-empty buffer gets a trailing terminator (POSIX text).
+  const body = rows.length === 1 && rows[0] === "" ? "" : rows.join(lineEnding) + lineEnding;
   try {
     const fd = await sys.open(abs(path), { create: true, truncate: true });
     try {
@@ -574,13 +636,19 @@ async function search() {
 }
 // A yes/no/all/cancel prompt for the replace loop.
 async function promptReplace() {
-  write(`\x1b[${screenRows - 2};1H${INVERSE}${fit("Replace this instance? [Y/N/A]", screenCols)}${RESET}`);
-  for (;;) {
-    const k = await nextKey();
-    if (k.char === "y" || k.char === "Y" || k.key === "enter") return "y";
-    if (k.char === "n" || k.char === "N") return "n";
-    if (k.char === "a" || k.char === "A") return "a";
-    if (k.key === "esc" || k.ctrl === "C") return "cancel";
+  const draw = () => write(`\x1b[${screenRows - 2};1H${INVERSE}${fit("Replace this instance? [Y/N/A]", screenCols)}${RESET}`);
+  promptRedraw = draw;
+  try {
+    for (;;) {
+      draw();
+      const k = await nextKey();
+      if (k.char === "y" || k.char === "Y" || k.key === "enter") return "y";
+      if (k.char === "n" || k.char === "N") return "n";
+      if (k.char === "a" || k.char === "A") return "a";
+      if (k.key === "esc" || k.ctrl === "C") return "cancel";
+    }
+  } finally {
+    promptRedraw = null;
   }
 }
 
@@ -671,7 +739,11 @@ async function main() {
   write("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
   sys.sighandle("SIGWINCH", true);
   sys.onSignal(async (sig) => {
-    if (sig === "SIGWINCH") { await updateSize(); scroll(); refresh(); }
+    if (sig !== "SIGWINCH") return;
+    await updateSize();
+    // If a message-bar prompt is up, repaint it; otherwise repaint the buffer.
+    if (promptRedraw) promptRedraw();
+    else { scroll(); refresh(); }
   });
 
   try {

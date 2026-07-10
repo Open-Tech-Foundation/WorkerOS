@@ -298,3 +298,39 @@ test("nano: line-number gutter renders in 24-bit color", opts, async () => {
   assert.match(buf.out, /38;2;255;150;80/, "current-line number uses a 24-bit accent color");
   assert.match(buf.out, /38;2;105;112;128/, "other line numbers use a 24-bit dim color");
 });
+
+test("nano: a CRLF (DOS) file round-trips and doesn't corrupt the display", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/dos.txt", "one\r\ntwo\r\n"); // DOS line endings
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-400)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /dos.txt\r");
+    await waitFor("Read 2 lines [DOS]"); // the DOS format was detected
+    os.input("\x05"); // ^E end of line 1 ("one") — the stray CR was stripped
+    await sleep(80);
+    os.input("!");
+    await sleep(120);
+    os.input("\x0f");
+    await waitFor("File Name to Write");
+    os.input("\r");
+    await waitFor("Wrote 2 lines");
+    os.input("\x18");
+    await sleep(120);
+    return { saved: new TextDecoder().decode(await os.fs.read("/dos.txt")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(buf.saved, "one!\r\ntwo\r\n", "CRLF endings are preserved and the edit landed at real EOL");
+});

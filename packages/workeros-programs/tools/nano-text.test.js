@@ -17,6 +17,8 @@ import {
   rxToCx,
   gutterWidthFor,
   parseMouse,
+  dispWidth,
+  fitCols,
 } from "../src/nano/nano-program.js";
 
 const cp = (s) => s.codePointAt(0);
@@ -91,4 +93,23 @@ test("parseMouse decodes SGR mouse reports and rejects non-mouse CSI", () => {
   assert.deepEqual(parseMouse("<65;1;1", "m"), { b: 65, x: 1, y: 1, press: false });
   assert.equal(parseMouse("3", "~"), null); // an ordinary CSI (Delete)
   assert.equal(parseMouse("<0;12", "M"), null); // malformed (missing y)
+});
+
+test("control characters render as inverse caret notation, not raw bytes", () => {
+  // A stray CR (from a CRLF line) or ^A must never be emitted raw — it would move
+  // the cursor / clear the row. It shows as a 2-column inverse "^M" / "^A".
+  assert.equal(visibleSlice("a\rb", 0, 10), "a\x1b[7m^M\x1b[0mb");
+  assert.equal(visibleSlice("\x01x", 0, 10), "\x1b[7m^A\x1b[0mx");
+  assert.equal(visibleSlice("a\x7fb", 0, 10), "a\x1b[7m^?\x1b[0mb"); // DEL → ^?
+  // The caret glyph is two columns, so it clips like a wide glyph.
+  assert.equal(visibleSlice("\x01", 1, 5), " "); // right half only
+});
+
+test("dispWidth / fitCols measure and pad by display columns (wide + ctrl)", () => {
+  assert.equal(dispWidth("abc"), 3);
+  assert.equal(dispWidth("日本"), 4); // two wide glyphs
+  assert.equal(dispWidth("a\x01"), 3); // ^A counts as two
+  assert.equal(fitCols("abc", 5), "abc  "); // pad to 5
+  assert.equal(fitCols("日本", 3), "日 "); // truncate: the second wide glyph won't fit
+  assert.equal(fitCols("日本", 4), "日本"); // exact fit
 });
