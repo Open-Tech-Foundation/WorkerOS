@@ -8,6 +8,13 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **Cooperative signals + `SIGWINCH`.** New protocol messages `SIGNAL`
+  (kernel→program) and `SIGACTION` (program→kernel), and `sys.onSignal`/
+  `sys.sighandle` on the ABI. A foreground process that installed a `SIGINT`
+  handler now receives `Ctrl-C` cooperatively (and keeps running) instead of being
+  hard-killed; one without a handler is still killed (130). A terminal resize
+  delivers `SIGWINCH` to the foreground process; `Ctrl-Z` delivers `SIGTSTP`
+  (default disposition: ignore — no job-control suspend yet).
 - **`isatty`/`winsize` syscalls** — the program worker's `sys` ABI gains
   `isatty(fd)` and `winsize()`, serviced by the kernel worker from the kernel TTY,
   so guests (WASI + the node runtime) can detect the terminal and its size.

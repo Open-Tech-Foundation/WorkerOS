@@ -40,6 +40,11 @@ function writeBytes(fd, bytes) {
   return u8.length;
 }
 
+// The guest's signal dispatcher (installed by a runtime like /bin/node). The
+// kernel worker delivers SIGINT/SIGWINCH/SIGTSTP as async messages; a JS guest
+// processes them at event-loop boundaries (cooperative — there is no preemption).
+let signalDispatch = null;
+
 let exited = false;
 function reportExit(code) {
   if (exited) return;
@@ -67,6 +72,12 @@ function makeSys(start) {
     // it. Guests query these once at startup (e.g. process.stdout.isTTY/columns).
     isatty: (fd) => call("isatty", { fd }),
     winsize: () => call("winsize", {}),
+    // Signals. `onSignal` registers the guest's dispatcher; `sighandle` tells the
+    // kernel worker whether the guest catches a signal (so a caught SIGINT is
+    // delivered cooperatively rather than the process being hard-killed).
+    onSignal: (cb) => { signalDispatch = cb; },
+    sighandle: (signal, on) =>
+      kernel.postMessage({ type: MSG.SIGACTION, signal, on: !!on }),
     readdir: (path) => call("readdir", { path }),
     stat: (path) => call("stat", { path }),
     mkdir: (path) => call("mkdir", { path }),
@@ -192,6 +203,13 @@ self.onmessage = async (ev) => {
     if (p) {
       pendingCalls.delete(msg.id);
       msg.ok ? p.resolve(msg.value) : p.reject(new Error(msg.error));
+    }
+    return;
+  }
+  if (msg.type === MSG.SIGNAL) {
+    // Cooperative delivery: hand the signal to the guest's dispatcher (if any).
+    try { signalDispatch?.(msg.signal); } catch (e) {
+      writeBytes(2, new TextEncoder().encode("signal handler error: " + (e?.message ?? e) + "\n"));
     }
     return;
   }

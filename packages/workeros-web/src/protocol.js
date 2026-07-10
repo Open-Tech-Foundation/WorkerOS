@@ -37,8 +37,14 @@ export const MSG = Object.freeze({
 
   // kernel worker → program worker
   START: "start",
+  // kernel worker → program worker: deliver a cooperative signal (SIGINT/SIGWINCH/
+  // SIGTSTP) to a JS guest that registered a handler.
+  SIGNAL: "signal",
   // program worker → kernel worker
   SYSCALL: "syscall",
+  // program worker → kernel worker: the guest installed/removed a handler for a
+  // signal, so the kernel routes it cooperatively instead of hard-killing.
+  SIGACTION: "sigaction",
   // program worker → kernel worker: "a synchronous syscall request is waiting in
   // the shared buffer" (WASI blocking calls; the reply travels via the SAB).
   SYNC: "sync",

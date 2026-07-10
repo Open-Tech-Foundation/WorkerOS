@@ -36,6 +36,18 @@ let termStarted = false;
 let execRunning = false; // a foreground command is running under the REPL
 let termWaiter = null; // { resolve } awaiting the next committed input line
 const foreground = new Set(); // pids of the current foreground pipeline (for ^C)
+const caughtSignals = new Map(); // pid → Set<signal> the guest installed a handler for
+
+// Deliver a cooperative signal to a live JS program (posted to its worker).
+function deliverSignal(pid, signal) {
+  const rec = programs.get(pid);
+  if (rec && !rec.done) rec.worker.postMessage({ type: MSG.SIGNAL, signal });
+}
+
+// Whether a process asked to catch `signal` (vs. taking the default disposition).
+function catches(pid, signal) {
+  return caughtSignals.get(pid)?.has(signal) ?? false;
+}
 
 // Send bytes to the terminal display (main thread → xterm).
 function termOut(bytes) {
@@ -63,10 +75,15 @@ function waitForLine() {
 }
 
 // A ^C from the line discipline: interrupt the foreground pipeline if one is
-// running, else cancel the line being typed at the prompt.
+// running, else cancel the line being typed at the prompt. A foreground process
+// that installed a SIGINT handler receives it cooperatively (and keeps running);
+// one that did not is hard-killed with the conventional 130 (128 + SIGINT).
 function onInterrupt() {
   if (execRunning) {
-    for (const pid of [...foreground]) handleExit(pid, 130); // 128 + SIGINT
+    for (const pid of [...foreground]) {
+      if (catches(pid, "SIGINT")) deliverSignal(pid, "SIGINT");
+      else handleExit(pid, 130);
+    }
     if (termWaiter) {
       const w = termWaiter;
       termWaiter = null;
@@ -76,6 +93,15 @@ function onInterrupt() {
     const w = termWaiter;
     termWaiter = null;
     w.resolve(INTERRUPT);
+  }
+}
+
+// A ^Z from the line discipline. WorkerOS has no job-control suspend yet, so the
+// default disposition is *ignore* (not stop); a foreground process that installed
+// a SIGTSTP handler is told, and can act on it.
+function onSusp() {
+  for (const pid of [...foreground]) {
+    if (catches(pid, "SIGTSTP")) deliverSignal(pid, "SIGTSTP");
   }
 }
 
@@ -193,6 +219,7 @@ function handleExit(pid, code) {
   rec.worker.terminate();
   programs.delete(pid);
   foreground.delete(pid);
+  caughtSignals.delete(pid);
   pendingReads = pendingReads.filter((pr) => pr.pid !== pid);
   try {
     rec.onExit(code);
@@ -334,6 +361,13 @@ function onProgramMessage(pid, msg) {
     case MSG.PROC_EXIT:
       handleExit(pid, msg.code | 0);
       break;
+    case MSG.SIGACTION: {
+      let set = caughtSignals.get(pid);
+      if (!set) caughtSignals.set(pid, (set = new Set()));
+      if (msg.on) set.add(msg.signal);
+      else set.delete(msg.signal);
+      break;
+    }
   }
 }
 
@@ -514,6 +548,7 @@ self.onmessage = async (ev) => {
         const res = kernel.tty_input(msg.data);
         termOut(res.echo);
         if (res.signal === "int") onInterrupt();
+        else if (res.signal === "susp") onSusp();
         // A committed line may now unblock a foreground program's read, or the
         // REPL / `read` builtin waiting on the prompt.
         retryPendingReads();
@@ -524,7 +559,9 @@ self.onmessage = async (ev) => {
 
       case MSG.RESIZE:
         kernel.tty_set_winsize(msg.rows | 0, msg.cols | 0);
-        // (SIGWINCH delivery to the foreground process is future work.)
+        // Notify the foreground process(es) so a TUI can re-layout. Default
+        // disposition is ignore, so a program without a handler is unaffected.
+        for (const pid of [...foreground]) deliverSignal(pid, "SIGWINCH");
         break;
 
       case MSG.TERM_START:

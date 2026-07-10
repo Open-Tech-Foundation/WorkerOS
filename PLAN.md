@@ -79,10 +79,15 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
   awareness ✅** — WASI `isatty(0..2)` returns true (stdio is a non-seekable
   character device) and the node runtime sets `process.*.isTTY` +
   `stdout.columns`/`rows` (via new `isatty`/`winsize` syscalls), reversing the
-  Phase-5 `isTTY=false` stopgap. Remaining TTY follow-ups: `SIGWINCH` delivery to
-  the foreground process; readline-style history + in-line cursor editing; a
-  `require('tty')`/`node:tty` builtin (gated on the node: builtin registry, Phase 5
-  §C); WASI termios/window-size are not expressible in Preview 1.
+  Phase-5 `isTTY=false` stopgap. **Cooperative signals ✅** — a foreground process
+  that installs a `SIGINT` handler catches `Ctrl-C` instead of being killed;
+  `SIGWINCH` is delivered on resize (refreshing `process.stdout.columns`/`rows`);
+  `SIGTSTP` is delivered on `Ctrl-Z` (default: ignore). Remaining TTY follow-ups:
+  real **job control** (`SIGTSTP` suspend + `fg`/`bg`, process groups); async
+  signal delivery to **WASI** guests (only JS guests are cooperative today);
+  readline-style history + in-line cursor editing; a `require('tty')`/`node:tty`
+  builtin (gated on the node: builtin registry, Phase 5 §C); WASI termios/
+  window-size are not expressible in Preview 1.
 
 **Exit criteria:** `echo hi | cat > f && cat f` produces `hi`; `ps` lists live processes; a backgrounded job survives and is killable; coreutils pass a behavior test suite.
 

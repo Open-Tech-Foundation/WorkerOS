@@ -8,6 +8,13 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`process` signal handling.** The node runtime gains a minimal EventEmitter on
+  `process` (and its streams): `process.on('SIGINT'|'SIGWINCH'|'SIGTSTP'…, cb)`,
+  `once`/`off`/`emit`/`listenerCount`. Registering a signal handler tells the
+  kernel (via `sys.sighandle`) to route that signal cooperatively. `SIGWINCH`
+  refreshes `process.stdout.columns`/`rows` and emits `stdout`'s `resize` before
+  the handler runs. Together with the kernel wiring this makes `Ctrl-C` catchable
+  and terminal-resize observable from a script.
 - **Terminal awareness for guests.** WASI programs now see stdio (fd 0/1/2) as a
   non-seekable character device, so `isatty(0..2)` returns true on the terminal
   (the WASI host clears the `FD_SEEK`/`FD_TELL` rights that made libc report
