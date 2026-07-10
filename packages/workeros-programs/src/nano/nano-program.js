@@ -485,7 +485,13 @@ async function nextByte() {
 async function nextKey() {
   const b = await nextByte();
   if (b === -1) return { key: "eof" };
-  if (b === 0x1b) return parseEsc();
+  if (b === 0x1b) {
+    const k = await parseEsc();
+    // Bracketed paste: gather the whole block so its newlines don't each trigger
+    // auto-indent (which would stair-step the text). Inserted literally instead.
+    if (k.key === "pastestart") return { paste: await readPasteBody() };
+    return k;
+  }
   if (b === 0x0d || b === 0x0a) return { key: "enter" };
   if (b === 0x09) return { char: "\t" }; // Tab inserts a tab
   if (b === 0x7f || b === 0x08) return { key: "backspace" };
@@ -521,6 +527,23 @@ async function parseEsc() {
     params += String.fromCharCode(d);
   }
 }
+// Read a bracketed-paste body: raw bytes up to the paste-end marker ESC [ 201 ~.
+// Returns the enclosed text with CR/CRLF normalized to LF.
+async function readPasteBody() {
+  const END = [0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e]; // ESC [ 2 0 1 ~
+  const bytes = [];
+  for (;;) {
+    const b = await nextByte();
+    if (b === -1) break;
+    bytes.push(b);
+    const n = bytes.length;
+    if (n >= END.length && END.every((e, i) => bytes[n - END.length + i] === e)) {
+      bytes.length = n - END.length; // drop the terminator
+      break;
+    }
+  }
+  return dec.decode(new Uint8Array(bytes)).replace(/\r\n?/g, "\n");
+}
 function decodeCsi(final, params) {
   // SGR mouse report: ESC [ < b ; x ; y  (M press / m release).
   if (params[0] === "<") {
@@ -543,6 +566,8 @@ function decodeCsi(final, params) {
       if (params === "3") return { key: "del" };
       if (params === "5") return { key: "pgup" };
       if (params === "6") return { key: "pgdn" };
+      if (params === "200") return { key: "pastestart" }; // bracketed paste begin
+      if (params === "201") return { key: "esc" }; // stray paste end: ignore
       return { key: "esc" };
     default: return { key: "esc" };
   }
@@ -1058,7 +1083,7 @@ async function main() {
   // reporting so clicks/scroll arrive as input we decode ourselves.
   const savedAttr = await sys.tcgetattr();
   await sys.tcsetattr({ canonical: false, echo: false, isig: false });
-  write("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+  write("\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h");
   sys.sighandle("SIGWINCH", true);
   sys.onSignal(async (sig) => {
     if (sig !== "SIGWINCH") return;
@@ -1118,7 +1143,8 @@ async function main() {
           case "L": setMsg(""); break; // refresh happens at loop top
           default: break;
         }
-      } else if (k.char) insertChar(k.char);
+      } else if (k.paste !== undefined) insertText(k.paste); // literal block, no auto-indent
+      else if (k.char) insertChar(k.char);
       else {
         switch (k.key) {
           case "enter": insertNewline(); break;
@@ -1144,7 +1170,7 @@ async function main() {
     // Always restore the terminal, even on error: disable mouse reporting, leave
     // the alternate screen, and put the saved termios back.
     sys.sighandle("SIGWINCH", false);
-    write("\x1b[?1006l\x1b[?1000l\x1b[?1049l");
+    write("\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?1049l");
     await sys.tcsetattr(savedAttr);
   }
 }

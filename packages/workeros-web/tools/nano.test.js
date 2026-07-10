@@ -372,6 +372,39 @@ test("nano: mark (^6) + copy (M-6) + paste (^U) duplicates a selection", opts, a
   assert.equal(buf.saved, "hello world\nhello world\n", "the copied selection was pasted on the new line");
 });
 
+test("nano: bracketed paste keeps indentation literal (no auto-indent staircase)", opts, async () => {
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (out.includes(s)) return; await new Promise((r) => setTimeout(r, 40)); }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    await waitFor("$");
+    os.input("nano /paste.js\r");
+    await waitFor("nano");
+    // Already-indented code, delivered as a bracketed-paste block (ESC[200~ … ESC[201~).
+    // Without bracketed paste each newline would auto-indent, stair-stepping the body.
+    const code = "function f() {\n  if (x) {\n    return 1;\n  }\n}";
+    os.input("\x1b[200~" + code + "\x1b[201~");
+    await sleep(150);
+    os.input("\x0f"); await waitFor("File Name to Write"); os.input("\r"); await waitFor("Wrote");
+    os.input("\x18"); await sleep(100);
+    return { saved: new TextDecoder().decode(await os.fs.read("/paste.js")) };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(
+    buf.saved,
+    "function f() {\n  if (x) {\n    return 1;\n  }\n}\n",
+    "the pasted block kept its original indentation",
+  );
+});
+
 test("nano: M-Backspace deletes the word before the cursor", opts, async () => {
   const { buf, pageErrors } = await withTerminal(async () => {
     const os = await window.__wos.boot();

@@ -124,6 +124,14 @@ main-thread client API). Format:
 - **Dev server** (`tools/serve.js`) that sets COOP/COEP for cross-origin
   isolation (ADR-010), plus headless boot/MVP/shell tests.
 
+### Fixed
+- **`nano` no longer stair-steps a pasted block.** The editor now enables
+  bracketed-paste mode (`ESC[?2004h`) and gathers the whole `ESC[200~ … ESC[201~`
+  block, inserting it literally instead of feeding each newline through
+  `insertNewline()` — so auto-indent no longer compounds the leading whitespace of
+  pasted (already-indented) code line after line. Typed Enter still auto-indents;
+  only genuine pastes bypass it. CR/CRLF in the paste are normalized to LF.
+
 ### Changed
 - **The program worker no longer knows about `node`.** It installs one native surface
   for every guest (`sys` + a routing `console`) and evaluates each JS program the same
