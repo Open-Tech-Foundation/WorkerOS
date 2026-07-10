@@ -8,6 +8,13 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`tcgetattr`/`tcsetattr` syscalls** — the program worker's `sys` ABI gains
+  `tcgetattr()` and `tcsetattr({ canonical, echo, isig })`, serviced by the kernel
+  worker (`getattr`/`setattr`) from the kernel TTY's termios. A full-screen program
+  can now take the terminal *raw + no-echo* on its own behalf (the REPL already
+  did this internally); it restores the saved flags on exit. As a safety net the
+  kernel worker resets the TTY to cooked when the foreground program exits, so a
+  crashed TUI can't leave the prompt raw. First user: `/bin/nano`.
 - **Readline prompt** (`src/shell/readline.js`). The interactive shell prompt is
   now a raw-mode line editor (like bash/readline) instead of the kernel cooked
   discipline: ↑/↓ command history, in-line cursor movement (←/→, Home/End,

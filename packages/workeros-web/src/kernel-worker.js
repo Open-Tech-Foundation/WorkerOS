@@ -238,7 +238,14 @@ function handleExit(pid, code) {
   kernel.reap(pid);
   rec.worker.terminate();
   programs.delete(pid);
-  foreground.delete(pid);
+  const wasForeground = foreground.delete(pid);
+  // Safety net: if the foreground program left the TTY raw (e.g. an editor that
+  // was killed before restoring termios), put it back to cooked so the shell
+  // prompt is usable again. A well-behaved program restores it itself; this only
+  // covers the crash/kill path.
+  if (wasForeground && foreground.size === 0) {
+    kernel.tty_set_attr({ canonical: true, echo: true, isig: true });
+  }
   caughtSignals.delete(pid);
   pendingReads = pendingReads.filter((pr) => pr.pid !== pid);
   try {
@@ -427,6 +434,20 @@ function handleSyscall(pid, msg) {
         break;
       case "winsize":
         reply(pid, id, true, kernel.tty_get_winsize());
+        break;
+      // termios (tcgetattr/tcsetattr): a full-screen program flips the line
+      // discipline to raw + no-echo so it owns editing and rendering, then
+      // restores the flags on exit. `setattr` merges the given keys, so a
+      // program can go raw without spelling out every flag.
+      case "getattr":
+        reply(pid, id, true, kernel.tty_get_attr());
+        break;
+      case "setattr":
+        kernel.tty_set_attr(args.attr || {});
+        // Going raw makes any already-buffered bytes readable, and a program
+        // returning to cooked may have a line waiting — nudge parked reads.
+        retryPendingReads();
+        reply(pid, id, true, null);
         break;
       case "stat":
         reply(pid, id, true, kernel.sys_stat(pid, args.path));

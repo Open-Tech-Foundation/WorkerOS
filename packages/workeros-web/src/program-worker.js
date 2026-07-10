@@ -72,6 +72,12 @@ function makeSys(start) {
     // it. Guests query these once at startup (e.g. process.stdout.isTTY/columns).
     isatty: (fd) => call("isatty", { fd }),
     winsize: () => call("winsize", {}),
+    // Line-discipline control (tcgetattr/tcsetattr). A full-screen TUI (editor,
+    // pager) goes raw + no-echo so each keystroke arrives immediately and it
+    // paints the screen itself, then restores the saved flags on exit. `tcsetattr`
+    // merges the given keys onto the current termios: `{ canonical, echo, isig }`.
+    tcgetattr: () => call("getattr", {}),
+    tcsetattr: (attr) => call("setattr", { attr }),
     // Signals. `onSignal` registers the guest's dispatcher; `sighandle` tells the
     // kernel worker whether the guest catches a signal (so a caught SIGINT is
     // delivered cooperatively rather than the process being hard-killed).

@@ -59,6 +59,13 @@ export const programs = [
     source: () => fetchText("./curl/curl-program.js"),
   },
   {
+    // `nano` — a small modeless full-screen text editor. A TUI: it drives the
+    // terminal in raw mode (tcsetattr) and paints frames itself.
+    bin: "/bin/nano",
+    type: "js",
+    source: () => fetchText("./nano/nano-program.js"),
+  },
+  {
     bin: "/bin/sh",
     type: "js",
     source: () => fetchText("./sh/sh-program.js"),

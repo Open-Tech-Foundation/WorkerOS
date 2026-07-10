@@ -8,6 +8,16 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`nano`** (`src/nano/nano-program.js`) — a small modeless full-screen text
+  editor at `/bin/nano`, WorkerOS's first interactive TUI. It takes the terminal
+  raw + no-echo (`sys.tcsetattr`), uses the alternate screen, and paints frames
+  with ANSI: a title bar, the text area, a message bar, and two shortcut bars.
+  Editing (insert, Enter/Backspace/Del, Tab), cursor movement (arrows, Home/End,
+  PgUp/PgDn, `^A`/`^E`, `^Y`/`^V`), `^O` write out (with a Save-As prompt), `^X`
+  exit (prompting when the buffer is modified), `^K`/`^U` cut & paste lines, `^W`
+  search, `^_` go-to-line, and `^C` cursor position. Honors `SIGWINCH` to
+  re-layout, and restores the terminal on exit. Files round-trip with a trailing
+  newline; tabs render on 8-column stops.
 - **`process` signal handling.** The node runtime gains a minimal EventEmitter on
   `process` (and its streams): `process.on('SIGINT'|'SIGWINCH'|'SIGTSTP'…, cb)`,
   `once`/`off`/`emit`/`listenerCount`. Registering a signal handler tells the
