@@ -8,6 +8,13 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`wsh` prepends `node_modules/.bin` to `PATH`** (PLAN Phase 5·E). Before
+  spawning an external command the shell driver prepends the `node_modules/.bin`
+  chain (cwd and every ancestor, absolute) to the child's `PATH`, so an
+  npm-installed package's `bin` runs as a bare name. This is npm's own
+  convention — edit the environment; the kernel just does a plain `$PATH` search
+  and knows nothing about `node_modules` (INV-1). `npm run` inherits it via
+  `sys.exec`.
 - **Synchronous `fs` for JS guests** (PLAN Phase 5·A). The per-process SAB
   sync-syscall channel is now exposed to a JS guest as `sys.syncFs`
   (open/read/**write**/close/seek/stat/readdir/mkdir/unlink/rmdir/rename), the

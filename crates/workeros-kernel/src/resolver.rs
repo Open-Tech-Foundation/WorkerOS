@@ -165,7 +165,8 @@ pub fn resolve_invocation(
     vfs: &dyn Vfs,
     cwd: &str,
     argv: &[String],
-    path_dirs: &[&str],
+    env: &[(String, String)],
+    default_path: &[&str],
 ) -> Result<Invocation, ResolveError> {
     match argv.first().map(String::as_str) {
         None => Err(ResolveError::NotFound(String::new())),
@@ -177,13 +178,21 @@ pub fn resolve_invocation(
             })
         }
         Some(name) => {
-            // Search `node_modules/.bin` (nearest first, npm's convention) ahead
-            // of the system PATH, so an installed package's `bin` runs as a bare
-            // name from anywhere in the project (PLAN Phase 5·E). A name with a
-            // slash is a path (handled inside `resolve_command`), not a bin.
-            let bin_dirs = node_bin_dirs(cwd);
-            let mut dirs: Vec<&str> = bin_dirs.iter().map(String::as_str).collect();
-            dirs.extend_from_slice(path_dirs);
+            // Resolve a bare command against `$PATH` from the environment (a plain
+            // colon-separated dir list), falling back to the system default when
+            // unset. The kernel knows nothing of `node_modules`: any ecosystem
+            // convention (npm's `node_modules/.bin`) is just a directory the shell
+            // or `npm run` put on `PATH` (INV-1). A name with a slash is a path,
+            // handled inside `resolve_command`.
+            let path_val = env
+                .iter()
+                .find(|(k, _)| k == "PATH")
+                .map(|(_, v)| v.as_str())
+                .filter(|v| !v.is_empty());
+            let dirs: Vec<&str> = match path_val {
+                Some(v) => v.split(':').filter(|s| !s.is_empty()).collect(),
+                None => default_path.to_vec(),
+            };
             let entry = resolve_command(vfs, cwd, name, &dirs)
                 .ok_or_else(|| ResolveError::NotFound(name.to_string()))?;
             Ok(Invocation {
@@ -192,23 +201,6 @@ pub fn resolve_invocation(
             })
         }
     }
-}
-
-/// The `node_modules/.bin` directories to search for a bare command, nearest
-/// first: `<cwd>/node_modules/.bin`, then each ancestor up to `/`. npm's PATH
-/// convention — the VFS has no symlinks, so `npm install` writes a generated
-/// launcher there (PLAN Phase 5·E).
-fn node_bin_dirs(cwd: &str) -> Vec<String> {
-    let mut dirs = Vec::new();
-    let mut dir = cwd.to_string();
-    loop {
-        dirs.push(path::normalize(&dir, "node_modules/.bin"));
-        if dir == "/" {
-            break;
-        }
-        dir = path::split(&dir).map(|(p, _)| p).unwrap_or("/").to_string();
-    }
-    dirs
 }
 
 /// Resolve the full JS module graph rooted at `entry` (an absolute VFS path).
@@ -628,47 +620,53 @@ mod tests {
         write(&mut vfs, "/proj/main.js", "");
         // `js` is the kernel's native execution keyword: run argv[1] directly.
         assert_eq!(
-            resolve_invocation(&vfs, "/proj", &["js".into(), "main.js".into()], DEFAULT_PATH).unwrap(),
+            resolve_invocation(&vfs, "/proj", &["js".into(), "main.js".into()], &[], DEFAULT_PATH).unwrap(),
             Invocation { interpreter: Interpreter::Js, entry: "/proj/main.js".into() }
         );
         // `node` is just a user program: it resolves through PATH to /bin/node and
         // runs in place. Loading `main.js` is /bin/node's own job at runtime.
         assert_eq!(
-            resolve_invocation(&vfs, "/proj", &["node".into(), "main.js".into()], DEFAULT_PATH).unwrap(),
+            resolve_invocation(&vfs, "/proj", &["node".into(), "main.js".into()], &[], DEFAULT_PATH).unwrap(),
             Invocation { interpreter: Interpreter::Js, entry: "/bin/node".into() }
         );
         // Any other bare program runs in place under the native surface too.
         assert_eq!(
-            resolve_invocation(&vfs, "/proj", &["ls".into(), "-a".into()], DEFAULT_PATH).unwrap(),
+            resolve_invocation(&vfs, "/proj", &["ls".into(), "-a".into()], &[], DEFAULT_PATH).unwrap(),
             Invocation { interpreter: Interpreter::Js, entry: "/bin/ls".into() }
         );
     }
 
     #[test]
-    fn command_resolves_node_modules_bin_before_path() {
+    fn command_resolution_is_driven_by_path_env() {
+        // The kernel searches `$PATH` and nothing more — no `node_modules`
+        // knowledge (INV-1). A shell / `npm run` that wants npm's `.bin`
+        // convention just puts those dirs on `PATH`; here the *test* constructs
+        // that string, proving the policy lives outside the kernel.
         let mut vfs = MemVfs::new();
         vfs.mkdir("/bin").unwrap();
         vfs.mkdir("/proj").unwrap();
-        for d in ["/proj/node_modules", "/proj/node_modules/.bin", "/proj/src"] {
+        for d in ["/proj/node_modules", "/proj/node_modules/.bin"] {
             vfs.mkdir(d).unwrap();
         }
-        write(&mut vfs, "/bin/esbuild", "// a different one on PATH");
-        write(&mut vfs, "/bin/node", "");
-        write(&mut vfs, "/proj/node_modules/.bin/esbuild", "// the installed launcher");
-        // From the project root, the local .bin wins over /bin.
+        write(&mut vfs, "/bin/esbuild", "// on the system PATH");
+        write(&mut vfs, "/proj/node_modules/.bin/esbuild", "// an installed launcher");
+
+        // No PATH in env → the system default (/bin:/sbin) is used.
         assert_eq!(
-            resolve_invocation(&vfs, "/proj", &["esbuild".into()], DEFAULT_PATH).unwrap().entry,
+            resolve_invocation(&vfs, "/proj", &["esbuild".into()], &[], DEFAULT_PATH).unwrap().entry,
+            "/bin/esbuild"
+        );
+        // PATH set (as the shell does) → its dirs are searched in listed order.
+        let env = vec![("PATH".into(), "/proj/node_modules/.bin:/bin:/sbin".into())];
+        assert_eq!(
+            resolve_invocation(&vfs, "/proj", &["esbuild".into()], &env, DEFAULT_PATH).unwrap().entry,
             "/proj/node_modules/.bin/esbuild"
         );
-        // From a subdirectory, the walk climbs to the project's .bin.
+        // An entry that doesn't exist is skipped; resolution continues down PATH.
+        let env2 = vec![("PATH".into(), "/nope/.bin:/bin".into())];
         assert_eq!(
-            resolve_invocation(&vfs, "/proj/src", &["esbuild".into()], DEFAULT_PATH).unwrap().entry,
-            "/proj/node_modules/.bin/esbuild"
-        );
-        // With no local .bin entry, resolution still falls through to PATH.
-        assert_eq!(
-            resolve_invocation(&vfs, "/proj", &["node".into()], DEFAULT_PATH).unwrap().entry,
-            "/bin/node"
+            resolve_invocation(&vfs, "/proj", &["esbuild".into()], &env2, DEFAULT_PATH).unwrap().entry,
+            "/bin/esbuild"
         );
     }
 

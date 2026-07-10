@@ -216,7 +216,7 @@ impl Kernel {
         if self.processes.live_count() >= self.limits.max_procs {
             return Err(SpawnError::LimitExceeded);
         }
-        let inv = resolver::resolve_invocation(&self.vfs, &cwd, &argv, DEFAULT_PATH)
+        let inv = resolver::resolve_invocation(&self.vfs, &cwd, &argv, &env, DEFAULT_PATH)
             .map_err(SpawnError::Resolve)?;
         let graph = resolver::resolve_graph(&self.vfs, &inv.entry).map_err(SpawnError::Resolve)?;
         let pid = self.processes.create(SpawnRequest {

@@ -1,9 +1,11 @@
 // End-to-end test for npm bin-linking + PATH (PLAN Phase 5·E), driven in a real
 // browser via Playwright. A package's `bin` is a generated launcher at
-// `node_modules/.bin/<name>`; the kernel now searches `node_modules/.bin` ahead
-// of PATH, so the bin runs as a bare command from anywhere in the project. (This
+// `node_modules/.bin/<name>`. The policy lives in userland: `wsh` prepends the
+// `node_modules/.bin` chain (cwd up) to `$PATH`, and the kernel just does a plain
+// `$PATH` search — so the bin runs as a bare command through the shell. (This
 // installs the launcher directly — mirroring what `npm install` writes — since
-// the test can't reach the real registry.)
+// the test can't reach the real registry, and runs it via `os.exec` so it goes
+// through the shell that sets PATH.)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -56,18 +58,25 @@ const LAUNCHER = (target) =>
   `const line = ["node", q(target)].concat(sys.argv.slice(1).map(q)).join(" ");\n` +
   `sys.exit(await sys.exec(line));\n`;
 
-test("an installed bin runs as a bare command, forwarding args + exit code", opts, async () => {
+test("an installed bin runs as a bare command through the shell (PATH), from a subdir", opts, async () => {
   const { result, pageErrors } = await withPage((page) =>
     page.evaluate(
       async ({ launcher }) => {
         const os = await window.__wos.boot();
+        const dec = new TextDecoder();
         await os.fs.write(
           "/proj/node_modules/mytool/bin/cli.js",
           "console.log('mytool args:', process.argv.slice(2).join(','));\nprocess.exit(3);\n",
         );
         await os.fs.write("/proj/node_modules/.bin/mytool", launcher);
-        // Bare command name, resolved from a subdirectory of the project.
-        return await window.run(os, ["mytool", "a", "b"], { cwd: "/proj/sub" });
+        await os.fs.write("/proj/sub/.keep", ""); // create the subdir to run from
+        // Bare command, run through the shell from a subdir — the shell prepends
+        // the ancestor `node_modules/.bin` chain to PATH; the kernel just searches.
+        let out = "";
+        const { code } = await os.exec("cd /proj/sub && mytool a b", {
+          onStdout: (b) => (out += dec.decode(b)),
+        });
+        return { out, code };
       },
       { launcher: LAUNCHER("/proj/node_modules/mytool/bin/cli.js") },
     ),

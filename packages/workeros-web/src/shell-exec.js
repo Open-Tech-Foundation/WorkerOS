@@ -39,6 +39,23 @@ export function createShell({ kernel, startProcess, session, readLine }) {
     return "/" + segs.join("/");
   }
 
+  // npm's PATH convention, kept in userland (the kernel just searches `$PATH`):
+  // a bare command is looked up in `node_modules/.bin` — for this cwd and every
+  // ancestor — before the system PATH. We prepend those (absolute) dirs to the
+  // child's `PATH`; `npm install` writes the launcher files there. This is what
+  // real npm does — edit the env, don't teach the OS about node_modules.
+  function withNodeBinPath(cwd, env) {
+    const chain = [];
+    let dir = cwd || "/";
+    for (;;) {
+      chain.push((dir === "/" ? "" : dir) + "/node_modules/.bin");
+      if (dir === "/") break;
+      dir = dir.slice(0, dir.lastIndexOf("/")) || "/";
+    }
+    const base = (env && env.PATH) || "/bin:/sbin";
+    return { ...env, PATH: chain.join(":") + ":" + base };
+  }
+
   // Run one external program with a resolved stdio plan; returns its exit code.
   async function runExternal({ argv, env, cwd, stdin, redirects, out, err }) {
     const plan = { stdin: { kind: "inherit" }, stdout: { kind: "inherit" }, stderr: { kind: "inherit" } };
@@ -76,7 +93,7 @@ export function createShell({ kernel, startProcess, session, readLine }) {
 
     let handle;
     try {
-      handle = startProcess({ argv, env, cwd, plan, sink: { stdout: (b) => outSink(b), stderr: (b) => errSink(b) } });
+      handle = startProcess({ argv, env: withNodeBinPath(cwd, env), cwd, plan, sink: { stdout: (b) => outSink(b), stderr: (b) => errSink(b) } });
     } catch (e) {
       errSink(enc.encode((argv[0] || "wsh") + ": " + (e.message || e) + "\n"));
       cleanup();

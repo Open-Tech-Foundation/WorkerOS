@@ -12,10 +12,11 @@ guest runtime. Format:
   now writes a generated launcher to `node_modules/.bin/<name>` for each package
   `bin` (a string, named after the package, or a `{ name: path }` map). The VFS
   has no symlinks, so the launcher is a tiny native program that re-execs
-  `node <target>` via `sys.exec`, forwarding argv and the exit code; paired with
-  the kernel searching `node_modules/.bin` ahead of PATH, an installed package's
-  command runs as a bare name (`esbuild …`). Honest limit (INV-5): `sys.exec`
-  doesn't forward stdin to the bin yet.
+  `node <target>` via `sys.exec`, forwarding argv and the exit code. Paired with
+  the shell prepending the `node_modules/.bin` chain to `PATH` (see
+  `@opentf/workeros-web`), an installed package's command runs as a bare name
+  (`esbuild …`) — the policy is npm's `PATH` convention in userland, not kernel
+  knowledge (INV-1). Honest limit (INV-5): `sys.exec` doesn't forward stdin yet.
 - **CJS-in-an-ESM-graph interop** (`node-program.js`, `module.js`). A CommonJS
   dependency reached via an ESM `import` (the kernel resolves it into the graph
   as a leaf) can't be evaluated as an ES module. `/bin/node`'s ESM stitch now
