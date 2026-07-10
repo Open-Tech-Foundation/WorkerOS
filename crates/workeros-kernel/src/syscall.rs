@@ -364,6 +364,27 @@ impl ProcessCtx {
         }
     }
 
+    /// Whether `fd` is bound to the controlling terminal (not a file/pipe
+    /// redirect) — the truth `isatty(fd)` reports. All three preopened stdio
+    /// descriptors are terminals until redirected.
+    pub fn is_terminal(&self, fd: Fd) -> bool {
+        matches!(
+            self.fds.get(&fd),
+            Some(Handle::Stdin) | Some(Handle::Stdout) | Some(Handle::Stderr)
+        )
+    }
+
+    /// Whether `fd` reads from the controlling terminal's stdin. `Ok(true)` means
+    /// the caller should route the read through the kernel TTY; `Ok(false)` a
+    /// normal file/pipe read; `Err(Badf)` a stdin the process may not read.
+    pub fn is_terminal_stdin(&self, fd: Fd) -> SysResult<bool> {
+        match self.fds.get(&fd) {
+            Some(Handle::Stdin) if self.caps.stdin => Ok(true),
+            Some(Handle::Stdin) => Err(Errno::Badf),
+            _ => Ok(false),
+        }
+    }
+
     /// `fd_read`. See [`ReadOutcome`] for the streaming semantics.
     pub fn fd_read(
         &mut self,

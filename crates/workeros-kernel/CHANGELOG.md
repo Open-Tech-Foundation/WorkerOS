@@ -7,6 +7,15 @@ a release yet, so everything lives under **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **TTY device (`tty` module)** — the controlling terminal with a real line
+  discipline: canonical (cooked) and raw modes, echo, line editing (Backspace,
+  `Ctrl-U` kill, `Ctrl-W` word-erase), `Ctrl-C`/`Ctrl-Z` signals, `Ctrl-D` EOF,
+  and a window size. Terminal `stdin` reads now route through the shared TTY and
+  block (`WouldBlock`) until a line is committed, so programs `read()` a terminal
+  like on Unix. New `Kernel` API: `tty_input`, `tty_read_line`, `isatty`,
+  `tty_get_attr`/`tty_set_attr`, `tty_winsize`/`tty_set_winsize`. Programmatic
+  `feed_stdin` (the `writeStdin` API) still injects per-process stdin ahead of the
+  interactive TTY.
 - **`sys_seek` host wrapper** — exposes the process context's `fd_seek` to the host
   runtime so WASI guests can seek (`whence` = set/cur/end; returns the new offset).
 - **Authoritative core.** The Node-agnostic kernel that owns all system state:

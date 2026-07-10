@@ -22,6 +22,7 @@ pub mod resolver;
 pub mod ringbuf;
 pub mod shell;
 pub mod syscall;
+pub mod tty;
 pub mod vfs;
 
 use caps::CapabilitySet;
@@ -32,6 +33,7 @@ use std::collections::BTreeMap;
 use syscall::{
     Fd, PipeEnd, PipeId, PipeTable, ProcessCtx, ReadOutcome, RedirectMode, FD_STDERR, FD_STDOUT,
 };
+use tty::{Termios, Tty, TtyInput, TtyRead, Winsize};
 use vfs::{path, DirEntry, Metadata, OpenOptions, Vfs};
 
 /// The ABI version the kernel speaks: WASI Preview 1 (the floor) plus the
@@ -150,6 +152,9 @@ pub struct Kernel {
     contexts: BTreeMap<Pid, ProcessCtx>,
     /// Kernel-owned IPC pipes backing `otf:ipc_open` and shell pipelines.
     pipes: PipeTable,
+    /// The single controlling terminal: line discipline, termios, and winsize.
+    /// Every process whose stdin is the terminal (`Inherit`) reads from here.
+    tty: Tty,
 }
 
 impl Kernel {
@@ -161,6 +166,7 @@ impl Kernel {
                 processes: process::ProcessTable::new(),
                 contexts: BTreeMap::new(),
                 pipes: PipeTable::new(),
+                tty: Tty::new(),
             },
             Handshake {
                 version: VERSION,
@@ -250,10 +256,6 @@ impl Kernel {
         self.pipes.open()
     }
 
-    fn ctx_mut(&mut self, pid: Pid) -> SysResult<&mut ProcessCtx> {
-        self.contexts.get_mut(&pid).ok_or(Errno::Badf)
-    }
-
     /// Dispatch an `fd_write` for a process and return the host effect. A write
     /// whose target is a terminal stream yields `Stdout`/`Stderr`; a write to a
     /// file or pipe yields `File { nwritten }` (nothing to forward).
@@ -275,6 +277,24 @@ impl Kernel {
     /// Dispatch an `fd_read` for a process (files, stdin, and pipes). Returns a
     /// [`ReadResult`] so the host can park a pipe read that would block.
     pub fn sys_read(&mut self, pid: Pid, fd: Fd, max: usize) -> SysResult<ReadResult> {
+        // Terminal stdin is served by the shared TTY (line discipline + blocking):
+        // whoever holds the terminal reads keystrokes. Bytes injected at a specific
+        // process via `feed_stdin` (the programmatic `writeStdin` API) take
+        // precedence over the interactive TTY for that process.
+        {
+            let ctx = self.contexts.get_mut(&pid).ok_or(Errno::Badf)?;
+            if ctx.is_terminal_stdin(fd)? {
+                if !ctx.stdin.is_empty() {
+                    let n = max.min(ctx.stdin.len());
+                    return Ok(ReadResult::Data(ctx.stdin.drain(..n).collect()));
+                }
+                return Ok(match self.tty.read(max) {
+                    TtyRead::Data(bytes) => ReadResult::Data(bytes),
+                    TtyRead::Eof => ReadResult::Eof,
+                    TtyRead::WouldBlock => ReadResult::WouldBlock,
+                });
+            }
+        }
         let mut buf = vec![0u8; max];
         let ctx = self.contexts.get_mut(&pid).ok_or(Errno::Badf)?;
         Ok(match ctx.fd_read(&self.vfs, &mut self.pipes, fd, &mut buf)? {
@@ -288,10 +308,55 @@ impl Kernel {
         })
     }
 
-    /// Feed bytes to a process's stdin queue (host-driven terminal input).
+    /// Feed host keystrokes through the terminal's line discipline. Returns the
+    /// [`TtyInput`] the host acts on: bytes to echo to the display and any
+    /// control-key signal (Ctrl-C/Ctrl-Z) to deliver to the foreground process.
+    /// This is the interactive input path for the controlling terminal (both the
+    /// prompt and a program's blocking `read` draw from it).
+    pub fn tty_input(&mut self, data: &[u8]) -> TtyInput {
+        self.tty.input(data)
+    }
+
+    /// Inject bytes directly into a specific process's stdin queue (the
+    /// programmatic `writeStdin` API — no line discipline, no echo). Read ahead of
+    /// the interactive TTY by that process's terminal-stdin reads.
     pub fn feed_stdin(&mut self, pid: Pid, data: &[u8]) -> SysResult<()> {
-        self.ctx_mut(pid)?.stdin.extend(data.iter().copied());
+        self.contexts.get_mut(&pid).ok_or(Errno::Badf)?.stdin.extend(data.iter().copied());
         Ok(())
+    }
+
+    /// Take the next committed input line for the interactive shell prompt, or
+    /// `None` if no full line is buffered. The shell is the terminal's default
+    /// reader when no foreground program is consuming stdin.
+    pub fn tty_read_line(&mut self) -> Option<Vec<u8>> {
+        self.tty.read_line()
+    }
+
+    /// `isatty(fd)` for a process: whether the descriptor is the terminal rather
+    /// than a redirected file or pipe.
+    pub fn isatty(&self, pid: Pid, fd: Fd) -> SysResult<bool> {
+        Ok(self.contexts.get(&pid).ok_or(Errno::Badf)?.is_terminal(fd))
+    }
+
+    /// Current terminal attributes (`tcgetattr`).
+    pub fn tty_get_attr(&self) -> Termios {
+        self.tty.termios
+    }
+
+    /// Set terminal attributes (`tcsetattr`) — e.g. a program entering raw mode.
+    pub fn tty_set_attr(&mut self, termios: Termios) {
+        self.tty.termios = termios;
+    }
+
+    /// Current terminal window size (`TIOCGWINSZ`).
+    pub fn tty_winsize(&self) -> Winsize {
+        self.tty.winsize
+    }
+
+    /// Update the terminal window size when the host terminal is resized. The
+    /// host follows this with a `SIGWINCH` to the foreground process.
+    pub fn tty_set_winsize(&mut self, winsize: Winsize) {
+        self.tty.winsize = winsize;
     }
 
     /// Mark a process exited with `code` (normal return or `proc_exit`), moving
@@ -690,6 +755,47 @@ mod tests {
         let procs = k.list_processes();
         assert_eq!(procs[0].state, "zombie");
         assert_eq!(procs[0].exit_code, Some(5));
+    }
+
+    #[test]
+    fn terminal_stdin_reads_through_the_tty_line_discipline() {
+        let mut k = boot();
+        let pid = spawn_main(&mut k, "");
+        // fd 0 is the terminal: blocks until the host feeds a committed line.
+        assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::WouldBlock);
+        let echo = k.tty_input(b"hi\r");
+        assert_eq!(echo.echo, b"hi\r\n".to_vec());
+        assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::Data(b"hi\n".to_vec()));
+        assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::WouldBlock);
+    }
+
+    #[test]
+    fn isatty_true_for_terminal_false_for_redirect() {
+        let mut k = boot();
+        let term = spawn_main(&mut k, "");
+        assert!(k.isatty(term, 0).unwrap());
+        assert!(k.isatty(term, 1).unwrap());
+        let redirected = spawn_with(
+            &mut k,
+            "r.js",
+            StdioPlan {
+                stdout: StdioTarget::File { path: "/o.txt".into(), mode: RedirectMode::Write },
+                ..Default::default()
+            },
+        );
+        assert!(k.isatty(redirected, 0).unwrap(), "stdin still the terminal");
+        assert!(!k.isatty(redirected, 1).unwrap(), "stdout redirected to a file");
+    }
+
+    #[test]
+    fn raw_mode_stdin_delivers_bytes_without_waiting_for_a_line() {
+        let mut k = boot();
+        let pid = spawn_main(&mut k, "");
+        let mut t = k.tty_get_attr();
+        t.canonical = false;
+        k.tty_set_attr(t);
+        k.tty_input(b"a");
+        assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::Data(b"a".to_vec()));
     }
 
     #[test]
