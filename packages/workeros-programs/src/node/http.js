@@ -76,6 +76,8 @@ export function createHttp(sys, EventEmitter, net) {
       this._headers = new Map(); // lowercase name → { name, value }
       this._chunked = false;
       this.sendDate = true;
+      // A HEAD response carries headers (incl. Content-Length) but never a body.
+      this._headOnly = req && req.method === "HEAD";
     }
 
     setHeader(name, value) {
@@ -111,7 +113,8 @@ export function createHttp(sys, EventEmitter, net) {
       if (this.sendDate && !this.hasHeader("date")) head += `Date: ${new Date().toUTCString()}${CRLF}`;
       const hasLen = this.hasHeader("content-length");
       const keepAlive = this._req && this._req._keepAlive;
-      if (!hasLen && !this.hasHeader("transfer-encoding")) {
+      // No chunked framing for a HEAD response — it has no body at all.
+      if (!hasLen && !this.hasHeader("transfer-encoding") && !this._headOnly) {
         this._chunked = true;
         head += `Transfer-Encoding: chunked${CRLF}`;
       }
@@ -127,6 +130,7 @@ export function createHttp(sys, EventEmitter, net) {
     write(chunk, encoding, cb) {
       if (typeof encoding === "function") { cb = encoding; encoding = undefined; }
       this._flushHead();
+      if (this._headOnly) { if (cb) queueMicrotask(cb); return true; } // no body on HEAD
       const bytes = chunk == null ? new Uint8Array(0)
         : typeof chunk === "string" ? enc.encode(chunk)
         : chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);

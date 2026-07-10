@@ -324,6 +324,11 @@ pre.code .a { color: var(--accent-soft); }
   transition: color 0.12s, border-color 0.12s;
 }
 .chip:hover { color: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.chip-primary {
+  color: var(--bg); background: var(--accent); border-color: transparent;
+  font-size: 13px; padding: 8px 16px; font-weight: 600;
+}
+.chip-primary:hover { color: var(--bg); background: color-mix(in srgb, var(--accent) 85%, #fff); }
 .pg-side p.hint { font-size: 0.82rem; color: var(--text-faint); line-height: 1.5; margin: 0 0 14px; }
 .pg-side code { color: var(--accent-soft); }
 

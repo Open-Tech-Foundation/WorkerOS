@@ -38,6 +38,50 @@ function loadCss(href) {
   document.head.appendChild(l);
 }
 
+// A one-click demo: a real multi-page static site + a Node static-file server,
+// seeded into the VFS and served through the preview (ADR-021). Proves the http
+// server + node:fs under a realistic app — multiple routes, content types,
+// navigation between pages — not just a one-liner.
+const DEMO_PORT = 3000;
+const DEMO_FILES = {
+  // Relative URLs (not /style.css) so they resolve under the /__preview__/<port>/
+  // prefix the iframe is served from — an absolute path would escape it.
+  "/srv/index.html":
+    `<!doctype html><html><head><meta charset=utf-8><title>WorkerOS</title>` +
+    `<link rel=stylesheet href=style.css></head><body>` +
+    `<main><h1>Served from WorkerOS 🚀</h1>` +
+    `<p>This page came off a Node <code>http</code> server running as a real process ` +
+    `inside a Web Worker — no backend. The Service Worker routed your request into ` +
+    `the kernel and back.</p>` +
+    `<p><a href=about.html>About &rarr;</a></p></main></body></html>`,
+  "/srv/about.html":
+    `<!doctype html><html><head><meta charset=utf-8><title>About</title>` +
+    `<link rel=stylesheet href=style.css></head><body>` +
+    `<main><h1>About</h1><p>A second route, proving navigation + multiple requests ` +
+    `over one server. Files are read from the in-memory VFS via <code>fs.readFileSync</code>.</p>` +
+    `<p><a href="./">&larr; Home</a></p></main></body></html>`,
+  "/srv/style.css":
+    `body{font:16px/1.6 system-ui,sans-serif;margin:0;background:#0b0c0f;color:#d7dbe4}` +
+    `main{max-width:40rem;margin:12vh auto;padding:0 24px}` +
+    `h1{color:#7c9cff;letter-spacing:-.02em}a{color:#7c9cff}code{color:#9ece6a}`,
+  "/srv/server.js":
+    `const http=require('http'),fs=require('fs'),path=require('path');\n` +
+    `const ROOT='/srv',TYPES={'.html':'text/html','.css':'text/css','.js':'text/javascript','.json':'application/json'};\n` +
+    `http.createServer((req,res)=>{\n` +
+    `  let url=decodeURIComponent(req.url.split('?')[0]);\n` +
+    `  if(url==='/')url='/index.html';\n` +
+    `  const file=path.join(ROOT,url);\n` +
+    `  try{\n` +
+    `    const data=fs.readFileSync(file);\n` +
+    `    res.writeHead(200,{'Content-Type':TYPES[path.extname(file)]||'application/octet-stream'});\n` +
+    `    res.end(data);\n` +
+    `  }catch(e){\n` +
+    `    res.writeHead(404,{'Content-Type':'text/plain'});\n` +
+    `    res.end('404 Not Found: '+url);\n` +
+    `  }\n` +
+    `}).listen(${DEMO_PORT},()=>console.log('static server on :${DEMO_PORT}'));\n`,
+};
+
 // Last-resort clipboard write for when navigator.clipboard is unavailable or
 // rejects (older/insecure contexts): a throwaway textarea + execCommand("copy").
 function copyFallback(text) {
@@ -62,12 +106,29 @@ export default function Playground() {
   // port a guest is serving on (ADR-021). Empty until then.
   let previewSrc = $state("");
 
+  // The booted client, captured after boot so the demo button can use it.
+  let osRef = null;
+
   // Point the preview iframe at the port in the toolbar input. The cache-bust
   // param forces a reload even when the same port is re-opened (the Reload button).
   const openPreview = () => {
     const input = document.getElementById("preview-port");
     const port = parseInt((input && input.value) || "0", 10);
     if (port) previewSrc = `/__preview__/${port}/?t=${Date.now()}`;
+  };
+
+  // Seed a small static site + a Node static-file server into the VFS, start it in
+  // the background (visible in `ps`), and open the preview at its port.
+  const loadDemo = async () => {
+    if (!osRef) return;
+    for (const [file, content] of Object.entries(DEMO_FILES)) {
+      await osRef.fs.write(file, content); // client encodes strings to bytes
+    }
+    osRef.input(`node /srv/server.js &\r`); // `&` backgrounds it; prompt returns
+    const input = document.getElementById("preview-port");
+    if (input) input.value = String(DEMO_PORT);
+    // Give the server a moment to load its modules and listen, then open it.
+    setTimeout(() => { previewSrc = `/__preview__/${DEMO_PORT}/?t=${Date.now()}`; }, 900);
   };
 
   // Refit the terminal to its container. Assigned once the kernel has booted and
@@ -97,6 +158,7 @@ export default function Playground() {
         }
         const { boot, installPreviewBridge } = await loadRuntime(RUNTIME_URL);
         os = await boot();
+        osRef = os; // let the demo button drive the same client
         // Bridge the service worker's preview requests to the kernel injector, so
         // a guest `http.createServer(...).listen(port)` is reachable at
         // /__preview__/<port>/ in the iframe below (ADR-021).
@@ -257,11 +319,17 @@ export default function Playground() {
             <iframe class="preview-frame" src={previewSrc} title="preview" />
           ) : (
             <div class="preview-empty">
-              <p>Run a server in the terminal, then open its port here.</p>
-              <pre>node -e "require('http').createServer((q,r)=&gt;r.end('&lt;h1&gt;hello from WorkerOS&lt;/h1&gt;')).listen(5173)"</pre>
+              <p>See a real Node server render here — one click:</p>
+              <button class="chip chip-primary" onclick={() => loadDemo()}>
+                ▶ Load demo site
+              </button>
               <p class="preview-empty-hint">
-                Then set the port to <b>5173</b> and click <b>Open</b>. HMR/WebSocket
-                isn't wired yet — plain HTTP responses render.
+                Seeds a static site + a Node <code>http</code> server into the OS, runs it
+                on :{DEMO_PORT}, and opens it. Or start your own and use the toolbar.
+              </p>
+              <pre>node -e "require('http').createServer((q,r)=&gt;r.end('&lt;h1&gt;hi&lt;/h1&gt;')).listen(5173)"</pre>
+              <p class="preview-empty-hint">
+                HMR/WebSocket isn't wired yet — plain HTTP responses render.
               </p>
             </div>
           )}
