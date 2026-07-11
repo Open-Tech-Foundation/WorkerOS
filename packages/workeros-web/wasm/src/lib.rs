@@ -568,11 +568,17 @@ impl WebKernel {
         self.inner.register_host_process()
     }
 
-    /// `otf:net_listen(port)`: claim `port` for `pid`. Returns the listener id;
-    /// `EADDRINUSE` if held, `ENOTSUP` if the process lacks the capability.
+    /// `otf:net_listen(port)`: claim `port` for `pid`, or a free ephemeral port
+    /// when `port == 0`. Returns `{ listener, port }` where `port` is the actually
+    /// bound port (for `server.address()`); `EADDRINUSE` if held, `ENOTSUP` if the
+    /// process lacks the capability.
     #[wasm_bindgen]
-    pub fn net_listen(&mut self, pid: Pid, port: u16) -> Result<ListenerId, JsError> {
-        self.inner.net_listen(pid, port).map_err(errno_to_js)
+    pub fn net_listen(&mut self, pid: Pid, port: u16) -> Result<JsValue, JsError> {
+        let (listener, bound) = self.inner.net_listen(pid, port).map_err(errno_to_js)?;
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(&obj, &JsValue::from_str("listener"), &JsValue::from_f64(listener as f64)).unwrap();
+        js_sys::Reflect::set(&obj, &JsValue::from_str("port"), &JsValue::from_f64(bound as f64)).unwrap();
+        Ok(obj.into())
     }
 
     /// `otf:net_connect(port)`: loopback-connect `pid` to the listener on `port`,

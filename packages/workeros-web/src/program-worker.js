@@ -200,11 +200,12 @@ function makeSys(start, syncCall) {
     },
     // Port-keyed loopback sockets (`otf:net_*`, ADR-021). A connection is a pair
     // of pipe fds; read/write it with the ordinary `sys.read`/`sys.write` above.
-    // `netListen` → listener id; `netConnect` → `{ rfd, wfd }`; `netAccept`
-    // resolves to `{ rfd, wfd }` once a client connects (the kernel worker parks
-    // the accept until then, so a guest never sees "would block"). All HTTP/WS
-    // framing is guest userland — the kernel only moves bytes (INV-1).
-    netListen: async (port) => (await call("net_listen", { port })).listener,
+    // `netListen` → `{ listener, port }` (port is the bound port, assigned when
+    // the guest passes 0); `netConnect` → `{ rfd, wfd }`; `netAccept` resolves to
+    // `{ rfd, wfd }` once a client connects (the kernel worker parks the accept
+    // until then, so a guest never sees "would block"). All HTTP/WS framing is
+    // guest userland — the kernel only moves bytes (INV-1).
+    netListen: (port) => call("net_listen", { port }),
     netConnect: (port) => call("net_connect", { port }),
     netAccept: (listener) => call("net_accept", { listener }),
     // Ask the kernel to resolve a JS module graph (INV-2: the kernel owns every

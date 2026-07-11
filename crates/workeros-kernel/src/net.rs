@@ -73,7 +73,14 @@ pub struct PortTable {
     listeners: BTreeMap<ListenerId, Listener>,
     by_port: BTreeMap<u16, ListenerId>,
     next: ListenerId,
+    /// Rotating cursor for `listen(0)` ephemeral-port assignment.
+    next_ephemeral: u16,
 }
+
+/// IANA dynamic/ephemeral port range, matching what a `listen(0)` on a real OS
+/// would draw from.
+const EPHEMERAL_LO: u16 = 49152;
+const EPHEMERAL_HI: u16 = 65535;
 
 impl PortTable {
     pub fn new() -> Self {
@@ -81,14 +88,23 @@ impl PortTable {
             listeners: BTreeMap::new(),
             by_port: BTreeMap::new(),
             next: 1,
+            next_ephemeral: EPHEMERAL_LO,
         }
     }
 
-    /// Claim `port` for `pid`. `EADDRINUSE` if another listener already holds it.
-    pub fn listen(&mut self, pid: Pid, port: u16) -> SysResult<ListenerId> {
-        if self.by_port.contains_key(&port) {
-            return Err(Errno::Addrinuse);
-        }
+    /// Claim `port` for `pid`, or assign a free ephemeral port when `port == 0`
+    /// (Node's `listen(0)`). Returns `(listener, bound_port)` so the caller can
+    /// report the real port via `server.address()`. `EADDRINUSE` if a requested
+    /// port is held, or if the whole ephemeral range is exhausted.
+    pub fn listen(&mut self, pid: Pid, port: u16) -> SysResult<(ListenerId, u16)> {
+        let port = if port == 0 {
+            self.alloc_ephemeral().ok_or(Errno::Addrinuse)?
+        } else {
+            if self.by_port.contains_key(&port) {
+                return Err(Errno::Addrinuse);
+            }
+            port
+        };
         let id = self.next;
         self.next += 1;
         self.listeners.insert(
@@ -100,7 +116,23 @@ impl PortTable {
             },
         );
         self.by_port.insert(port, id);
-        Ok(id)
+        Ok((id, port))
+    }
+
+    /// Scan the ephemeral range from the rotating cursor for the first free port.
+    /// Returns `None` (not an infinite loop) when every ephemeral port is taken.
+    fn alloc_ephemeral(&mut self) -> Option<u16> {
+        if self.next_ephemeral < EPHEMERAL_LO {
+            self.next_ephemeral = EPHEMERAL_LO;
+        }
+        for _ in 0..=(EPHEMERAL_HI - EPHEMERAL_LO) {
+            let port = self.next_ephemeral;
+            self.next_ephemeral = if port >= EPHEMERAL_HI { EPHEMERAL_LO } else { port + 1 };
+            if !self.by_port.contains_key(&port) {
+                return Some(port);
+            }
+        }
+        None
     }
 
     /// Loopback connect to whoever listens on `port`. Creates the two connection
@@ -215,6 +247,21 @@ mod tests {
     }
 
     #[test]
+    fn listen_zero_assigns_a_free_ephemeral_port() {
+        let mut ports = PortTable::new();
+        let (_id, p1) = ports.listen(1, 0).unwrap();
+        let (_id2, p2) = ports.listen(2, 0).unwrap();
+        assert!((EPHEMERAL_LO..=EPHEMERAL_HI).contains(&p1), "in ephemeral range");
+        assert!((EPHEMERAL_LO..=EPHEMERAL_HI).contains(&p2), "in ephemeral range");
+        assert_ne!(p1, p2, "distinct ports for concurrent listeners");
+        assert!(ports.is_listening(p1) && ports.is_listening(p2));
+        // The assigned port is a real listener a client can connect to.
+        let mut pipes = PipeTable::new();
+        let mut client = proc(3);
+        assert!(ports.connect(&mut pipes, &mut client, p1).is_ok());
+    }
+
+    #[test]
     fn connect_without_listener_is_refused() {
         let mut ports = PortTable::new();
         let mut pipes = PipeTable::new();
@@ -230,7 +277,7 @@ mod tests {
         let mut ports = PortTable::new();
         let mut pipes = PipeTable::new();
         let mut server = proc(1);
-        let id = ports.listen(1, 80).unwrap();
+        let (id, _port) = ports.listen(1, 80).unwrap();
         assert_eq!(
             ports.accept(&mut pipes, &mut server, id).unwrap(),
             AcceptOutcome::WouldBlock
@@ -245,7 +292,7 @@ mod tests {
         let mut server = proc(1);
         let mut client = proc(2);
 
-        let lid = ports.listen(1, 5173).unwrap();
+        let (lid, _port) = ports.listen(1, 5173).unwrap();
         // Client connects; the server hasn't accepted yet.
         let c = ports.connect(&mut pipes, &mut client, 5173).unwrap();
         // Client can send before accept — the bytes buffer in the pipe.
@@ -271,7 +318,7 @@ mod tests {
         let mut server = proc(1);
         let mut client = proc(2);
 
-        let lid = ports.listen(1, 3000).unwrap();
+        let (lid, _port) = ports.listen(1, 3000).unwrap();
         let c = ports.connect(&mut pipes, &mut client, 3000).unwrap();
         let s = match ports.accept(&mut pipes, &mut server, lid).unwrap() {
             AcceptOutcome::Ready(conn) => conn,

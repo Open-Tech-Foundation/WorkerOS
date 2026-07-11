@@ -598,10 +598,12 @@ impl Kernel {
 
     // ---- otf:net_* — port-keyed loopback sockets (ADR-021) --------------------
 
-    /// `otf:net_listen`: claim `port` for `pid` (gated by `OtfCall::NetListen`).
-    /// `EADDRINUSE` if another process holds it. Returns the listener handle the
-    /// process passes to `net_accept`.
-    pub fn net_listen(&mut self, pid: Pid, port: u16) -> SysResult<ListenerId> {
+    /// `otf:net_listen`: claim `port` for `pid` (gated by `OtfCall::NetListen`),
+    /// or assign a free ephemeral port when `port == 0`. `EADDRINUSE` if another
+    /// process holds a requested port. Returns `(listener, bound_port)` — the
+    /// handle the process passes to `net_accept`, plus the actually-bound port so
+    /// the guest can report it via `server.address()`.
+    pub fn net_listen(&mut self, pid: Pid, port: u16) -> SysResult<(ListenerId, u16)> {
         let ctx = self.contexts.get(&pid).ok_or(Errno::Badf)?;
         if !ctx.caps.allows(caps::OtfCall::NetListen) {
             return Err(Errno::Notsup);
@@ -1013,7 +1015,8 @@ mod tests {
         let mut k = boot();
         let server = k.register_host_process();
         let client = k.register_host_process();
-        let lid = k.net_listen(server, 5173).unwrap();
+        let (lid, port) = k.net_listen(server, 5173).unwrap();
+        assert_eq!(port, 5173, "an explicit port is bound as-is");
         // Client connects and sends before the server accepts (bytes buffer).
         let c = k.net_connect(client, 5173).unwrap();
         k.sys_write(client, c.wfd, b"ping").unwrap();

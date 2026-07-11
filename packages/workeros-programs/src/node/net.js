@@ -29,20 +29,39 @@ export function createNet(sys, EventEmitter) {
   // A duplex byte stream over a connection's two pipe fds. Emits Node's socket
   // events (`data`/`end`/`close`/`error`); `write`/`end` push bytes to the peer.
   class Socket extends EventEmitter {
-    constructor(conn) {
+    constructor(conn, options) {
       super();
       this._rfd = conn ? conn.rfd : -1;
       this._wfd = conn ? conn.wfd : -1;
       this._reading = false;
       this._closed = false;
       this._refd = false;
+      this._encoding = null;
+      this._writeQueue = [];
+      // Node half-close default: when the readable side ends, auto-end the
+      // writable side unless allowHalfOpen. This is what lets a finished
+      // connection fully close so an idle process can exit (no lingering ref).
+      this.allowHalfOpen = !!(options && options.allowHalfOpen);
       this.readable = true;
       this.writable = true;
       this.destroyed = false;
-      // Synthetic peer address (no real TCP tuple exists — INV-5).
+      // `connecting`/`pending` track the pre-connect window Node exposes; an
+      // accepted server-side socket (conn present) is already connected.
+      this.connecting = false;
+      this.pending = !conn;
+      this.bytesRead = 0;
+      this.bytesWritten = 0;
+      // Synthetic address tuple (no real TCP tuple exists — INV-5).
       this.remoteAddress = "127.0.0.1";
       this.remotePort = 0;
-      this._ref();
+      this.remoteFamily = "IPv4";
+      this.localAddress = "127.0.0.1";
+      this.localPort = 0;
+      // Only a socket with a live handle holds the loop open. An unconnected
+      // `new net.Socket()` must NOT ref (else a socket that only ever `.end()`s
+      // without connecting would pin the process open forever); connect() refs
+      // once it has fds.
+      if (conn) this._ref();
       // Start pumping once someone is listening for data (Node's flowing mode).
       this.on("newListener", (ev) => {
         if ((ev === "data" || ev === "readable") && !this._reading) this._pump();
@@ -67,9 +86,14 @@ export function createNet(sys, EventEmitter) {
           if (!bytes || bytes.length === 0) {
             this.readable = false;
             this.emit("end");
+            // Default (!allowHalfOpen): the peer's EOF ends our write side too, so
+            // the connection fully closes and neither side lingers.
+            if (!this.allowHalfOpen && this.writable) this.end();
             break;
           }
-          this.emit("data", Buffer.from(bytes));
+          this.bytesRead += bytes.length;
+          const buf = Buffer.from(bytes);
+          this.emit("data", this._encoding ? buf.toString(this._encoding) : buf);
         }
       } catch (e) {
         this.emit("error", e instanceof Error ? e : new Error(String(e)));
@@ -81,16 +105,41 @@ export function createNet(sys, EventEmitter) {
 
     write(chunk, encoding, cb) {
       if (typeof encoding === "function") { cb = encoding; encoding = undefined; }
-      if (this._wfd < 0 || this.destroyed) { if (cb) queueMicrotask(cb); return false; }
+      if (this.destroyed) { if (cb) queueMicrotask(cb); return false; }
+      // Writes issued while still connecting buffer until 'connect', exactly like
+      // Node; the callback fires when the buffered bytes are actually written.
+      if (this.connecting || this._wfd < 0) {
+        this._writeQueue.push({ chunk, encoding, cb });
+        return false;
+      }
+      const bytes = toBytes(chunk, encoding);
       try {
-        sys.write(this._wfd, toBytes(chunk, encoding));
+        sys.write(this._wfd, bytes);
       } catch (e) {
         this.emit("error", e instanceof Error ? e : new Error(String(e)));
         return false;
       }
+      this.bytesWritten += bytes.length;
       if (cb) queueMicrotask(cb);
       return true;
     }
+
+    _flushWrites() {
+      const queued = this._writeQueue;
+      this._writeQueue = [];
+      for (const w of queued) this.write(w.chunk, w.encoding, w.cb);
+    }
+
+    setEncoding(encoding) { this._encoding = encoding; return this; }
+
+    // Bytes buffered but not yet handed to the kernel. On a loopback pipe writes
+    // are taken immediately, so only pre-connect buffered writes count.
+    get bufferSize() {
+      let n = 0;
+      for (const w of this._writeQueue) n += toBytes(w.chunk, w.encoding).length;
+      return n;
+    }
+    get writableLength() { return this.bufferSize; }
 
     end(chunk, encoding, cb) {
       if (typeof chunk === "function") { cb = chunk; chunk = undefined; }
@@ -100,6 +149,11 @@ export function createNet(sys, EventEmitter) {
       // Close our write end so the peer sees EOF; keep reading for its reply.
       if (this._wfd >= 0) { try { sys.close(this._wfd); } catch {} this._wfd = -1; }
       if (cb) queueMicrotask(cb);
+      // Drive the read side to EOF so the connection can fully close and release
+      // its loop ref, even when nothing is actively consuming data (e.g. a server
+      // that only writes a response and ends). Pump is idempotent; if the peer has
+      // already gone this reaches EOF immediately.
+      if (this.readable && !this._reading && this._rfd >= 0) this._pump();
       // If the read side is already done, this completes the close.
       if (!this._reading && !this.readable) this._finishClose();
       return this;
@@ -124,6 +178,48 @@ export function createNet(sys, EventEmitter) {
       if (this._rfd >= 0) { try { sys.close(this._rfd); } catch {} this._rfd = -1; }
       this._unref();
       this.emit("close", false);
+    }
+
+    // Connect this (pre-connect) socket to a listening port. Mirrors Node's
+    // socket.connect(): flips `connecting` on synchronously, resolves the loopback
+    // connection async, then emits 'connect', flushes buffered writes, and starts
+    // reading. Node calls net.connect(...) through here too.
+    connect(port, host, cb) {
+      if (typeof port === "object" && port !== null) {
+        if (port.allowHalfOpen != null) this.allowHalfOpen = !!port.allowHalfOpen;
+        cb = host; host = undefined; port = port.port;
+      }
+      if (typeof host === "function") { cb = host; host = undefined; }
+      if (typeof cb === "function") this.once("connect", cb);
+      this.connecting = true;
+      this.pending = true;
+      this.destroyed = false;
+      this._closed = false; // allow reconnecting a socket that previously closed
+      this._reading = false;
+      this.readable = true;
+      this.writable = true;
+      this.remotePort = port | 0;
+      this._ref();
+      (async () => {
+        let conn;
+        try {
+          conn = await sys.netConnect(port | 0);
+        } catch (e) {
+          this.connecting = false;
+          this.emit("error", e instanceof Error ? e : new Error(String(e)));
+          return;
+        }
+        if (this.destroyed) { try { sys.close(conn.rfd); sys.close(conn.wfd); } catch {} return; }
+        this._rfd = conn.rfd;
+        this._wfd = conn.wfd;
+        this.connecting = false;
+        this.pending = false;
+        this.localPort = port | 0; // synthetic — no real local tuple (INV-5)
+        this.emit("connect");
+        this._flushWrites();
+        if (this.listenerCount("data") || this.listenerCount("readable")) this._pump();
+      })();
+      return this;
     }
 
     // Node's abrupt close: on a loopback pipe there is no RST to send, so this is
@@ -164,7 +260,12 @@ export function createNet(sys, EventEmitter) {
       if (!this._refd) { this._refd = true; loop()?.ref(); }
       (async () => {
         try {
-          this._listener = await sys.netListen(this._port);
+          // netListen returns { listener, port }; port is the kernel-assigned
+          // ephemeral port when we asked for 0, so address() reports a real port
+          // (Node's listen(0) contract — clients dial server.address().port).
+          const bound = await sys.netListen(this._port);
+          this._listener = bound.listener;
+          this._port = bound.port;
         } catch (e) {
           this.emit("error", e instanceof Error ? e : new Error(String(e)));
           if (this._refd) { this._refd = false; loop()?.unref(); }
@@ -182,7 +283,9 @@ export function createNet(sys, EventEmitter) {
             break;
           }
           if (!this.listening) break;
-          this.emit("connection", new Socket(conn));
+          const socket = new Socket(conn, this._opts);
+          socket.server = this; // Node exposes the owning server on the socket
+          this.emit("connection", socket);
         }
       })();
       return this;
@@ -205,24 +308,9 @@ export function createNet(sys, EventEmitter) {
     }
   }
 
-  function connect(port, host, cb) {
-    if (typeof port === "object" && port !== null) { cb = host; host = undefined; port = port.port; }
-    if (typeof host === "function") { cb = host; host = undefined; }
-    const socket = new Socket(null);
-    (async () => {
-      try {
-        const conn = await sys.netConnect(port | 0);
-        socket._rfd = conn.rfd;
-        socket._wfd = conn.wfd;
-        if (cb) socket.once("connect", cb);
-        socket.emit("connect");
-        socket._pump();
-      } catch (e) {
-        socket.emit("error", e instanceof Error ? e : new Error(String(e)));
-      }
-    })();
-    return socket;
-  }
+  // net.connect(...) / net.createConnection(...) — construct a Socket and drive
+  // its connect(); all the arg-shape handling lives on Socket.connect().
+  const connect = (...args) => new Socket(null).connect(...args);
 
   const createServer = (opts, connectionListener) => new Server(opts, connectionListener);
 

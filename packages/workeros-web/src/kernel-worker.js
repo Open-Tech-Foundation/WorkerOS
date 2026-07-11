@@ -782,7 +782,9 @@ function handleSyscall(pid, msg) {
         break;
       // ---- otf:net_* — port-keyed loopback sockets (ADR-021) ----
       case "net_listen":
-        reply(pid, id, true, { listener: kernel.net_listen(pid, args.port) });
+        // Returns { listener, port }; port is the bound port (assigned when the
+        // guest asked for 0), reported back for server.address().
+        reply(pid, id, true, kernel.net_listen(pid, args.port));
         break;
       case "net_connect": {
         const conn = kernel.net_connect(pid, args.port);

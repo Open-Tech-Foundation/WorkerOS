@@ -8,6 +8,18 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:net` connection lifecycle + ephemeral ports** (`src/node/net.js`,
+  kernel `net.rs`). `server.listen(0)` now binds a real kernel-assigned ephemeral
+  port (49152–65535) and reports it via `server.address()`, so clients that dial
+  `server.address().port` connect instead of hanging. `Socket` gains instance
+  `connect()` (with `connecting`/`pending` state and write-before-connect
+  buffering), `setEncoding()`, `bytesRead`/`bytesWritten`, `bufferSize`, a
+  `server` back-reference on accepted sockets, and Node's default half-close
+  (`allowHalfOpen: false`) auto-ends the write side on peer EOF so finished
+  connections fully close and an idle process can exit. An unconnected
+  `new net.Socket()` no longer pins the event loop open. Verified end-to-end in a
+  booted instance (ephemeral roundtrip, 1 MiB transfer, `test-net-bytes-read`,
+  `test-net-end-without-connect`).
 - **`node:net` API surface** (`src/node/net.js`). `net.Server`/`net.Socket` are now
   callable with or without `new` (via a Proxy that preserves `instanceof` and
   `class X extends net.Socket` subclassing); added `Server.ref()`/`unref()`, the
