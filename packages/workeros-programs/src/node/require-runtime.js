@@ -21,6 +21,7 @@ import { createNet } from "./net.js";
 import { createHttp } from "./http.js";
 import { crypto as cryptoModule } from "./crypto.js";
 import { stream as streamModule } from "./stream.js";
+import { createTimers } from "./timers.js";
 import { zlib as zlibModule } from "./zlib.js";
 
 // ---- core builtins --------------------------------------------------------
@@ -44,6 +45,7 @@ export function makeBuiltins(sys, extras) {
   // pure over `sys` (async `otf:net_*` calls) — the kernel only moves bytes.
   const net = createNet(sys, EventEmitter);
   const http = createHttp(sys, EventEmitter, net);
+  const timers = createTimers(globalThis);
   const reg = new Map([
     ["fs", fs],
     ["fs/promises", fs.promises],
@@ -56,6 +58,7 @@ export function makeBuiltins(sys, extras) {
     ["events", EventEmitter],
     ["util", utilModule],
     ["stream", streamModule],
+    ["timers", timers],
     ["net", net],
     ["http", http],
     ["crypto", cryptoModule],

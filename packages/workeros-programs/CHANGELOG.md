@@ -133,6 +133,13 @@ guest runtime. Format:
   incomplete UTF-8 tail at `end()`. Registered as both `string_decoder` and
   `node:string_decoder`; parity-tested against the host module and through the
   guest CommonJS runtime in `tools/string-decoder.test.js`.
+- **`node:timers`** (`src/node/timers.js`). A real timer-module facade over the
+  event-loop-backed globals already installed by `/bin/node`: `setTimeout`/
+  `clearTimeout`, `setInterval`/`clearInterval`, `setImmediate`/
+  `clearImmediate`, plus the legacy `active`/`enroll`/`unenroll` helpers packages
+  still probe. This keeps one timer implementation in `event-loop.js` and exposes
+  the standard module entrypoint many packages import directly. Covered by
+  `tools/timers.test.js`.
 - **Node event-loop keep-alive** (`src/node/event-loop.js`, `node-program.js`).
   `/bin/node` returned to the program worker the instant the script's synchronous
   top level settled, so a top-level `setInterval`/`setTimeout` never fired (the
