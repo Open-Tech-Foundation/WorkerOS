@@ -9,6 +9,14 @@ test("stringify encodes primitives, arrays, and spaces", () => {
   assert.equal(querystring.encode, stringify);
 });
 
+test("escape follows Node's general coercion and legacy surrogate behavior", () => {
+  assert.equal(querystring.escape({}), "%5Bobject%20Object%5D");
+  assert.equal(querystring.escape([5, 10]), "5%2C10");
+  assert.equal(querystring.escape(`${String.fromCharCode(0xd801)}test`), "%F0%90%91%B4est");
+  assert.throws(() => querystring.escape(String.fromCharCode(0xd801)), { code: "ERR_INVALID_URI" });
+  assert.throws(() => querystring.escape(Symbol("test")), TypeError);
+});
+
 test("parse uses null prototype, collects repeated keys, and decodes plus", () => {
   const value = parse("a=hello+world&x=1&x=2&flag");
   assert.equal(Object.getPrototypeOf(value), null);
@@ -20,6 +28,7 @@ test("custom separators, equals signs, codecs, and maxKeys", () => {
   assert.equal(stringify({ a: "x", b: "y" }, ";", ":"), "a:x;b:y");
   assert.deepEqual({ ...parse("a:x;b:y", ";", ":") }, { a: "x", b: "y" });
   assert.deepEqual({ ...parse("a=1&b=2", "&", "=", { maxKeys: 1 }) }, { a: "1" });
+  assert.equal(Object.keys(parse(Array.from({ length: 1001 }, (_, i) => `${i}=${i}`).join("&"), "&", "=", { maxKeys: Infinity })).length, 1001);
   const identity = (s) => s;
   assert.equal(stringify({ "a b": "c d" }, "&", "=", { encodeURIComponent: identity }), "a b=c d");
 });

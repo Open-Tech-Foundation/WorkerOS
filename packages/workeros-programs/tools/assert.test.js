@@ -49,6 +49,17 @@ test("throws/rejects and partialDeepStrictEqual work", async () => {
 
   assert.doesNotThrow(() => ours.partialDeepStrictEqual({ a: 1, b: 2 }, { a: 1 }));
   assert.throws(() => ours.partialDeepStrictEqual({ a: 1 }, { a: 2 }), { operator: "partialDeepStrictEqual" });
+
+  // An object validator with a RegExp property value is `.test()`ed against the
+  // actual property (Node's rule), not deep-compared.
+  ours.doesNotThrow(() => ours.throws(
+    () => { throw Object.assign(new TypeError('The "buffer" argument is bad'), { code: "ERR_INVALID_ARG_TYPE" }); },
+    { message: /"buffer"/, code: "ERR_INVALID_ARG_TYPE" },
+  ));
+  assert.throws(() => ours.throws(
+    () => { throw new TypeError("nope"); },
+    { message: /"buffer"/ },
+  ), { operator: "throws" });
 });
 
 test("host module parity on exported keys we implement", () => {

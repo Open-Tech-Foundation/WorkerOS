@@ -84,7 +84,7 @@ test("os/url/module builtins + grown process work end-to-end under /bin/node", o
     'eol: "\\n" platform: workeros',
     "tmp: /tmp cpus>=1: true",
     "path: /a/b c.txt",
-    "node: 20.0.0 arch: wasm32",
+    "node: 22.23.1 arch: wasm32",
     "hrtime: true bigint: bigint",
     "nextTick: true",
   ]);

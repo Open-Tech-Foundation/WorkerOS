@@ -208,3 +208,112 @@ test("readlinkSync on a non-link throws EINVAL; buffer encoding", () => {
   assert.ok(buf instanceof Uint8Array);
   assert.equal(dec.decode(buf), "../up");
 });
+
+// --- Async callback API ---------------------------------------------------
+
+test("async readFile/writeFile round-trip; callback is deferred, not sync", async () => {
+  const fs = createFs(createFakeSyncFs());
+  let ran = false;
+  await new Promise((resolve, reject) => {
+    fs.writeFile("/a.txt", "hello", (err) => {
+      if (err) return reject(err);
+      // Callback must fire on a later tick — never in the caller's stack.
+      assert.equal(ran, true, "callback should be deferred");
+      fs.readFile("/a.txt", "utf8", (e, data) => {
+        if (e) return reject(e);
+        assert.equal(data, "hello");
+        resolve();
+      });
+    });
+    ran = true;
+  });
+});
+
+test("async stat/mkdir/readdir/rmdir chain", async () => {
+  const fs = createFs(createFakeSyncFs());
+  await new Promise((resolve, reject) => {
+    fs.mkdir("/d", (err) => {
+      if (err) return reject(err);
+      fs.writeFile("/d/f", "x", (e1) => {
+        if (e1) return reject(e1);
+        fs.readdir("/d", (e2, names) => {
+          if (e2) return reject(e2);
+          assert.deepEqual(names, ["f"]);
+          fs.stat("/d", (e3, st) => {
+            if (e3) return reject(e3);
+            assert.equal(st.isDirectory(), true);
+            resolve();
+          });
+        });
+      });
+    });
+  });
+});
+
+test("async error surfaces as error-first callback with code/path", async () => {
+  const fs = createFs(createFakeSyncFs());
+  const err = await new Promise((resolve) => fs.stat("/missing", (e) => resolve(e)));
+  assert.equal(err.code, "ENOENT");
+  assert.equal(err.path, "/missing");
+});
+
+test("async mkdir twice → EEXIST in the callback", async () => {
+  const fs = createFs(createFakeSyncFs());
+  await new Promise((r) => fs.mkdir("/d", r));
+  const err = await new Promise((resolve) => fs.mkdir("/d", (e) => resolve(e)));
+  assert.equal(err.code, "EEXIST");
+});
+
+test("async open/write/read/close by fd", async () => {
+  const fs = createFs(createFakeSyncFs());
+  const fd = await new Promise((res, rej) => fs.open("/f", "w", (e, fd) => e ? rej(e) : res(fd)));
+  const n = await new Promise((res, rej) => fs.write(fd, "abcdef", (e, n) => e ? rej(e) : res(n)));
+  assert.equal(n, 6);
+  await new Promise((res, rej) => fs.close(fd, (e) => e ? rej(e) : res()));
+  const rfd = await new Promise((res, rej) => fs.open("/f", "r", (e, fd) => e ? rej(e) : res(fd)));
+  const buf = new Uint8Array(6);
+  const read = await new Promise((res, rej) => fs.read(rfd, buf, 0, 6, 0, (e, n, b) => e ? rej(e) : res({ n, b })));
+  assert.equal(read.n, 6);
+  assert.equal(dec.decode(read.b), "abcdef");
+});
+
+test("async exists uses a boolean (non-error-first) callback", async () => {
+  const fs = createFs(createFakeSyncFs());
+  fs.writeFileSync("/f", "x");
+  assert.equal(await new Promise((r) => fs.exists("/f", r)), true);
+  assert.equal(await new Promise((r) => fs.exists("/nope", r)), false);
+});
+
+test("async op with a non-function callback throws synchronously", () => {
+  const fs = createFs(createFakeSyncFs());
+  assert.throws(() => fs.stat("/f"), (e) => e.code === "ERR_INVALID_ARG_TYPE");
+});
+
+test("writeSync rejects non-buffer/string data with ERR_INVALID_ARG_TYPE", () => {
+  const fs = createFs(createFakeSyncFs());
+  for (const bad of [true, false, 0, 1, Infinity, () => {}, {}, [], undefined, null]) {
+    assert.throws(() => fs.writeSync(1, bad), (e) => e.code === "ERR_INVALID_ARG_TYPE" && /"buffer"/.test(e.message), `value: ${String(bad)}`);
+  }
+});
+
+test("fs.constants: null prototype, expected mode bits, no stray keys", () => {
+  const fs = createFs(createFakeSyncFs());
+  assert.equal(Object.getPrototypeOf(fs.constants), null);
+  assert.notEqual(fs.constants.S_IRUSR, undefined);
+  assert.notEqual(fs.constants.S_IWUSR, undefined);
+  const known = new Set([
+    "F_OK", "R_OK", "W_OK", "X_OK", "O_RDONLY", "O_WRONLY", "O_RDWR",
+    "O_CREAT", "O_EXCL", "O_TRUNC", "O_APPEND",
+    "S_IFMT", "S_IFREG", "S_IFDIR", "S_IFCHR", "S_IFBLK", "S_IFIFO", "S_IFLNK", "S_IFSOCK",
+    "S_IRWXU", "S_IRUSR", "S_IWUSR", "S_IXUSR", "S_IRWXG", "S_IRGRP", "S_IWGRP", "S_IXGRP",
+    "S_IRWXO", "S_IROTH", "S_IWOTH", "S_IXOTH", "COPYFILE_EXCL",
+  ]);
+  for (const k of Object.keys(fs.constants)) assert.ok(known.has(k), `unexpected fs.constant: ${k}`);
+});
+
+test("fs.promises round-trip and rejection", async () => {
+  const fs = createFs(createFakeSyncFs());
+  await fs.promises.writeFile("/p", "data");
+  assert.equal(await fs.promises.readFile("/p", "utf8"), "data");
+  await assert.rejects(fs.promises.readFile("/missing"), (e) => e.code === "ENOENT");
+});

@@ -1,0 +1,70 @@
+{
+  "version": "22.23.1",
+  "officialSuite": {
+    "total": 4554,
+    "upstreamSkipped": 4,
+    "expectedPass": 4550,
+    "baseline": "Linux x64 release; tools/test.py --report"
+  },
+  "runnable": [
+    "test/parallel/test-querystring-escape.js",
+    "test/parallel/test-querystring-maxKeys-non-finite.js",
+    "test/parallel/test-querystring-multichar-separator.js",
+    "test/parallel/test-fs-buffertype-writesync.js",
+    "test/parallel/test-fs-constants.js"
+  ],
+  "blocked": [
+    {
+      "file": "test/parallel/test-querystring.js",
+      "reason": "requires node:vm and the private test/common harness"
+    },
+    {
+      "file": "test/parallel/test-fs-write-sync.js",
+      "reason": "requires the test/common tmpdir helper"
+    },
+    {
+      "file": "test/parallel/test-fs-mkdir-rmdir.js",
+      "reason": "requires the test/common harness (tmpdir + mustCall/mustSucceed)"
+    },
+    {
+      "file": "test/parallel/test-fs-existssync-false.js",
+      "reason": "requires the test/common harness (tmpdir + mustSucceed)"
+    },
+    {
+      "file": "test/parallel/test-fs-stat.js",
+      "reason": "requires the test/common harness plus synchronous ERR_INVALID_ARG_TYPE path/type validation"
+    },
+    {
+      "file": "test/parallel/test-fs-readdir.js",
+      "reason": "requires the test/common harness (tmpdir) plus synchronous arg-type validation"
+    },
+    {
+      "file": "test/parallel/test-fs-write-sync-optional-params.js",
+      "reason": "requires object-form writeSync/readSync with ERR_OUT_OF_RANGE bounds checks and the test/common harness"
+    },
+    {
+      "file": "test/parallel/test-fs-truncate-sync.js",
+      "reason": "requires fs.truncateSync (no kernel truncate syscall) and the tmpdir helper"
+    },
+    {
+      "file": "test/parallel/test-fs-readdir-types.js",
+      "reason": "requires internal/test/binding (internalBinding('fs'))"
+    },
+    {
+      "file": "test/parallel/test-fs-realpath.js",
+      "reason": "requires process.chdir and extensive test/fixtures"
+    },
+    {
+      "file": "test/parallel/test-perf-hooks-histogram.js",
+      "reason": "requires native structured-cloneable histograms and test/common.mustCall"
+    },
+    {
+      "file": "test/parallel/test-perf-hooks-resourcetiming.js",
+      "reason": "requires Node-native PerformanceResourceTiming extensions"
+    },
+    {
+      "file": "test/parallel/test-perf-hooks-usertiming.js",
+      "reason": "requires NodeTiming and private test/common helpers"
+    }
+  ]
+}

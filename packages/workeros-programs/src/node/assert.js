@@ -59,7 +59,11 @@ function validateThrown(err, expected, message) {
   if (typeof expected === "function") return expected(err) === true;
   if (isRegExp(expected)) return expected.test(String(err && err.message));
   if (expected && typeof expected === "object") {
-    return Object.keys(expected).every((k) => isDeepStrictEqual(err?.[k], expected[k]));
+    // An object validator: every own property must match the thrown error. Node's
+    // one wrinkle — a RegExp *property value* is `.test()`ed against the actual
+    // (stringified) property, not deep-compared (e.g. `{ message: /"buffer"/ }`).
+    return Object.keys(expected).every((k) =>
+      isRegExp(expected[k]) ? expected[k].test(String(err?.[k])) : isDeepStrictEqual(err?.[k], expected[k]));
   }
   failAssertion({ actual: err, expected, message, operator: "throws", generatedMessage: !message });
 }

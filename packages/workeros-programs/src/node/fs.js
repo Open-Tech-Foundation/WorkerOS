@@ -68,6 +68,20 @@ function fsError(e, syscall, path) {
   return err;
 }
 
+// The low-level `write`/`writeSync` accept only a string or an ArrayBuffer view
+// (Buffer/TypedArray/DataView) — anything else is a caller bug Node surfaces as a
+// synchronous `ERR_INVALID_ARG_TYPE` naming the `"buffer"` argument.
+function assertWriteData(data) {
+  if (typeof data === "string" || ArrayBuffer.isView(data) || data instanceof ArrayBuffer) return;
+  const received = data === null ? "null" : Array.isArray(data) ? "an instance of Array" : typeof data;
+  const err = new TypeError(
+    'The "buffer" argument must be of type string or an instance of Buffer, ' +
+      `TypedArray, or DataView. Received ${received}`,
+  );
+  err.code = "ERR_INVALID_ARG_TYPE";
+  throw err;
+}
+
 const toBytes = (data, encoding) => {
   if (typeof data === "string") return enc.encode(data);
   if (data instanceof Uint8Array) return data;
@@ -204,6 +218,7 @@ export function createFs(syncFs, onFsEvent) {
   }
 
   function writeSync(fd, data, offOrPos, lengthOrEnc, position) {
+    assertWriteData(data);
     let bytes;
     let pos = null;
     if (typeof data === "string") {
@@ -494,11 +509,122 @@ export function createFs(syncFs, onFsEvent) {
     if (entry.listeners.size === 0) { entry.watcher.close(); fileWatchers.delete(path); }
   }
 
-  const constants = {
+  // --- Async callback API -------------------------------------------------
+  // Node's async fs runs each op on the libuv threadpool and delivers the result
+  // on a later loop tick. We have no threadpool: run the *sync* op, but always
+  // deliver through a deferred macrotask so a callback never fires in the caller's
+  // own stack (Node's contract) and the event loop is held open until it runs and
+  // any chained op completes. `setTimeout` is the runtime's loop-installed,
+  // ref-counting timer, so a pending async op keeps the process alive exactly as a
+  // real one does; in plain-Node unit tests it's the native timer (same shape).
+  const defer = (fn) => { setTimeout(fn, 0); };
+
+  // Pull the trailing callback off an arg list, throwing synchronously (as Node
+  // does) if it isn't a function.
+  function takeCallback(all) {
+    const cb = all[all.length - 1];
+    if (typeof cb !== "function") {
+      const err = new TypeError(
+        `The "cb" argument must be of type function. Received ${cb === undefined ? "undefined" : typeof cb}`,
+      );
+      err.code = "ERR_INVALID_ARG_TYPE";
+      throw err;
+    }
+    return [all.slice(0, -1), cb];
+  }
+
+  // A sync op's async twin: (…leadingArgs, cb) → cb(err) | cb(null, result).
+  const asyncify = (syncFn) => (...all) => {
+    const [args, cb] = takeCallback(all);
+    defer(() => {
+      let result;
+      try { result = syncFn(...args); } catch (e) { cb(e); return; }
+      cb(null, result);
+    });
+  };
+
+  // `fs.read(fd, buffer, offset, length, position, cb)` — also the modern
+  // `fs.read(fd[, options], cb)` form. Delivers `(err, bytesRead, buffer)`.
+  function read(fd, ...all) {
+    const [rest, cb] = takeCallback(all);
+    let buffer, offset, length, position;
+    if (rest.length && ArrayBuffer.isView(rest[0])) {
+      buffer = rest[0];
+      offset = rest[1] ?? 0;
+      length = rest[2] ?? buffer.length - offset;
+      position = rest[3] ?? null;
+    } else {
+      const opts = rest[0] || {};
+      buffer = opts.buffer || new Uint8Array(16384);
+      offset = opts.offset ?? 0;
+      length = opts.length ?? buffer.length - offset;
+      position = opts.position ?? null;
+    }
+    defer(() => {
+      let n;
+      try { n = readSync(fd, buffer, offset, length, position); } catch (e) { cb(e); return; }
+      cb(null, n, buffer);
+    });
+  }
+
+  // `fs.write(fd, buffer[, offset[, length[, position]]], cb)` and
+  // `fs.write(fd, string[, position[, encoding]], cb)`. Delivers `(err, n, data)`.
+  function write(fd, data, ...all) {
+    const [params, cb] = takeCallback(all);
+    defer(() => {
+      let n;
+      try { n = writeSync(fd, data, ...params); } catch (e) { cb(e); return; }
+      cb(null, n, data);
+    });
+  }
+
+  // `fs.exists(path, cb)` — the one legacy fs API whose callback is *not*
+  // error-first: it receives a single boolean.
+  function exists(path, cb) {
+    if (typeof cb !== "function") return;
+    defer(() => cb(existsSync(path)));
+  }
+
+  const asyncApi = {
+    access: asyncify(accessSync),
+    readFile: asyncify(readFileSync),
+    writeFile: asyncify(writeFileSync),
+    appendFile: asyncify(appendFileSync),
+    open: asyncify(openSync),
+    close: asyncify(closeSync),
+    read, write, exists,
+    stat: asyncify(statSync),
+    lstat: asyncify(lstatSync),
+    fstat: asyncify(fstatSync),
+    symlink: asyncify(symlinkSync),
+    readlink: asyncify(readlinkSync),
+    link: asyncify(linkSync),
+    realpath: asyncify(realpathSync),
+    readdir: asyncify(readdirSync),
+    mkdir: asyncify(mkdirSync),
+    rmdir: asyncify(rmdirSync),
+    rm: asyncify(rmSync),
+    unlink: asyncify(unlinkSync),
+    rename: asyncify(renameSync),
+    copyFile: asyncify(copyFileSync),
+  };
+  asyncApi.realpath.native = asyncApi.realpath;
+
+  // `fs.constants` is a null-prototype object in Node; every key here is one of
+  // the names Node's own `test-fs-constants` recognizes (no stray keys). We expose
+  // the access-check + open flags we actually honor, plus the `S_IF*`/`S_I*` mode
+  // bits (the `mode` fields in our Stats are built from these).
+  const constants = Object.assign(Object.create(null), {
     F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
     O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2,
     O_CREAT: 0o100, O_EXCL: 0o200, O_TRUNC: 0o1000, O_APPEND: 0o2000,
-  };
+    S_IFMT: 0o170000, S_IFREG: 0o100000, S_IFDIR: 0o040000, S_IFCHR: 0o020000,
+    S_IFBLK: 0o060000, S_IFIFO: 0o010000, S_IFLNK: 0o120000, S_IFSOCK: 0o140000,
+    S_IRWXU: 0o700, S_IRUSR: 0o400, S_IWUSR: 0o200, S_IXUSR: 0o100,
+    S_IRWXG: 0o070, S_IRGRP: 0o040, S_IWGRP: 0o020, S_IXGRP: 0o010,
+    S_IRWXO: 0o007, S_IROTH: 0o004, S_IWOTH: 0o002, S_IXOTH: 0o001,
+    COPYFILE_EXCL: 1,
+  });
 
   const fs = {
     // Sync ops
@@ -509,6 +635,8 @@ export function createFs(syncFs, onFsEvent) {
     existsSync, accessSync,
     readdirSync, mkdirSync, rmdirSync, unlinkSync, rmSync, renameSync,
     copyFileSync, realpathSync, linkSync,
+    // Async callback ops (deferred; see the async block above).
+    ...asyncApi,
     watch, watchFile, unwatchFile,
     constants,
   };

@@ -17,7 +17,37 @@ function stringifyPrimitive(value) {
 }
 
 export function escape(value) {
-  return encodeURIComponent(stringifyPrimitive(value));
+  if (typeof value === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+  const input = String(value);
+  let out = "";
+  const hex = (n) => "%" + n.toString(16).toUpperCase().padStart(2, "0");
+  const safe = (c) =>
+    (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) ||
+    c === 0x21 || c === 0x27 || c === 0x28 || c === 0x29 || c === 0x2a ||
+    c === 0x2d || c === 0x2e || c === 0x5f || c === 0x7e;
+  for (let i = 0; i < input.length; i++) {
+    let cp = input.charCodeAt(i);
+    if (cp >= 0xd800 && cp <= 0xdbff) {
+      if (++i >= input.length) {
+        const error = new URIError("URI malformed");
+        error.code = "ERR_INVALID_URI";
+        throw error;
+      }
+      // Node 22's querystring encoder consumes the following UTF-16 code unit
+      // here (its legacy behavior differs from encodeURIComponent validation).
+      cp = 0x10000 + ((cp & 0x3ff) << 10) + (input.charCodeAt(i) & 0x3ff);
+    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+      const error = new URIError("URI malformed");
+      error.code = "ERR_INVALID_URI";
+      throw error;
+    }
+    if (cp < 0x80 && safe(cp)) out += String.fromCharCode(cp);
+    else {
+      const bytes = enc.encode(String.fromCodePoint(cp));
+      for (const byte of bytes) out += hex(byte);
+    }
+  }
+  return out;
 }
 
 // decodeURIComponent rejects a whole input when one escape is malformed. Node's
@@ -73,7 +103,7 @@ export function parse(input, sep = "&", eq = "=", options) {
     ? options.decodeURIComponent
     : unescape;
   let maxKeys = 1000;
-  if (options && Number.isFinite(options.maxKeys)) maxKeys = options.maxKeys;
+  if (options && typeof options.maxKeys === "number") maxKeys = options.maxKeys;
   const parts = input.split(sep);
   const limit = maxKeys > 0 ? Math.min(parts.length, maxKeys) : parts.length;
   for (let i = 0; i < limit; i++) {

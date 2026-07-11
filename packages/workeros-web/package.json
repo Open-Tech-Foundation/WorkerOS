@@ -17,7 +17,10 @@
     "build:wasm": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --release",
     "build:wasm:dev": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --dev",
     "serve": "node tools/serve.js",
-    "test": "node --test tools/*.test.js"
+    "test": "node --test tools/*.test.js",
+    "compat:sync": "node tools/node-compat-sync.mjs",
+    "test:node-compat": "node tools/node-compat-sync.mjs && node --test tools/node-compat.test.js",
+    "test:node-compat:full": "node tools/node-compat-full.mjs"
   },
   "devDependencies": {
     "playwright": "^1.48.0"
