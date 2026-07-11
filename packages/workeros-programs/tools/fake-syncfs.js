@@ -159,13 +159,13 @@ export function createFakeSyncFs(opts = {}) {
       if (!dirs.has(path)) fail("Noent");
       const out = [];
       const seen = new Set();
-      for (const p of [...files.keys(), ...dirs]) {
+      for (const p of [...files.keys(), ...dirs, ...links.keys()]) {
         if (p === path) continue;
         if (dirOf(p) === path) {
           const name = nameOf(p);
           if (seen.has(name)) continue;
           seen.add(name);
-          out.push({ name, is_dir: dirs.has(p) });
+          out.push({ name, is_dir: dirs.has(p), is_symlink: links.has(p) });
         }
       }
       return out;
@@ -208,6 +208,20 @@ export function createFakeSyncFs(opts = {}) {
     },
     watchRemove(id) {
       watchIds.delete(id);
+    },
+
+    // Optional metadata ops the kernel may grow (createFs feature-detects them).
+    // The fake models set-times over its monotonic clock so utimes is observable;
+    // chmod/chown just validate existence (the fake has no mode/uid/gid).
+    utimes(path, _atimeMs, mtimeMs) {
+      if (!exists(path)) fail("Noent");
+      mtimes.set(path, mtimeMs);
+    },
+    chmod(path, _mode) {
+      if (!exists(path)) fail("Noent");
+    },
+    chown(path, _uid, _gid) {
+      if (!exists(path)) fail("Noent");
     },
 
     // test helper: seed a file

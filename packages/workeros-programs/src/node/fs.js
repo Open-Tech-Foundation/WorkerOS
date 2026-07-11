@@ -25,6 +25,8 @@
 // `atime` is reported as `mtime` (not separately tracked). Not a full Node
 // fidelity claim, but real metadata where the kernel has it.
 
+import { Readable, Writable } from "./stream.js";
+
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
@@ -102,7 +104,7 @@ function pickEncoding(options) {
 // `m` is the kernel stat DTO: { kind, size, mtime, ctime, btime, nlink } with
 // times in ms since epoch (0 until the host clock stamps a mutation). `atime`
 // isn't tracked by the VFS — we report `mtime` for it (noatime-style), honestly.
-function makeStats(m) {
+function makeStats(m, bigint) {
   const kind = m.kind;
   const dir = kind === "dir";
   const link = kind === "symlink";
@@ -111,14 +113,19 @@ function makeStats(m) {
   const ctimeMs = m.ctime || 0;
   const birthtimeMs = m.btime || 0;
   const atimeMs = mtimeMs;
-  return {
-    size,
-    mode: link ? 0o120777 : dir ? 0o040755 : 0o100644,
-    nlink: m.nlink || 1,
+  const mode = link ? 0o120777 : dir ? 0o040755 : 0o100644;
+  const blocks = Math.ceil(size / 512);
+  // `{ bigint: true }` reports every numeric field as a BigInt and adds the
+  // nanosecond `*Ns` fields Node derives from the millisecond values.
+  const N = bigint ? (v) => BigInt(Math.trunc(v)) : (v) => v;
+  const base = {
+    size: N(size),
+    mode: N(mode),
+    nlink: N(m.nlink || 1),
     // Unmodeled fields stay plausible constants.
-    uid: 0, gid: 0, dev: 0, ino: 0, rdev: 0, blksize: 4096,
-    blocks: Math.ceil(size / 512),
-    atimeMs, mtimeMs, ctimeMs, birthtimeMs,
+    uid: N(0), gid: N(0), dev: N(0), ino: N(0), rdev: N(0), blksize: N(4096),
+    blocks: N(blocks),
+    atimeMs: N(atimeMs), mtimeMs: N(mtimeMs), ctimeMs: N(ctimeMs), birthtimeMs: N(birthtimeMs),
     atime: new Date(atimeMs), mtime: new Date(mtimeMs),
     ctime: new Date(ctimeMs), birthtime: new Date(birthtimeMs),
     isFile: () => kind === "file",
@@ -129,14 +136,24 @@ function makeStats(m) {
     isFIFO: () => false,
     isSocket: () => false,
   };
+  if (bigint) {
+    base.atimeNs = BigInt(Math.trunc(atimeMs)) * 1000000n;
+    base.mtimeNs = BigInt(Math.trunc(mtimeMs)) * 1000000n;
+    base.ctimeNs = BigInt(Math.trunc(ctimeMs)) * 1000000n;
+    base.birthtimeNs = BigInt(Math.trunc(birthtimeMs)) * 1000000n;
+  }
+  return base;
 }
 
-function makeDirent(name, isDir) {
+function makeDirent(name, isDir, parentPath, isLink) {
   return {
     name,
-    isFile: () => !isDir,
+    // Node 20+: the directory the entry lives in (`path` is the deprecated alias).
+    parentPath,
+    path: parentPath,
+    isFile: () => !isDir && !isLink,
     isDirectory: () => isDir,
-    isSymbolicLink: () => false,
+    isSymbolicLink: () => !!isLink,
     isBlockDevice: () => false,
     isCharacterDevice: () => false,
     isFIFO: () => false,
@@ -159,6 +176,31 @@ function normalize(p) {
   return (abs ? "/" : "") + segs.join("/") || (abs ? "/" : ".");
 }
 
+// The parent directory of a posix path (no node:path dependency).
+function dirname(p) {
+  const i = p.lastIndexOf("/");
+  if (i < 0) return ".";
+  if (i === 0) return "/";
+  return p.slice(0, i);
+}
+
+// A shell glob → anchored RegExp: `**` spans separators, `*` a run within a
+// segment, `?` one non-separator char. An approximation of Node's (experimental)
+// glob, adequate for the common `**/*.ext` / `*.ext` shapes.
+function globToRegExp(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") { re += ".*"; i++; if (glob[i + 1] === "/") i++; }
+      else re += "[^/]*";
+    } else if (c === "?") re += "[^/]";
+    else if (".+^${}()|[]\\".includes(c)) re += "\\" + c;
+    else re += c;
+  }
+  return new RegExp("^" + re + "$");
+}
+
 // Open flags ('r','w','a','w+',…) → kernel open opts (+ whether to seek to end).
 function flagsToOpts(flags) {
   const f = flags || "r";
@@ -169,6 +211,61 @@ function flagsToOpts(flags) {
   else if (f[0] === "a") { opts.create = true; append = true; }
   // 'r' / 'r+' open an existing file (no create/truncate).
   return { opts, append };
+}
+
+// POSIX O_* bits — Node also accepts an integer flag (a bitwise-OR of these).
+const O_CREAT = 0o100, O_EXCL = 0o200, O_TRUNC = 0o1000, O_APPEND = 0o2000;
+function numericFlagsToOpts(n) {
+  const opts = {};
+  if (n & O_CREAT) opts.create = true;
+  if (n & O_EXCL) opts.exclusive = true;
+  if (n & O_TRUNC) opts.truncate = true;
+  const append = !!(n & O_APPEND);
+  if (append) opts.create = opts.create || false;
+  return { opts, append };
+}
+
+// `file://` URL → posix path (Node accepts a URL anywhere a path string is taken).
+function fileURLToPath(u) {
+  const url = typeof u === "string" ? new URL(u) : u;
+  if (url.protocol !== "file:") throw new TypeError("The URL must be of scheme file");
+  return decodeURIComponent(url.pathname) || "/";
+}
+
+// Coerce a Node path argument (string | Buffer | `file:` URL) to a string, throwing
+// Node's synchronous `ERR_INVALID_ARG_TYPE` for anything else. Applied at the entry
+// of every path-taking op so bad input fails loudly and identically in sync + async.
+function toPath(path) {
+  if (typeof path === "string") return path;
+  if (typeof URL !== "undefined" && path instanceof URL) return fileURLToPath(path);
+  if (path && typeof path === "object" && path.protocol === "file:") return fileURLToPath(path);
+  if (path instanceof Uint8Array) return dec.decode(path);
+  const err = new TypeError(
+    "The \"path\" argument must be of type string or an instance of Buffer or URL. " +
+      `Received ${path === null ? "null" : typeof path}`,
+  );
+  err.code = "ERR_INVALID_ARG_TYPE";
+  throw err;
+}
+
+// Validate a file descriptor argument (a non-negative integer), Node-style.
+function assertFd(fd) {
+  if (typeof fd !== "number" || !Number.isInteger(fd) || fd < 0) {
+    const err = new TypeError(`The \"fd\" argument must be of type number. Received ${typeof fd}`);
+    err.code = "ERR_INVALID_ARG_TYPE";
+    throw err;
+  }
+}
+
+// A bounds check for read/write offset/length, throwing Node's `ERR_OUT_OF_RANGE`.
+function assertRange(name, value, min, max) {
+  if (typeof value !== "number" || value < min || value > max) {
+    const err = new RangeError(
+      `The value of \"${name}\" is out of range. It must be >= ${min} && <= ${max}. Received ${value}`,
+    );
+    err.code = "ERR_OUT_OF_RANGE";
+    throw err;
+  }
 }
 
 export function createFs(syncFs, onFsEvent) {
@@ -196,7 +293,9 @@ export function createFs(syncFs, onFsEvent) {
   };
 
   function openSync(path, flags = "r", _mode) {
-    const { opts, append } = flagsToOpts(typeof flags === "string" ? flags : "r");
+    path = toPath(path);
+    const { opts, append } =
+      typeof flags === "number" ? numericFlagsToOpts(flags) : flagsToOpts(flags == null ? "r" : flags);
     const fd = guard(() => syncFs.open(path, opts), "open", path);
     openPaths.set(fd, path);
     if (append) {
@@ -210,7 +309,17 @@ export function createFs(syncFs, onFsEvent) {
     openPaths.delete(fd);
   }
 
-  function readSync(fd, buffer, offset = 0, length = buffer.length, position = null) {
+  // `readSync(fd, buffer, offset, length, position)` — Node also accepts the
+  // options-object form `readSync(fd, buffer, { offset, length, position })`.
+  function readSync(fd, buffer, offset = 0, length, position = null) {
+    assertFd(fd);
+    if (offset !== null && typeof offset === "object") {
+      ({ offset = 0, length, position = null } = offset);
+    }
+    if (offset == null) offset = 0;
+    if (length == null) length = buffer.length - offset;
+    assertRange("offset", offset, 0, buffer.length);
+    assertRange("length", length, 0, buffer.length - offset);
     if (position != null && position >= 0) guard(() => syncFs.seek(fd, position, SEEK_SET), "read", openPaths.get(fd));
     const bytes = guard(() => syncFs.read(fd, length), "read", openPaths.get(fd));
     buffer.set(bytes.subarray(0, length), offset);
@@ -218,6 +327,7 @@ export function createFs(syncFs, onFsEvent) {
   }
 
   function writeSync(fd, data, offOrPos, lengthOrEnc, position) {
+    assertFd(fd);
     assertWriteData(data);
     let bytes;
     let pos = null;
@@ -225,9 +335,20 @@ export function createFs(syncFs, onFsEvent) {
       bytes = enc.encode(data);
       pos = offOrPos ?? null; // writeSync(fd, string[, position[, encoding]])
     } else {
-      const offset = offOrPos ?? 0;
-      const length = lengthOrEnc ?? data.length - offset;
-      bytes = toBytes(data).subarray(offset, offset + length);
+      // Buffer form — positional `(offset, length, position)` or the
+      // options-object form `writeSync(fd, buffer, { offset, length, position })`.
+      let offset, length;
+      if (offOrPos !== null && typeof offOrPos === "object") {
+        ({ offset = 0, length, position } = offOrPos);
+      } else {
+        offset = offOrPos ?? 0;
+        length = lengthOrEnc;
+      }
+      const view = toBytes(data);
+      if (length == null) length = view.length - offset;
+      assertRange("offset", offset, 0, view.length);
+      assertRange("length", length, 0, view.length - offset);
+      bytes = view.subarray(offset, offset + length);
       pos = position ?? null;
     }
     if (pos != null && pos >= 0) guard(() => syncFs.seek(fd, pos, SEEK_SET), "write", openPaths.get(fd));
@@ -246,8 +367,8 @@ export function createFs(syncFs, onFsEvent) {
     return off;
   }
 
-  function readFileSync(path, options) {
-    const fd = openSync(path, "r");
+  // Drain a file descriptor to EOF; `ownFd` closes it when we opened it ourselves.
+  function readAllFromFd(fd, options, ownFd, path) {
     try {
       const chunks = [];
       let total = 0;
@@ -263,14 +384,25 @@ export function createFs(syncFs, onFsEvent) {
       const encoding = pickEncoding(options);
       return encoding ? dec.decode(out) : out;
     } finally {
-      closeSync(fd);
+      if (ownFd) closeSync(fd);
     }
   }
 
+  function readFileSync(path, options) {
+    // A numeric first arg is already an open fd (Node's readFileSync(fd)).
+    if (typeof path === "number") return readAllFromFd(path, options, false, openPaths.get(path));
+    path = toPath(path);
+    const fd = openSync(path, "r");
+    return readAllFromFd(fd, options, true, path);
+  }
+
   function writeFileSync(path, data, options) {
-    const encoding = pickEncoding(options);
-    const bytes = toBytes(data, encoding);
-    const fd = openSync(path, "w");
+    const bytes = toBytes(data, pickEncoding(options));
+    // A numeric target is an already-open fd (Node writes to it, doesn't close it).
+    if (typeof path === "number") return void writeAll(path, bytes, openPaths.get(path));
+    path = toPath(path);
+    const flag = (options && typeof options === "object" && options.flag) || "w";
+    const fd = openSync(path, flag);
     try {
       writeAll(fd, bytes, path);
     } finally {
@@ -280,6 +412,8 @@ export function createFs(syncFs, onFsEvent) {
 
   function appendFileSync(path, data, options) {
     const bytes = toBytes(data, pickEncoding(options));
+    if (typeof path === "number") return void writeAll(path, bytes, openPaths.get(path));
+    path = toPath(path);
     const fd = openSync(path, "a");
     try {
       writeAll(fd, bytes, path);
@@ -289,8 +423,10 @@ export function createFs(syncFs, onFsEvent) {
   }
 
   function statSync(path, options) {
+    path = toPath(path);
+    const bigint = !!(options && options.bigint);
     try {
-      return makeStats(syncFs.stat(path));
+      return makeStats(syncFs.stat(path), bigint);
     } catch (e) {
       const err = fsError(e, "stat", path);
       if (err.code === "ENOENT" && options && options.throwIfNoEntry === false) return undefined;
@@ -300,8 +436,10 @@ export function createFs(syncFs, onFsEvent) {
 
   // `lstat` — does not follow a final symlink (so `isSymbolicLink()` can be true).
   function lstatSync(path, options) {
+    path = toPath(path);
+    const bigint = !!(options && options.bigint);
     try {
-      return makeStats(syncFs.lstat(path));
+      return makeStats(syncFs.lstat(path), bigint);
     } catch (e) {
       const err = fsError(e, "lstat", path);
       if (err.code === "ENOENT" && options && options.throwIfNoEntry === false) return undefined;
@@ -311,10 +449,13 @@ export function createFs(syncFs, onFsEvent) {
 
   // `symlinkSync(target, path[, type])` — `type` is a Windows-only hint, ignored.
   function symlinkSync(target, path, _type) {
+    target = typeof target === "string" ? target : toPath(target);
+    path = toPath(path);
     guard(() => syncFs.symlink(String(target), path), "symlink", path);
   }
 
   function readlinkSync(path, options) {
+    path = toPath(path);
     const target = guard(() => syncFs.readlink(path), "readlink", path);
     const encoding = pickEncoding(options);
     return encoding === "buffer" ? enc.encode(target) : target;
@@ -322,7 +463,7 @@ export function createFs(syncFs, onFsEvent) {
 
   function existsSync(path) {
     try {
-      syncFs.stat(path);
+      syncFs.stat(toPath(path));
       return true;
     } catch {
       return false;
@@ -330,14 +471,32 @@ export function createFs(syncFs, onFsEvent) {
   }
 
   function readdirSync(path, options) {
-    const entries = guard(() => syncFs.readdir(path), "scandir", path);
+    path = toPath(path);
     const withTypes = options && typeof options === "object" && options.withFileTypes;
+    const recursive = options && typeof options === "object" && options.recursive;
+    if (recursive) return readdirRecursive(path, "", withTypes);
+    const entries = guard(() => syncFs.readdir(path), "scandir", path);
     return withTypes
-      ? entries.map((e) => makeDirent(e.name, e.is_dir))
+      ? entries.map((e) => makeDirent(e.name, e.is_dir, path, e.is_symlink))
       : entries.map((e) => e.name);
   }
 
+  // `readdir(path, { recursive: true })` — a depth-first walk yielding paths
+  // relative to the top `path` (Node's contract), or Dirents with a real parentPath.
+  function readdirRecursive(root, rel, withTypes) {
+    const dirAbs = rel ? joinPath(root, rel) : root;
+    const entries = guard(() => syncFs.readdir(dirAbs), "scandir", dirAbs);
+    const out = [];
+    for (const e of entries) {
+      const childRel = rel ? rel + "/" + e.name : e.name;
+      out.push(withTypes ? makeDirent(e.name, e.is_dir, dirAbs, e.is_symlink) : childRel);
+      if (e.is_dir) out.push(...readdirRecursive(root, childRel, withTypes));
+    }
+    return out;
+  }
+
   function mkdirSync(path, options) {
+    path = toPath(path);
     const recursive = options && typeof options === "object" && options.recursive;
     if (!recursive) {
       guard(() => syncFs.mkdir(path), "mkdir", path);
@@ -360,19 +519,23 @@ export function createFs(syncFs, onFsEvent) {
   }
 
   function unlinkSync(path) {
+    path = toPath(path);
     guard(() => syncFs.unlink(path), "unlink", path);
   }
 
   function rmdirSync(path) {
+    path = toPath(path);
     guard(() => syncFs.rmdir(path), "rmdir", path);
   }
 
   function renameSync(from, to) {
+    from = toPath(from); to = toPath(to);
     guard(() => syncFs.rename(from, to), "rename", from);
   }
 
   // Recursive/force delete (Node's `fs.rmSync`).
   function rmSync(path, options) {
+    path = toPath(path);
     const recursive = options && options.recursive;
     const force = options && options.force;
     let st;
@@ -391,11 +554,16 @@ export function createFs(syncFs, onFsEvent) {
     }
   }
 
-  function copyFileSync(src, dest) {
+  // `copyFileSync(src, dest[, mode])` — `COPYFILE_EXCL` (mode & 1) fails if `dest`
+  // already exists; `FICLONE*` clone hints degrade to a plain copy.
+  function copyFileSync(src, dest, mode) {
+    src = toPath(src); dest = toPath(dest);
+    if ((mode & 1) && existsSync(dest)) throw fsError(new Error("Exist"), "copyfile", dest);
     writeFileSync(dest, readFileSync(src));
   }
 
   function realpathSync(path, options) {
+    path = toPath(path);
     // Canonicalize through symlinks in the kernel (which owns cwd + the link
     // graph). Older kernels without the op fall back to existence + normalize.
     let real;
@@ -412,18 +580,209 @@ export function createFs(syncFs, onFsEvent) {
 
   // `fs.linkSync(existingPath, newPath)` — a hard link (second name, shared inode).
   function linkSync(existingPath, newPath) {
+    existingPath = toPath(existingPath); newPath = toPath(newPath);
     guard(() => syncFs.link(existingPath, newPath), "link", newPath);
   }
 
+  // `accessSync(path[, mode])` — the WorkerOS VFS is single-user and permissionless
+  // (INV-5), so any existing path is reachable; we honor F_OK by checking existence.
   function accessSync(path, _mode) {
+    path = toPath(path);
     guard(() => syncFs.stat(path), "access", path);
   }
 
-  function fstatSync(fd) {
+  function fstatSync(fd, options) {
+    assertFd(fd);
     const path = openPaths.get(fd);
     if (path === undefined) throw fsError(new Error("Badf"), "fstat");
     const m = guard(() => syncFs.stat(path), "fstat", path);
-    return makeStats(m);
+    return makeStats(m, !!(options && options.bigint));
+  }
+
+  // --- Tier 3: truncate / metadata / sync -------------------------------
+  // `truncate(path, len)` / `ftruncate(fd, len)`. The kernel has no truncate
+  // syscall, so we do it in userland over the ops we have: read the file, then
+  // rewrite it grown (zero-filled) or shrunk to `len`. Correct, if not atomic.
+  function truncateAt(path, len = 0) {
+    const cur = readFileSync(path);
+    let out;
+    if (len <= cur.length) {
+      out = cur.subarray(0, len);
+    } else {
+      out = new Uint8Array(len);
+      out.set(cur, 0);
+    }
+    writeFileSync(path, out);
+  }
+  function truncateSync(path, len = 0) {
+    if (typeof path === "number") return ftruncateSync(path, len);
+    truncateAt(toPath(path), len);
+  }
+  function ftruncateSync(fd, len = 0) {
+    assertFd(fd);
+    const path = openPaths.get(fd);
+    if (path === undefined) throw fsError(new Error("Badf"), "ftruncate");
+    truncateAt(path, len);
+  }
+
+  // Permission/ownership ops. The VFS models neither uid/gid nor a mode bitset, so
+  // these validate that the target exists and then succeed as no-ops (the correct
+  // observable behavior on a single-user, permissionless filesystem — INV-5). A
+  // future kernel that grows the syscalls is used when present.
+  function chmodSync(path, mode) {
+    path = toPath(path);
+    if (typeof syncFs.chmod === "function") return void guard(() => syncFs.chmod(path, mode), "chmod", path);
+    guard(() => syncFs.stat(path), "chmod", path);
+  }
+  function fchmodSync(fd, _mode) { assertFd(fd); if (!openPaths.has(fd)) throw fsError(new Error("Badf"), "fchmod"); }
+  function lchmodSync(path, mode) { chmodSync(path, mode); }
+  function chownSync(path, _uid, _gid) {
+    path = toPath(path);
+    if (typeof syncFs.chown === "function") return void guard(() => syncFs.chown(path, _uid, _gid), "chown", path);
+    guard(() => syncFs.stat(path), "chown", path);
+  }
+  function fchownSync(fd, _uid, _gid) { assertFd(fd); if (!openPaths.has(fd)) throw fsError(new Error("Badf"), "fchown"); }
+  function lchownSync(path, uid, gid) { chownSync(path, uid, gid); }
+
+  // `utimes(path, atime, mtime)`. The VFS tracks mtime/ctime/btime; when the kernel
+  // exposes a set-times op we use it, otherwise we validate existence and no-op
+  // (atime is not separately modeled — INV-5).
+  const toEpochMs = (t) => (t instanceof Date ? t.getTime() : typeof t === "number" ? t * 1000 : Date.now());
+  function utimesSync(path, atime, mtime) {
+    path = toPath(path);
+    if (typeof syncFs.utimes === "function") {
+      return void guard(() => syncFs.utimes(path, toEpochMs(atime), toEpochMs(mtime)), "utimes", path);
+    }
+    guard(() => syncFs.stat(path), "utimes", path);
+  }
+  function futimesSync(fd, atime, mtime) {
+    assertFd(fd);
+    const path = openPaths.get(fd);
+    if (path === undefined) throw fsError(new Error("Badf"), "futimes");
+    utimesSync(path, atime, mtime);
+  }
+  function lutimesSync(path, atime, mtime) { utimesSync(path, atime, mtime); }
+
+  // `fsync`/`fdatasync` — writes already land synchronously in the VFS, so a flush
+  // is a validated no-op.
+  function fsyncSync(fd) { assertFd(fd); if (!openPaths.has(fd)) throw fsError(new Error("Badf"), "fsync"); }
+  const fdatasyncSync = fsyncSync;
+
+  // Scatter/gather I/O over the single-buffer primitives.
+  function readvSync(fd, buffers, position) {
+    let total = 0;
+    let pos = position ?? null;
+    for (const buf of buffers) {
+      const n = readSync(fd, buf, 0, buf.length, pos);
+      total += n;
+      if (pos != null) pos += n;
+      if (n < buf.length) break; // short read → EOF
+    }
+    return total;
+  }
+  function writevSync(fd, buffers, position) {
+    let total = 0;
+    let pos = position ?? null;
+    for (const buf of buffers) {
+      const n = writeSync(fd, buf, 0, buf.length, pos);
+      total += n;
+      if (pos != null) pos += n;
+    }
+    return total;
+  }
+
+  // `mkdtemp(prefix)` — create a uniquely-named dir `prefix` + 6 random chars.
+  function mkdtempSync(prefix, options) {
+    prefix = typeof prefix === "string" ? prefix : toPath(prefix);
+    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for (let attempt = 0; attempt < 100; attempt++) {
+      let suffix = "";
+      for (let i = 0; i < 6; i++) suffix += chars[(Math.random() * chars.length) | 0];
+      const dir = prefix + suffix;
+      try {
+        syncFs.mkdir(dir);
+        const encoding = pickEncoding(options);
+        return encoding === "buffer" ? enc.encode(dir) : dir;
+      } catch (e) {
+        if (toCode(String(e.message || e)) !== "EEXIST") throw fsError(e, "mkdtemp", dir);
+      }
+    }
+    throw fsError(new Error("Exist"), "mkdtemp", prefix);
+  }
+
+  // `statfs` — the VFS is one flat store; report a single plausible filesystem.
+  function statfsSync(path, options) {
+    toPath(path);
+    const bigint = !!(options && options.bigint);
+    const N = bigint ? (v) => BigInt(v) : (v) => v;
+    return {
+      type: N(0x9123683e), bsize: N(4096),
+      blocks: N(1 << 20), bfree: N(1 << 19), bavail: N(1 << 19),
+      files: N(1 << 16), ffree: N(1 << 15),
+    };
+  }
+
+  // `cp`/`cpSync(src, dest, opts)` — recursive copy of a file, directory, or symlink.
+  function cpSync(src, dest, options = {}) {
+    src = toPath(src); dest = toPath(dest);
+    const st = options.dereference ? statSync(src) : lstatSync(src);
+    if (st.isSymbolicLink()) {
+      const target = readlinkSync(src);
+      try { unlinkSync(dest); } catch { /* not there */ }
+      symlinkSync(target, dest);
+    } else if (st.isDirectory()) {
+      if (!options.recursive) throw fsError(new Error("Isdir"), "cp", src);
+      try { mkdirSync(dest, { recursive: true }); } catch (e) { if (e.code !== "EEXIST") throw e; }
+      for (const name of readdirSync(src)) cpSync(joinPath(src, name), joinPath(dest, name), options);
+    } else {
+      if (options.force === false && existsSync(dest)) return;
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(src, dest, options.errorOnExist ? 1 : 0);
+    }
+  }
+
+  // `opendirSync(path)` → an `fs.Dir` over an eagerly-read directory listing.
+  function opendirSync(path, _options) {
+    path = toPath(path);
+    const dirents = readdirSync(path, { withFileTypes: true });
+    return new Dir(path, dirents);
+  }
+
+  // A minimal `fs.Dir`: sync + async `read()`, `close()`, and async iteration.
+  class Dir {
+    constructor(p, dirents) { this.path = p; this._entries = dirents; this._i = 0; }
+    readSync() { return this._i < this._entries.length ? this._entries[this._i++] : null; }
+    read(cb) {
+      const v = this.readSync();
+      if (cb) return void defer(() => cb(null, v));
+      return Promise.resolve(v);
+    }
+    closeSync() {}
+    close(cb) { if (cb) return void defer(() => cb(null)); return Promise.resolve(); }
+    async *[Symbol.asyncIterator]() {
+      for (const e of this._entries) yield e;
+    }
+  }
+
+  // `glob`/`globSync(pattern[, options])` — walk `cwd` matching a shell-style
+  // pattern (`**` any depth, `*` any run within a segment, `?` one char).
+  function globSync(pattern, options = {}) {
+    const cwd = toPath(options.cwd || "/");
+    const pats = (Array.isArray(pattern) ? pattern : [pattern]).map(globToRegExp);
+    const withTypes = !!options.withFileTypes;
+    const out = [];
+    const walk = (relDir) => {
+      const abs = relDir ? joinPath(cwd, relDir) : cwd;
+      let entries;
+      try { entries = readdirSync(abs, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const rel = relDir ? relDir + "/" + e.name : e.name;
+        if (pats.some((re) => re.test(rel))) out.push(withTypes ? e : rel);
+        if (e.isDirectory()) walk(rel);
+      }
+    };
+    walk("");
+    return out;
   }
 
   // A small path join used by rmSync (kept local to avoid a node:path dependency).
@@ -585,6 +944,148 @@ export function createFs(syncFs, onFsEvent) {
     defer(() => cb(existsSync(path)));
   }
 
+  // `readv(fd, buffers[, position], cb)` → cb(err, bytesRead, buffers).
+  function readv(fd, buffers, ...all) {
+    const [rest, cb] = takeCallback(all);
+    const position = rest[0] ?? null;
+    defer(() => {
+      let n;
+      try { n = readvSync(fd, buffers, position); } catch (e) { cb(e); return; }
+      cb(null, n, buffers);
+    });
+  }
+  // `writev(fd, buffers[, position], cb)` → cb(err, bytesWritten, buffers).
+  function writev(fd, buffers, ...all) {
+    const [rest, cb] = takeCallback(all);
+    const position = rest[0] ?? null;
+    defer(() => {
+      let n;
+      try { n = writevSync(fd, buffers, position); } catch (e) { cb(e); return; }
+      cb(null, n, buffers);
+    });
+  }
+
+  // `openAsBlob(path[, options])` → a `Blob` over the file's current bytes.
+  function openAsBlob(path, options = {}) {
+    return new Promise((resolve, reject) => {
+      try { resolve(new Blob([readFileSync(toPath(path))], { type: options.type || "" })); }
+      catch (e) { reject(e); }
+    });
+  }
+
+  // --- Streams ------------------------------------------------------------
+  // `createReadStream(path[, options])` → a Readable that pumps the file (from an
+  // optional byte `start`..`end`) in `highWaterMark` chunks, opening the fd itself
+  // unless one is supplied. Deferred pumping keeps emission asynchronous.
+  function createReadStream(path, options = {}) {
+    if (typeof options === "string") options = { encoding: options };
+    const flags = options.flags || "r";
+    const start = options.start ?? 0;
+    const end = options.end; // inclusive, per Node
+    const hwm = options.highWaterMark || 64 * 1024;
+    const autoClose = options.autoClose !== false;
+    const rs = new Readable({ encoding: options.encoding || null });
+    rs.path = path == null ? undefined : toPath(path);
+    rs.bytesRead = 0;
+    let fd = options.fd ?? null;
+    const ownFd = options.fd == null;
+    const fail = (e) => { rs.emit("error", e); if (autoClose && ownFd && fd != null) { try { closeSync(fd); } catch { /* */ } } };
+    rs.on("end", () => { if (autoClose && ownFd && fd != null) { try { closeSync(fd); } catch { /* */ } } rs.emit("close"); });
+    defer(() => {
+      try {
+        if (fd == null) fd = openSync(rs.path, flags);
+        if (start) syncFs.seek(fd, start, SEEK_SET);
+      } catch (e) { return fail(e); }
+      rs.emit("open", fd);
+      rs.emit("ready");
+      let pos = start;
+      const pump = () => {
+        try {
+          let want = hwm;
+          if (end != null) {
+            const remaining = end - pos + 1;
+            if (remaining <= 0) return void rs.push(null);
+            want = Math.min(want, remaining);
+          }
+          const chunk = guard(() => syncFs.read(fd, want), "read", rs.path);
+          if (chunk.length === 0) return void rs.push(null);
+          pos += chunk.length;
+          rs.bytesRead += chunk.length;
+          rs.push(chunk);
+          defer(pump);
+        } catch (e) { fail(e); }
+      };
+      defer(pump);
+    });
+    return rs;
+  }
+
+  // `createWriteStream(path[, options])` → a Writable backed by an fd.
+  function createWriteStream(path, options = {}) {
+    if (typeof options === "string") options = { encoding: options };
+    const flags = options.flags || "w";
+    const autoClose = options.autoClose !== false;
+    const ws = new Writable({ defaultEncoding: options.encoding || "utf8" });
+    ws.path = path == null ? undefined : toPath(path);
+    ws.bytesWritten = 0;
+    let fd = options.fd ?? null;
+    const ownFd = options.fd == null;
+    try {
+      if (fd == null) fd = openSync(ws.path, flags);
+      if (options.start != null) syncFs.seek(fd, options.start, SEEK_SET);
+    } catch (e) { defer(() => ws.emit("error", e)); return ws; }
+    defer(() => { ws.emit("open", fd); ws.emit("ready"); });
+    ws._write = (chunk, encoding, cb) => {
+      try {
+        ws.bytesWritten += writeAll(fd, toBytes(chunk, encoding), ws.path);
+        cb();
+      } catch (e) { cb(e); }
+    };
+    ws.on("finish", () => { if (autoClose && ownFd && fd != null) { try { closeSync(fd); } catch { /* */ } } });
+    return ws;
+  }
+
+  // --- promises: FileHandle ----------------------------------------------
+  // `fsPromises.open()` resolves to one of these. Each method runs the matching
+  // sync op against the held fd and resolves/rejects a Promise.
+  const settle = (fn) => { try { return Promise.resolve(fn()); } catch (e) { return Promise.reject(e); } };
+  class FileHandle {
+    constructor(fd) { this.fd = fd; }
+    read(buffer, offset, length, position) {
+      return settle(() => {
+        if (buffer && !ArrayBuffer.isView(buffer)) { // options-object form
+          const o = buffer;
+          buffer = o.buffer || new Uint8Array(16384);
+          ({ offset = 0, length = buffer.length - offset, position = null } = o);
+        }
+        const bytesRead = readSync(this.fd, buffer, offset, length, position);
+        return { bytesRead, buffer };
+      });
+    }
+    write(data, offset, length, position) {
+      return settle(() => {
+        const bytesWritten = writeSync(this.fd, data, offset, length, position);
+        return { bytesWritten, buffer: data };
+      });
+    }
+    readv(buffers, position) { return settle(() => ({ bytesRead: readvSync(this.fd, buffers, position), buffers })); }
+    writev(buffers, position) { return settle(() => ({ bytesWritten: writevSync(this.fd, buffers, position), buffers })); }
+    readFile(options) { return settle(() => readFileSync(this.fd, options)); }
+    writeFile(data, options) { return settle(() => writeFileSync(this.fd, data, options)); }
+    appendFile(data, options) { return settle(() => appendFileSync(this.fd, data, options)); }
+    stat(options) { return settle(() => fstatSync(this.fd, options)); }
+    truncate(len) { return settle(() => ftruncateSync(this.fd, len)); }
+    chmod(mode) { return settle(() => fchmodSync(this.fd, mode)); }
+    chown(uid, gid) { return settle(() => fchownSync(this.fd, uid, gid)); }
+    utimes(atime, mtime) { return settle(() => futimesSync(this.fd, atime, mtime)); }
+    sync() { return settle(() => fsyncSync(this.fd)); }
+    datasync() { return settle(() => fdatasyncSync(this.fd)); }
+    createReadStream(options) { return createReadStream(null, { ...options, fd: this.fd, autoClose: false }); }
+    createWriteStream(options) { return createWriteStream(null, { ...options, fd: this.fd, autoClose: false }); }
+    close() { return settle(() => closeSync(this.fd)); }
+    [Symbol.asyncDispose]() { return this.close(); }
+  }
+
   const asyncApi = {
     access: asyncify(accessSync),
     readFile: asyncify(readFileSync),
@@ -592,21 +1093,39 @@ export function createFs(syncFs, onFsEvent) {
     appendFile: asyncify(appendFileSync),
     open: asyncify(openSync),
     close: asyncify(closeSync),
-    read, write, exists,
+    read, write, readv, writev, exists,
     stat: asyncify(statSync),
     lstat: asyncify(lstatSync),
     fstat: asyncify(fstatSync),
+    statfs: asyncify(statfsSync),
     symlink: asyncify(symlinkSync),
     readlink: asyncify(readlinkSync),
     link: asyncify(linkSync),
     realpath: asyncify(realpathSync),
     readdir: asyncify(readdirSync),
     mkdir: asyncify(mkdirSync),
+    mkdtemp: asyncify(mkdtempSync),
     rmdir: asyncify(rmdirSync),
     rm: asyncify(rmSync),
     unlink: asyncify(unlinkSync),
     rename: asyncify(renameSync),
     copyFile: asyncify(copyFileSync),
+    cp: asyncify(cpSync),
+    opendir: asyncify(opendirSync),
+    glob: asyncify(globSync),
+    truncate: asyncify(truncateSync),
+    ftruncate: asyncify(ftruncateSync),
+    chmod: asyncify(chmodSync),
+    fchmod: asyncify(fchmodSync),
+    lchmod: asyncify(lchmodSync),
+    chown: asyncify(chownSync),
+    fchown: asyncify(fchownSync),
+    lchown: asyncify(lchownSync),
+    utimes: asyncify(utimesSync),
+    futimes: asyncify(futimesSync),
+    lutimes: asyncify(lutimesSync),
+    fsync: asyncify(fsyncSync),
+    fdatasync: asyncify(fdatasyncSync),
   };
   asyncApi.realpath.native = asyncApi.realpath;
 
@@ -628,21 +1147,27 @@ export function createFs(syncFs, onFsEvent) {
 
   const fs = {
     // Sync ops
-    openSync, closeSync, readSync, writeSync,
+    openSync, closeSync, readSync, writeSync, readvSync, writevSync,
     readFileSync, writeFileSync, appendFileSync,
-    statSync, lstatSync, fstatSync,
+    statSync, lstatSync, fstatSync, statfsSync,
     symlinkSync, readlinkSync,
     existsSync, accessSync,
-    readdirSync, mkdirSync, rmdirSync, unlinkSync, rmSync, renameSync,
-    copyFileSync, realpathSync, linkSync,
+    readdirSync, mkdirSync, mkdtempSync, rmdirSync, unlinkSync, rmSync, renameSync,
+    copyFileSync, realpathSync, linkSync, cpSync, opendirSync, globSync,
+    truncateSync, ftruncateSync,
+    chmodSync, fchmodSync, lchmodSync, chownSync, fchownSync, lchownSync,
+    utimesSync, futimesSync, lutimesSync, fsyncSync, fdatasyncSync,
     // Async callback ops (deferred; see the async block above).
     ...asyncApi,
+    openAsBlob,
+    createReadStream, createWriteStream,
     watch, watchFile, unwatchFile,
+    Dir, ReadStream: Readable, WriteStream: Writable,
     constants,
   };
 
-  // A thin `fs.promises` — the sync op wrapped in a resolved/rejected Promise.
-  // (No true async I/O yet; enough for tools that `await fs.promises.readFile`.)
+  // `fs.promises` — the sync op wrapped in a resolved/rejected Promise, plus the
+  // `FileHandle`-returning `open`. (No threadpool; enough for `await fs.promises.*`.)
   const wrapP = (fn) => (...args) => {
     try { return Promise.resolve(fn(...args)); } catch (e) { return Promise.reject(e); }
   };
@@ -652,19 +1177,34 @@ export function createFs(syncFs, onFsEvent) {
     appendFile: wrapP(appendFileSync),
     stat: wrapP(statSync),
     lstat: wrapP(lstatSync),
+    statfs: wrapP(statfsSync),
     symlink: wrapP(symlinkSync),
     readlink: wrapP(readlinkSync),
     link: wrapP(linkSync),
     realpath: wrapP(realpathSync),
     readdir: wrapP(readdirSync),
     mkdir: wrapP(mkdirSync),
+    mkdtemp: wrapP(mkdtempSync),
     rmdir: wrapP(rmdirSync),
     rm: wrapP(rmSync),
     unlink: wrapP(unlinkSync),
     rename: wrapP(renameSync),
     copyFile: wrapP(copyFileSync),
-    realpath: wrapP(realpathSync),
+    cp: wrapP(cpSync),
     access: wrapP(accessSync),
+    truncate: wrapP(truncateSync),
+    chmod: wrapP(chmodSync),
+    lchmod: wrapP(lchmodSync),
+    chown: wrapP(chownSync),
+    lchown: wrapP(lchownSync),
+    utimes: wrapP(utimesSync),
+    lutimes: wrapP(lutimesSync),
+    glob: wrapP(globSync),
+    opendir: wrapP(opendirSync),
+    open: (path, flags = "r", mode) => settle(() => new FileHandle(openSync(path, flags, mode))),
+    watch, // async-iterable in Node; here it returns the FSWatcher (EventEmitter)
+    openAsBlob,
+    constants,
   };
 
   return fs;
