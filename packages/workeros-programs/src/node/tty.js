@@ -40,11 +40,17 @@ export function colorDepth(env = {}) {
  *   getWinsize()       — current { cols, rows }
  *   getEnv()           — the live process.env (for color detection)
  *   setRawMode(fd, on) — flip the kernel line discipline (tcsetattr)
+ *   readFd(fd, max)    — async read from a fd; resolves bytes, empty = EOF
  *   emitter(obj)       — augment obj with the Node EventEmitter surface
  */
-export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, emitter }) {
+export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, readFd, emitter }) {
   const isatty = (fd) => isattyFor(fd);
   const fire = (cb) => { if (typeof cb === "function") queueMicrotask(cb); };
+  // Buffer / event loop are installed on the global by /bin/node at runtime, after
+  // this module is built; resolve them lazily so a ReadStream pump (which only runs
+  // once a program starts reading) always sees the live values.
+  const asBuf = (bytes) => (globalThis.Buffer ? globalThis.Buffer.from(bytes) : bytes);
+  const loop = () => globalThis.__workerosLoop;
 
   class WriteStream {
     constructor(fd) {
@@ -99,20 +105,142 @@ export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, em
     }
   }
 
+  // A real readable stdin: a pump loop drains the fd (`readFd`, which blocks in the
+  // kernel until keystrokes arrive or EOF) and drives Node's stream surface —
+  // flowing (`'data'`/`resume`/`pause`), paused (`'readable'`/`read`), async
+  // iteration, `pipe`, and `setEncoding`. This is what makes interactive programs
+  // (readline, prompt libraries, scaffolders) actually receive input; before it,
+  // `process.stdin` never read the fd so every `on('data')` was silent (INV-5).
   class ReadStream {
-    constructor(fd) {
+    constructor(fd, { isTTY = true } = {}) {
       emitter(this);
       this.fd = fd;
-      this.isTTY = true;
+      this.isTTY = isTTY;
       this.isRaw = false;
       this.readable = true;
+      this._flowing = false;   // Node flowing mode (emitting 'data')
+      this._reading = false;   // a pump loop is in flight
+      this._ended = false;     // EOF seen; 'end' emitted
+      this._refd = false;      // holding an event-loop ref
+      this._encoding = null;   // setEncoding → emit strings
+      this._buf = [];          // paused-mode backlog of chunks
+      this._decoder = null;
+      // Start flowing the instant someone listens for data (Node's semantics); a
+      // 'readable' listener arms paused mode. `_onadd` is the light emitter's hook.
+      this._onadd = (ev) => {
+        if (ev === "data") this.resume();
+        else if (ev === "readable" && !this._reading && !this._ended) this._pump();
+      };
+      // TTY-only control surface (Node's non-tty stdin has no setRawMode).
+      if (isTTY) {
+        this.setRawMode = (mode) => {
+          this.isRaw = !!mode;
+          setRawMode(this.fd, !!mode);
+          return this;
+        };
+      }
     }
-    // Node returns `this` synchronously; the kernel line-discipline switch is
-    // applied asynchronously (honest limit, INV-5) — raw = no canon/echo/isig.
-    setRawMode(mode) {
-      this.isRaw = !!mode;
-      setRawMode(this.fd, !!mode);
+
+    _ref() { if (!this._refd) { this._refd = true; loop()?.ref(); } }
+    _unref() { if (this._refd) { this._refd = false; loop()?.unref(); } }
+
+    _wrap(bytes) {
+      if (!this._encoding) return asBuf(bytes);
+      const dec = this._decoder || (this._decoder = new TextDecoder(this._encoding === "utf-8" ? "utf-8" : this._encoding));
+      try { return dec.decode(bytes, { stream: true }); } catch { return new TextDecoder().decode(bytes); }
+    }
+
+    // The single reader of the fd. In flowing mode it emits each chunk as 'data';
+    // if paused mid-read it stashes the chunk and emits 'readable' instead.
+    async _pump() {
+      if (this._reading || this._ended || this.fd == null) return;
+      this._reading = true;
+      this._ref();
+      try {
+        for (;;) {
+          // Drain any paused backlog first (a resume after pause).
+          while (this._flowing && this._buf.length) this.emit("data", this._buf.shift());
+          const bytes = await readFd(this.fd, 1 << 16);
+          if (this._ended) break;
+          if (!bytes || bytes.length === 0) {
+            this._ended = true;
+            this.readable = false;
+            this.emit("end");
+            break;
+          }
+          const chunk = this._wrap(bytes);
+          if (this._flowing) {
+            this.emit("data", chunk);
+          } else {
+            this._buf.push(chunk);
+            this.emit("readable");
+            break; // paused: stop reading until read()/resume()
+          }
+        }
+      } catch (e) {
+        this.emit("error", e instanceof Error ? e : new Error(String(e)));
+      } finally {
+        this._reading = false;
+        if (this._ended || !this._flowing) this._unref();
+      }
+    }
+
+    resume() {
+      if (this._ended) return this;
+      this._flowing = true;
+      this._ref();
+      if (!this._reading) this._pump();
       return this;
+    }
+
+    pause() { this._flowing = false; return this; }
+
+    setEncoding(enc) { this._encoding = enc; this._decoder = null; return this; }
+
+    // Minimal paused-mode read(): hand back buffered data, else prime one read.
+    read() {
+      if (this._buf.length) {
+        const chunk = this._buf.shift();
+        if (!this._buf.length && !this._reading && !this._ended) this._pump();
+        return chunk;
+      }
+      if (!this._reading && !this._ended) this._pump();
+      return null;
+    }
+
+    pipe(dest) {
+      this.on("data", (chunk) => dest.write(chunk));
+      this.once("end", () => { if (typeof dest.end === "function") dest.end(); });
+      this.resume();
+      return dest;
+    }
+
+    ref() { this._ref(); return this; }
+    unref() { this._unref(); return this; }
+    destroy() { this._ended = true; this.readable = false; this._unref(); this.emit("close"); return this; }
+    // `setRawMode` is attached per-instance only when isTTY (constructor), matching
+    // Node: a redirected/piped stdin has no setRawMode, which libraries feature-test.
+
+    // `for await (const chunk of process.stdin)` — consume flowing 'data'.
+    [Symbol.asyncIterator]() {
+      const self = this;
+      const queue = [];
+      let pending = null;
+      let done = false;
+      const onData = (c) => { if (pending) { pending({ value: c, done: false }); pending = null; } else queue.push(c); };
+      const onEnd = () => { done = true; if (pending) { pending({ value: undefined, done: true }); pending = null; } };
+      self.on("data", onData);
+      self.once("end", onEnd);
+      self.resume();
+      return {
+        next() {
+          if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
+          if (done) return Promise.resolve({ value: undefined, done: true });
+          return new Promise((r) => (pending = r));
+        },
+        return() { self.off("data", onData); self.pause(); return Promise.resolve({ value: undefined, done: true }); },
+        [Symbol.asyncIterator]() { return this; },
+      };
     }
   }
 

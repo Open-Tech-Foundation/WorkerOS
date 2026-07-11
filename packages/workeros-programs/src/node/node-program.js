@@ -104,6 +104,7 @@ const tty = createTty({
   getWinsize: () => winsize,
   getEnv: () => process.env,
   setRawMode: (fd, on) => sys.tcsetattr({ canonical: !on, echo: !on, isig: !on }),
+  readFd: (fd, max) => sys.read(fd, max),
   emitter,
 });
 
@@ -155,8 +156,9 @@ const process = emitter({
   hrtime,
   nextTick: (cb, ...args) => queueMicrotask(() => cb(...args)),
   // A terminal fd gets a real tty stream (setRawMode / cursorTo / …); a redirected
-  // one gets a plain reader/writer — the isTTY split Node makes.
-  stdin: in0 ? new tty.ReadStream(0) : emitter({ isTTY: false, readable: true }),
+  // one gets a plain reader/writer — the isTTY split Node makes. Both pump the fd
+  // so `process.stdin` actually delivers input (flowing / paused / async-iter).
+  stdin: new tty.ReadStream(0, { isTTY: in0 }),
   stdout: out1 ? new tty.WriteStream(1) : pipeStream(1),
   stderr: err2 ? new tty.WriteStream(2) : pipeStream(2),
   // sys.exit reports the code to the kernel and throws to unwind the current tick,

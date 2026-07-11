@@ -8,6 +8,19 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **Interactive `process.stdin`** (`src/node/tty.js`, `src/node/node-program.js`).
+  `process.stdin` now actually reads fd 0. `tty.ReadStream` became a real readable:
+  a pump loop drains the fd (blocking in the kernel until keystrokes/EOF) and drives
+  the full stream surface — flowing (`'data'`/`resume`/`pause`), paused
+  (`'readable'`/`read`), `setEncoding`, `pipe`, and async iteration (`for await`) —
+  plus `isTTY`/`setRawMode` and event-loop ref/unref (it keeps the process alive
+  only while something is reading). Before this it never touched the fd, so every
+  `stdin.on('data')` was silent and interactive programs hung. This is what makes
+  **interactive scaffolders work end-to-end** (`npm create <x>` runs an initializer
+  under `/bin/node` that inherits the controlling terminal and can prompt), along
+  with any readline/prompt-driven CLI, in both cooked and raw/keypress modes. The
+  non-tty case (`node app < file`, pipes) pumps the same way. Covered end-to-end by
+  `workeros-web`'s `tools/stdin-stream.test.js` (flowing, exec'd-child, raw-mode).
 - **`node:child_process`** (`src/node/child-process.js`). Running sub-processes
   from a Node program — `spawn`, `exec`, `execFile`, `fork`, and the synchronous
   `execSync` / `execFileSync` / `spawnSync`. GUEST code (INV-1): a child is just
@@ -40,9 +53,9 @@ guest runtime. Format:
   ephemeral `/tmp` prefix and run its bin under `/bin/node` in the current cwd,
   scaffolding in place. The shared install path is refactored to a per-invocation
   `{ nmRoot, binDir }` context so local and global installs run the same
-  fetch/untar/semver/bin-link code. Honest limit (INV-5): `sys.exec` doesn't
-  forward stdin, so interactive scaffolders can't prompt — only non-interactive
-  ones (`--yes`/presets) work. Global bin resolution is covered end-to-end by
+  fetch/untar/semver/bin-link code. The initializer inherits the controlling
+  terminal, so interactive scaffolders can prompt (see the interactive
+  `process.stdin` entry above). Global bin resolution is covered end-to-end by
   `workeros-web`'s `tools/global-bin.test.js`.
 - **`node:fs` hard links + real `realpath`** (`src/node/fs.js`). `linkSync`
   (a hard link — a second name for the same file, the store→project primitive
