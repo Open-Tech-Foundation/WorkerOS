@@ -7,6 +7,17 @@ a release yet, so everything lives under **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **Content-addressed manifest + chunk access (persistence Stage 3, ADR-022).**
+  New `Kernel` surface projects the durable tree as a manifest + a flat set of
+  chunks the host can store by key: `manifest()` serializes the persistent
+  subtree in the `b"WOM1"` shape (per-file ordered chunk-hash lists + inode
+  metadata: mtime/ctime/btime, symlink targets), `referenced_chunks()` lists the
+  hex SHA-256 of every chunk the durable tree needs, `chunk_bytes(hex)` fetches a
+  chunk's raw bytes, and on boot `load_chunk(bytes)` re-inserts a chunk (returning
+  its hex hash for integrity check) and `hydrate_manifest()` rebuilds the tree
+  over the loaded chunks. This is the per-file/delta persistence shape (only the
+  changed chunks flush) that supersedes the whole-tree `WOFS` blob. Native-tested
+  (manifest round-trip; ephemeral `/tmp` chunks excluded from `referenced_chunks`).
 - **Content-addressed file storage: chunking + dedup + COW (persistence Stage 2,
   ADR-022).** File bytes are no longer stored inline; a file is now an ordered
   list of content-addressed chunk hashes (`Kind::File { chunks, size }`), each

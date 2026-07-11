@@ -236,6 +236,37 @@ impl Kernel {
         self.mounts.mount(prefix, d);
     }
 
+    // --- Content-addressed persistence (ADR-022) ---------------------------
+
+    /// The durable directory tree + metadata + file chunk-hash lists, serialized
+    /// as a manifest for the host to store as the persistence root.
+    pub fn manifest(&self) -> Vec<u8> {
+        self.vfs.manifest(&self.mounts)
+    }
+
+    /// Hex hashes of all chunks referenced by durable files — the host ensures
+    /// these are stored and treats any other stored chunk as garbage (GC).
+    pub fn referenced_chunks(&self) -> Vec<String> {
+        self.vfs.referenced_chunks(&self.mounts)
+    }
+
+    /// The bytes of a chunk by hex hash (the host persists the ones it lacks).
+    pub fn chunk_bytes(&self, hex: &str) -> Option<Vec<u8>> {
+        self.vfs.chunk_bytes_hex(hex)
+    }
+
+    /// Load a chunk's bytes into the store at boot; returns its verified hex
+    /// hash so the host can detect a corrupt/misfiled block.
+    pub fn load_chunk(&mut self, bytes: Vec<u8>) -> String {
+        self.vfs.load_chunk(bytes)
+    }
+
+    /// Rebuild the durable tree from a manifest at boot (chunks must be loaded
+    /// first via [`load_chunk`](Self::load_chunk)). `EINVAL` on a corrupt blob.
+    pub fn hydrate_manifest(&mut self, bytes: &[u8]) -> SysResult<()> {
+        self.vfs.hydrate_manifest(bytes)
+    }
+
     /// Resolve an invocation (interpreter + entry + import graph), register a
     /// process, create its syscall context, and wire its stdio per `plan`. Does
     /// **not** start a worker — that is the host's job (`otf:spawn`), which uses

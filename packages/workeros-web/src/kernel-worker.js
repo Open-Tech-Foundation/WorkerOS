@@ -29,19 +29,30 @@ let lastPersistedGen = 0;
 let saving = false;
 const AUTOSAVE_MS = 2000;
 
-// Snapshot the durable tree to IndexedDB if it changed since the last save.
-// Coalesces concurrent calls; safe to call on a timer and on demand (tab hide).
+// Persist the durable tree to the content-addressed block store if it changed
+// since the last flush (ADR-022). Writes only *new* chunk hashes (delta), then
+// the manifest root. Coalesces concurrent calls; safe on a timer and on tab hide.
 async function persistNow() {
   if (!kernel || !persistence || !persistence.available || saving) return;
   const gen = kernel.fsGeneration();
   if (gen === lastPersistedGen) return;
   saving = true;
   try {
-    const bytes = kernel.snapshot(); // sync copy; no writes can interleave
-    await persistence.save(bytes);
+    // Read the kernel's durable projection synchronously — no writes can
+    // interleave between these calls in the single-threaded worker.
+    const manifest = kernel.manifest();
+    const refs = kernel.referencedChunks(); // hex hashes of durable chunks
+    const known = await persistence.knownChunks();
+    // Delta: store only chunks the block store doesn't already hold.
+    for (const hex of refs) {
+      if (known.has(hex)) continue;
+      const bytes = kernel.chunkBytes(hex);
+      if (bytes) await persistence.putChunk(hex, bytes);
+    }
+    await persistence.saveManifest(manifest);
     lastPersistedGen = gen;
   } catch (err) {
-    console.warn("[workeros] snapshot save failed:", err && err.message);
+    console.warn("[workeros] persist failed:", err && err.message);
   } finally {
     saving = false;
   }
@@ -686,14 +697,26 @@ self.onmessage = async (ev) => {
           kernel.fs_write(lib.path, enc.encode(await lib.source()));
         }
         // Restore the durable filesystem (ADR-022) on top of the freshly
-        // installed OS. The stored snapshot holds only persistent paths (the OS
-        // trees /bin,/sbin,/lib and /tmp are ephemeral, so they never conflict).
+        // installed OS, from the content-addressed block store. The manifest
+        // holds only persistent paths (the OS trees /bin,/sbin,/lib and /tmp are
+        // ephemeral, so they never conflict). Chunks are loaded (integrity-
+        // checked by hash) before the manifest references them.
         persistence = await openPersistence();
         try {
-          const snap = await persistence.load();
-          if (snap && snap.length) kernel.hydrate(snap);
+          const manifest = await persistence.loadManifest();
+          if (manifest && manifest.length) {
+            for (const hex of await persistence.allChunkKeys()) {
+              const bytes = await persistence.getChunk(hex);
+              if (!bytes) continue;
+              const got = kernel.loadChunk(bytes);
+              if (got !== hex) {
+                console.warn(`[workeros] chunk ${hex} failed integrity (got ${got}); skipping`);
+              }
+            }
+            kernel.hydrateManifest(manifest);
+          }
         } catch (err) {
-          console.warn("[workeros] snapshot hydrate failed:", err && err.message);
+          console.warn("[workeros] hydrate failed:", err && err.message);
         }
         // Baseline the mutation counter *after* all boot writes + hydration so we
         // don't immediately re-persist the just-restored state; only genuine user

@@ -271,6 +271,38 @@ impl WebKernel {
         self.inner.mount(&prefix, ephemeral);
     }
 
+    // --- Content-addressed persistence (ADR-022) ---------------------------
+
+    /// The durable tree + metadata + file chunk-hash lists, as a manifest blob.
+    #[wasm_bindgen]
+    pub fn manifest(&self) -> Vec<u8> {
+        self.inner.manifest()
+    }
+
+    /// Hex hashes of all chunks referenced by durable files.
+    #[wasm_bindgen(js_name = referencedChunks)]
+    pub fn referenced_chunks(&self) -> Vec<String> {
+        self.inner.referenced_chunks()
+    }
+
+    /// The bytes of a chunk by hex hash, or `undefined` if absent.
+    #[wasm_bindgen(js_name = chunkBytes)]
+    pub fn chunk_bytes(&self, hex: String) -> Option<Vec<u8>> {
+        self.inner.chunk_bytes(&hex)
+    }
+
+    /// Load a chunk's bytes into the store at boot; returns its verified hex hash.
+    #[wasm_bindgen(js_name = loadChunk)]
+    pub fn load_chunk(&mut self, bytes: Vec<u8>) -> String {
+        self.inner.load_chunk(bytes)
+    }
+
+    /// Rebuild the durable tree from a manifest at boot (chunks loaded first).
+    #[wasm_bindgen(js_name = hydrateManifest)]
+    pub fn hydrate_manifest(&mut self, bytes: &[u8]) -> Result<(), JsError> {
+        self.inner.hydrate_manifest(bytes).map_err(errno_to_js)
+    }
+
     /// `otf:spawn` — resolve `argv`'s invocation + import graph, register the
     /// process, wire its stdio per `plan`, and return `{ pid, interpreter, graph }`.
     /// `env` is an array of `[key, value]` pairs; `plan` is the stdio wiring (or

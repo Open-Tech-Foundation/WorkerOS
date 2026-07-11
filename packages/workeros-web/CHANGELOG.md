@@ -8,19 +8,26 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
-- **Durable filesystem: IndexedDB write-behind + boot rehydration (ADR-022,
-  PLAN Phase 7).** A new `src/persistence.js` opens an IndexedDB store and shuttles
-  the kernel's snapshot blob to/from it (degrading to a no-op store, OS still runs,
-  if IndexedDB is unavailable). At boot the kernel worker installs the OS then
-  **hydrates** the stored snapshot on top; a write-behind timer re-snapshots only
-  when the kernel's `fsGeneration()` advances (idle → no I/O), and a new
-  `MSG.FS_FLUSH` (triggered from the client on `visibilitychange:hidden`/`pagehide`)
-  forces a durable flush before the tab closes. The client API gains `os.flush()`.
-  New wasm bindings expose `snapshot()`/`hydrate()`/`fsGeneration()`/`mount()`.
-  Durability is path-based per ADR-022: files at `/` persist across reloads while
-  `/tmp` (scaffold-and-discard) is ephemeral. Proven end-to-end by a headless-browser
-  reload-survival test (`tools/persistence.test.js`). Honest limit (INV-5):
-  eventually-consistent (~2s window), whole-tree blob (per-file/delta writes deferred).
+- **Durable filesystem: content-addressed block store + delta flush (ADR-022,
+  PLAN Phase 7).** `src/persistence.js` is a content-addressed IndexedDB block
+  store: file data lives as SHA-256-keyed **chunks** (each compressed with
+  `deflate-raw` via Compression Streams, written once — identical chunks dedup)
+  and a **manifest** ties them into the durable tree. It degrades to a no-op store
+  (OS still runs, no durability) when IndexedDB or Compression Streams are absent.
+  At boot the kernel worker installs the OS, loads each stored chunk (verifying the
+  chunk's bytes hash back to its key before trusting it), then `hydrateManifest()`
+  rebuilds the tree. A write-behind timer flushes only when the kernel's
+  `fsGeneration()` advances, and each flush writes just the **new** chunk hashes
+  (delta) plus the manifest — not a whole-tree blob. `MSG.FS_FLUSH` (from the
+  client on `visibilitychange:hidden`/`pagehide`) forces a durable flush before
+  the tab closes; the client API gains `os.flush()`. New wasm bindings expose
+  `manifest()`/`referencedChunks()`/`chunkBytes()`/`loadChunk()`/`hydrateManifest()`
+  (plus `fsGeneration()`/`mount()`). Durability is path-based: files at `/` persist
+  across reloads while `/tmp` (scaffold-and-discard) is ephemeral. Proven end-to-end
+  by headless-browser reload-survival tests, including a 200 KiB multi-chunk binary
+  file that round-trips byte-exact through chunk/compress/reassemble
+  (`tools/persistence.test.js`). Honest limit (INV-5): eventually-consistent
+  (~2s window); snapshots + GC land in Stage 4.
 - **Color-capable default terminal env** (`kernel-worker.js`). The interactive
   shell session now seeds `TERM=xterm-256color` and `COLORTERM=truecolor`, so
   color-detecting guest tools (chalk's `supports-color`, etc.) light up 24-bit

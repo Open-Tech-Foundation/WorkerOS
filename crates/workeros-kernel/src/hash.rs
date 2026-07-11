@@ -120,6 +120,22 @@ pub fn to_hex(h: &Hash) -> String {
     s
 }
 
+/// Parse a 64-char lowercase/uppercase hex string back into a [`Hash`]. Returns
+/// `None` if the length is wrong or a non-hex digit is present.
+pub fn from_hex(s: &str) -> Option<Hash> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    let bytes = s.as_bytes();
+    for i in 0..32 {
+        let hi = (bytes[i * 2] as char).to_digit(16)?;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)?;
+        out[i] = (hi * 16 + lo) as u8;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +173,14 @@ mod tests {
     fn distinct_inputs_distinct_hashes() {
         assert_ne!(sha256(b"hello"), sha256(b"world"));
         assert_eq!(sha256(b"hello"), sha256(b"hello"));
+    }
+
+    #[test]
+    fn hex_round_trips() {
+        let h = sha256(b"round trip");
+        assert_eq!(from_hex(&to_hex(&h)), Some(h));
+        assert_eq!(from_hex("zz"), None);
+        assert_eq!(from_hex("abc"), None); // wrong length
+        assert_eq!(from_hex(&"g".repeat(64)), None); // non-hex
     }
 }

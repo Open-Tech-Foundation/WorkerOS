@@ -1,23 +1,25 @@
-// Durable filesystem storage (ADR-022).
+// Durable filesystem storage: a content-addressed block store (ADR-022).
 //
 // The kernel's in-memory tree is authoritative; persistence is a *projection* of
-// its durable subtrees. The kernel serializes that projection to an opaque byte
-// blob (`kernel.snapshot()`), and this module is the dumb store that shuttles
-// the blob to and from IndexedDB — it never inspects or decides anything (the
-// ADR-015/-020 "Rust decides, the host supplies the mechanism" discipline).
+// its durable subtrees in the ZFS/git shape. Two things get stored:
 //
-// Layout: one database, one object store, one row — the whole durable tree as a
-// single value keyed by SNAPSHOT_KEY. Snapshots are small (source files, not the
-// ephemeral `/tmp` + `node_modules` bulk, which the kernel prunes before we ever
-// see the bytes), so a single-blob store is simpler than per-file rows and keeps
-// writes atomic. Per-file keying is a future optimization if snapshots grow.
+//   - **chunks**: file data, split by the kernel into content-addressed pieces
+//     keyed by SHA-256 (hex). Each is compressed (deflate-raw) and written once —
+//     identical chunks dedup, and on each flush only *new* hashes are written
+//     (delta). The hash is also an integrity checksum (verified on load).
+//   - **meta/manifest**: the durable directory tree + inode metadata + each
+//     file's ordered chunk-hash list — the root that ties the chunks together.
+//
+// This module is the dumb block store: it compresses/decompresses and moves bytes
+// by key. All structure and content-addressing decisions are the kernel's (INV-2,
+// the ADR-015/-020 discipline). Snapshots + GC layer on top in Stage 4.
 
 const DB_NAME = "workeros";
-const DB_VERSION = 1;
-const STORE = "fs";
-const SNAPSHOT_KEY = "snapshot";
+const DB_VERSION = 2;
+const CHUNKS = "chunks";
+const META = "meta";
+const MANIFEST_KEY = "manifest";
 
-/** Open (creating/upgrading) the WorkerOS IndexedDB database. */
 function openDb() {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
@@ -27,56 +29,117 @@ function openDb() {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+      if (!db.objectStoreNames.contains(CHUNKS)) db.createObjectStore(CHUNKS);
+      if (!db.objectStoreNames.contains(META)) db.createObjectStore(META);
+      // A v1 store (single-blob snapshot) may exist from the pre-CAS format; it
+      // is simply ignored — the tree re-materializes from source on first run.
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
 
-function tx(db, mode, fn) {
+function txReq(db, store, mode, fn) {
   return new Promise((resolve, reject) => {
-    const t = db.transaction(STORE, mode);
-    const store = t.objectStore(STORE);
-    const req = fn(store);
+    const t = db.transaction(store, mode);
+    const req = fn(t.objectStore(store));
     t.oncomplete = () => resolve(req ? req.result : undefined);
     t.onerror = () => reject(t.error);
     t.onabort = () => reject(t.error);
   });
 }
 
+async function deflate(bytes) {
+  const cs = new CompressionStream("deflate-raw");
+  const w = cs.writable.getWriter();
+  w.write(bytes);
+  w.close();
+  return new Uint8Array(await new Response(cs.readable).arrayBuffer());
+}
+
+async function inflate(bytes) {
+  const ds = new DecompressionStream("deflate-raw");
+  const w = ds.writable.getWriter();
+  w.write(bytes);
+  w.close();
+  return new Uint8Array(await new Response(ds.readable).arrayBuffer());
+}
+
 /**
- * A persistence handle bound to an open database. `load()` returns the stored
- * snapshot bytes (or null on a first run); `save(bytes)` overwrites them.
- * Degrades gracefully: if IndexedDB can't be opened (private mode, disabled),
- * `open()` returns a no-op store so the OS still runs, just without durability.
+ * Open the content-addressed block store. Degrades to a no-op store (the OS
+ * still runs, without durability) if IndexedDB or Compression Streams are
+ * unavailable.
  */
 export async function openPersistence() {
   let db = null;
-  try {
-    db = await openDb();
-  } catch (err) {
-    console.warn("[workeros] persistence disabled:", err && err.message);
+  const usable =
+    typeof indexedDB !== "undefined" && typeof CompressionStream !== "undefined";
+  if (usable) {
+    try {
+      db = await openDb();
+    } catch (err) {
+      console.warn("[workeros] persistence disabled:", err && err.message);
+      db = null;
+    }
+  }
+  if (!db) {
     return {
       available: false,
-      async load() {
+      async loadManifest() {
         return null;
       },
-      async save() {},
+      async saveManifest() {},
+      async knownChunks() {
+        return new Set();
+      },
+      async putChunk() {},
+      async getChunk() {
+        return null;
+      },
+      async allChunkKeys() {
+        return [];
+      },
+      async deleteChunks() {},
     };
   }
   return {
     available: true,
-    async load() {
-      const v = await tx(db, "readonly", (s) => s.get(SNAPSHOT_KEY));
+
+    async loadManifest() {
+      const v = await txReq(db, META, "readonly", (s) => s.get(MANIFEST_KEY));
       if (v == null) return null;
       return v instanceof Uint8Array ? v : new Uint8Array(v);
     },
-    async save(bytes) {
-      await tx(db, "readwrite", (s) => s.put(bytes, SNAPSHOT_KEY));
+    async saveManifest(bytes) {
+      await txReq(db, META, "readwrite", (s) => s.put(bytes, MANIFEST_KEY));
     },
-    async clear() {
-      await tx(db, "readwrite", (s) => s.delete(SNAPSHOT_KEY));
+
+    /** The set of chunk hashes (hex) already stored — to skip re-writing them. */
+    async knownChunks() {
+      const keys = await txReq(db, CHUNKS, "readonly", (s) => s.getAllKeys());
+      return new Set(keys);
+    },
+    async allChunkKeys() {
+      return await txReq(db, CHUNKS, "readonly", (s) => s.getAllKeys());
+    },
+    /** Store one chunk (compressed) under its hex hash. */
+    async putChunk(hex, bytes) {
+      const packed = await deflate(bytes);
+      await txReq(db, CHUNKS, "readwrite", (s) => s.put(packed, hex));
+    },
+    /** Fetch + decompress one chunk by hex hash (null if absent). */
+    async getChunk(hex) {
+      const packed = await txReq(db, CHUNKS, "readonly", (s) => s.get(hex));
+      if (packed == null) return null;
+      return await inflate(packed instanceof Uint8Array ? packed : new Uint8Array(packed));
+    },
+    /** Delete chunks by hex hash (GC of unreferenced blocks). */
+    async deleteChunks(hexes) {
+      if (!hexes.length) return;
+      await txReq(db, CHUNKS, "readwrite", (s) => {
+        for (const hex of hexes) s.delete(hex);
+        return null;
+      });
     },
   };
 }

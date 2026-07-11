@@ -66,6 +66,22 @@ impl ChunkStore {
         self.chunks.get(h).map(|e| e.bytes.as_slice())
     }
 
+    /// Make a chunk's bytes available without adding a reference (refcount 0 if
+    /// new, unchanged if present) — used at rehydration, before the manifest's
+    /// file entries incref the chunks they reference. Returns the content hash.
+    fn insert_raw(&mut self, bytes: Vec<u8>) -> Hash {
+        let h = sha256(&bytes);
+        self.chunks.entry(h).or_insert(ChunkEntry { bytes, refs: 0 });
+        h
+    }
+
+    /// Add one reference to an already-present chunk (no-op if absent).
+    fn incref(&mut self, h: &Hash) {
+        if let Some(e) = self.chunks.get_mut(h) {
+            e.refs += 1;
+        }
+    }
+
     /// Drop one reference; free the chunk's bytes when the last one goes.
     fn decref(&mut self, h: &Hash) {
         if let Some(e) = self.chunks.get_mut(h) {
@@ -652,6 +668,283 @@ impl MemVfs {
         }
         Ok(())
     }
+}
+
+// --- Content-addressed persistence: manifest + chunk access (ADR-022) -------
+//
+// The durable filesystem persists as a *content-addressed store* (the ZFS/git
+// model): file data lives as compressed chunks keyed by SHA-256 in the host's
+// IndexedDB, and a `manifest` — the durable directory tree, inode metadata
+// (times), symlink targets, and each file's ordered chunk-hash list — is the
+// root that ties them together. Because chunks are addressed by content, the
+// host persists only *new* chunk hashes on each flush (delta writes), identical
+// chunks are stored once (dedup), and snapshots (Stage 4) are just retained
+// manifests sharing chunks by reference (copy-on-write). The kernel owns all of
+// this (INV-2); the host is a dumb block store that compresses and stores bytes
+// by key. See ADR-022.
+//
+// Manifest wire format: `b"WOM1"` + version, then a pre-order sequence of entry
+// records. Each: u8 type (0=dir,1=file,2=symlink), u32+path, u64 mtime/ctime/
+// btime, then per type — file: u64 size, u32 nchunks, nchunks×32-byte hash;
+// symlink: u32+target; dir: nothing.
+
+const MANIFEST_MAGIC: &[u8; 4] = b"WOM1";
+const MANIFEST_VERSION: u8 = 1;
+
+impl MemVfs {
+    /// Serialize the durable directory tree + metadata + file chunk-hash lists
+    /// to a manifest blob (ADR-022). Ephemeral subtrees (per `mounts`) are
+    /// excluded. Does **not** include chunk bytes — those persist separately in
+    /// the host block store, keyed by hash.
+    pub fn manifest(&self, mounts: &MountTable) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(MANIFEST_MAGIC);
+        out.push(MANIFEST_VERSION);
+        self.manifest_walk("/", ROOT_INO, mounts, &mut out);
+        out
+    }
+
+    fn manifest_walk(&self, dir_path: &str, dir_ino: Ino, mounts: &MountTable, out: &mut Vec<u8>) {
+        let entries = match self.slots.get(dir_ino).and_then(|s| s.as_ref()) {
+            Some(Inode { kind: Kind::Dir { entries }, .. }) => entries,
+            _ => return,
+        };
+        for (name, &child) in entries {
+            let child_path = join_path(dir_path, name);
+            let inode = match self.slots.get(child).and_then(|s| s.as_ref()) {
+                Some(i) => i,
+                None => continue,
+            };
+            let ephemeral = mounts.is_ephemeral(&child_path);
+            match &inode.kind {
+                Kind::File { chunks, size } => {
+                    if !ephemeral {
+                        out.push(1);
+                        put_bytes(out, child_path.as_bytes());
+                        put_times(out, inode);
+                        put_u64(out, *size);
+                        out.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+                        for h in chunks {
+                            out.extend_from_slice(h);
+                        }
+                    }
+                }
+                Kind::Symlink { target } => {
+                    if !ephemeral {
+                        out.push(2);
+                        put_bytes(out, child_path.as_bytes());
+                        put_times(out, inode);
+                        put_bytes(out, target.as_bytes());
+                    }
+                }
+                Kind::Dir { entries: sub } => {
+                    if !ephemeral && sub.is_empty() {
+                        out.push(0);
+                        put_bytes(out, child_path.as_bytes());
+                        put_times(out, inode);
+                    }
+                    if !ephemeral || mounts.has_persistent_under(&child_path) {
+                        self.manifest_walk(&child_path, child, mounts, out);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The set of chunk hashes referenced by durable files (ADR-022), as hex —
+    /// the host uses these to know which chunks to ensure-persisted and which
+    /// stored chunks are now garbage (Stage 4 GC).
+    pub fn referenced_chunks(&self, mounts: &MountTable) -> Vec<String> {
+        let mut set = std::collections::BTreeSet::new();
+        self.collect_chunks("/", ROOT_INO, mounts, &mut set);
+        set.iter().map(crate::hash::to_hex).collect()
+    }
+
+    fn collect_chunks(
+        &self,
+        dir_path: &str,
+        dir_ino: Ino,
+        mounts: &MountTable,
+        set: &mut std::collections::BTreeSet<Hash>,
+    ) {
+        let entries = match self.slots.get(dir_ino).and_then(|s| s.as_ref()) {
+            Some(Inode { kind: Kind::Dir { entries }, .. }) => entries,
+            _ => return,
+        };
+        for (name, &child) in entries {
+            let child_path = join_path(dir_path, name);
+            if mounts.is_ephemeral(&child_path) {
+                if let Some(Inode { kind: Kind::Dir { .. }, .. }) =
+                    self.slots.get(child).and_then(|s| s.as_ref())
+                {
+                    if mounts.has_persistent_under(&child_path) {
+                        self.collect_chunks(&child_path, child, mounts, set);
+                    }
+                }
+                continue;
+            }
+            match self.slots.get(child).and_then(|s| s.as_ref()).map(|i| &i.kind) {
+                Some(Kind::File { chunks, .. }) => {
+                    for h in chunks {
+                        set.insert(*h);
+                    }
+                }
+                Some(Kind::Dir { .. }) => self.collect_chunks(&child_path, child, mounts, set),
+                _ => {}
+            }
+        }
+    }
+
+    /// Fetch a chunk's bytes by hex hash — the host reads the ones it hasn't yet
+    /// persisted and stores them (compressed) by key.
+    pub fn chunk_bytes_hex(&self, hex: &str) -> Option<Vec<u8>> {
+        let h = crate::hash::from_hex(hex)?;
+        self.store.get(&h).map(|b| b.to_vec())
+    }
+
+    /// Load a chunk's bytes into the store at boot (refcount stays 0 until the
+    /// manifest's file entries reference it). Verifies + returns the content
+    /// hash (hex) so the host can detect a corrupt/misfiled block.
+    pub fn load_chunk(&mut self, bytes: Vec<u8>) -> String {
+        crate::hash::to_hex(&self.store.insert_raw(bytes))
+    }
+
+    /// Rebuild the durable tree from a [`manifest`](Self::manifest) blob at boot.
+    /// Chunks referenced by file entries must already be loaded via
+    /// [`load_chunk`](Self::load_chunk); each reference increfs its chunk.
+    /// Malformed input returns `EINVAL` (the blob comes from browser storage).
+    pub fn hydrate_manifest(&mut self, bytes: &[u8]) -> SysResult<()> {
+        if bytes.len() < 5 || &bytes[0..4] != MANIFEST_MAGIC || bytes[4] != MANIFEST_VERSION {
+            return Err(Errno::Inval);
+        }
+        let mut p = 5usize;
+        while p < bytes.len() {
+            let kind = take_byte(bytes, &mut p)?;
+            let path = std::str::from_utf8(take_bytes(bytes, &mut p)?)
+                .map_err(|_| Errno::Inval)?
+                .to_string();
+            let (mtime, ctime, btime) = take_times(bytes, &mut p)?;
+            match kind {
+                0 => {
+                    let ino = self.ensure_dir(&path)?;
+                    self.set_times(ino, mtime, ctime, btime);
+                }
+                1 => {
+                    let size = take_u64(bytes, &mut p)?;
+                    let nchunks = take_u32(bytes, &mut p)? as usize;
+                    let mut chunks = Vec::with_capacity(nchunks);
+                    for _ in 0..nchunks {
+                        let h = take_hash(bytes, &mut p)?;
+                        self.store.incref(&h);
+                        chunks.push(h);
+                    }
+                    if let Some((parent, _)) = path::split(&path) {
+                        self.ensure_dir(parent)?;
+                    }
+                    let (parent_ino, name) = self.resolve_parent(&path)?;
+                    let mut inode = Inode::new_file(mtime);
+                    inode.kind = Kind::File { chunks, size };
+                    inode.ctime = ctime;
+                    inode.btime = btime;
+                    let ino = self.alloc(inode)?;
+                    if let Kind::Dir { entries } = &mut self.get_mut(parent_ino)?.kind {
+                        entries.insert(name.to_string(), ino);
+                    }
+                    self.used_bytes += size;
+                }
+                2 => {
+                    let target = std::str::from_utf8(take_bytes(bytes, &mut p)?)
+                        .map_err(|_| Errno::Inval)?
+                        .to_string();
+                    if let Some((parent, _)) = path::split(&path) {
+                        self.ensure_dir(parent)?;
+                    }
+                    let ino = self.symlink(&target, &path)?;
+                    self.set_times(ino, mtime, ctime, btime);
+                }
+                _ => return Err(Errno::Inval),
+            }
+        }
+        Ok(())
+    }
+
+    /// `mkdir -p` returning the final directory's inode (existing or created).
+    fn ensure_dir(&mut self, path: &str) -> SysResult<Ino> {
+        let mut cur = String::new();
+        let mut ino = ROOT_INO;
+        for comp in path::components(path) {
+            cur.push('/');
+            cur.push_str(comp);
+            ino = match self.mkdir(&cur) {
+                Ok(ino) => ino,
+                Err(Errno::Exist) => self.resolve_ino(&cur)?,
+                Err(e) => return Err(e),
+            };
+        }
+        Ok(ino)
+    }
+
+    fn set_times(&mut self, ino: Ino, mtime: u64, ctime: u64, btime: u64) {
+        if let Ok(inode) = self.get_mut(ino) {
+            inode.mtime = mtime;
+            inode.ctime = ctime;
+            inode.btime = btime;
+        }
+    }
+}
+
+/// Append a `u64` (little-endian).
+fn put_u64(out: &mut Vec<u8>, v: u64) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Append an inode's mtime/ctime/btime.
+fn put_times(out: &mut Vec<u8>, inode: &Inode) {
+    put_u64(out, inode.mtime);
+    put_u64(out, inode.ctime);
+    put_u64(out, inode.btime);
+}
+
+fn take_byte(bytes: &[u8], p: &mut usize) -> SysResult<u8> {
+    let b = *bytes.get(*p).ok_or(Errno::Inval)?;
+    *p += 1;
+    Ok(b)
+}
+
+fn take_u32(bytes: &[u8], p: &mut usize) -> SysResult<u32> {
+    if *p + 4 > bytes.len() {
+        return Err(Errno::Inval);
+    }
+    let v = u32::from_le_bytes(bytes[*p..*p + 4].try_into().unwrap());
+    *p += 4;
+    Ok(v)
+}
+
+fn take_u64(bytes: &[u8], p: &mut usize) -> SysResult<u64> {
+    if *p + 8 > bytes.len() {
+        return Err(Errno::Inval);
+    }
+    let v = u64::from_le_bytes(bytes[*p..*p + 8].try_into().unwrap());
+    *p += 8;
+    Ok(v)
+}
+
+fn take_times(bytes: &[u8], p: &mut usize) -> SysResult<(u64, u64, u64)> {
+    Ok((
+        take_u64(bytes, p)?,
+        take_u64(bytes, p)?,
+        take_u64(bytes, p)?,
+    ))
+}
+
+fn take_hash(bytes: &[u8], p: &mut usize) -> SysResult<Hash> {
+    if *p + 32 > bytes.len() {
+        return Err(Errno::Inval);
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&bytes[*p..*p + 32]);
+    *p += 32;
+    Ok(h)
 }
 
 /// Join a directory path and a single component (the parent is normalized).
@@ -1246,6 +1539,84 @@ mod tests {
     }
 
     // --- Content-addressed storage (dedup / delta / COW, ADR-022) -----------
+
+    // --- Content-addressed persistence: manifest round-trip (ADR-022) -------
+
+    /// Round-trip a VFS through the content-addressed persistence path, the way
+    /// the host does: serialize the manifest, copy the referenced chunks into a
+    /// simulated block store, then rebuild a fresh VFS from them.
+    fn persist_and_restore(src: &MemVfs, mounts: &mount::MountTable) -> MemVfs {
+        let manifest = src.manifest(mounts);
+        // Host block store: hex hash -> chunk bytes (only the referenced ones).
+        let block_store: Vec<(String, Vec<u8>)> = src
+            .referenced_chunks(mounts)
+            .into_iter()
+            .map(|hex| {
+                let bytes = src.chunk_bytes_hex(&hex).expect("referenced chunk present");
+                (hex, bytes)
+            })
+            .collect();
+        let mut dst = fs();
+        for (hex, bytes) in &block_store {
+            let got = dst.load_chunk(bytes.clone());
+            assert_eq!(&got, hex, "chunk hash must match its key (integrity)");
+        }
+        dst.hydrate_manifest(&manifest).unwrap();
+        dst
+    }
+
+    #[test]
+    fn manifest_round_trip_preserves_files_dedup_and_metadata() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        vfs.set_time(1234);
+        write_file(&mut vfs, "/proj/a.js", b"shared body");
+        write_file(&mut vfs, "/proj/b.js", b"shared body"); // dedup with a.js
+        write_file(&mut vfs, "/proj/src/big.bin", &(0..100_000u32).map(|i| i as u8).collect::<Vec<_>>());
+        vfs.symlink("/proj/a.js", "/proj/link").unwrap();
+        vfs.mkdir("/proj/emptydir").unwrap();
+        write_file(&mut vfs, "/tmp/scratch", b"ephemeral"); // excluded
+
+        let restored = persist_and_restore(&vfs, &mounts);
+
+        // File contents survive.
+        assert_eq!(read_file(&restored, "/proj/a.js"), b"shared body");
+        assert_eq!(read_file(&restored, "/proj/b.js"), b"shared body");
+        assert_eq!(read_file(&restored, "/proj/src/big.bin").len(), 100_000);
+        // Dedup is preserved across persistence: the restored store holds exactly
+        // the durable unique chunks (a.js/b.js share one; big.bin is two), and no
+        // ephemeral /tmp chunk came along.
+        assert_eq!(restored.chunk_count(), vfs.referenced_chunks(&mounts).len());
+        assert_eq!(restored.chunk_count(), 3);
+        // Symlink + empty dir survive; /tmp is gone.
+        assert_eq!(restored.readlink("/proj/link").unwrap(), "/proj/a.js");
+        assert_eq!(restored.stat("/proj/emptydir").unwrap().file_type, FileType::Dir);
+        assert_eq!(restored.resolve("/tmp/scratch").unwrap_err(), Errno::Noent);
+        // Timestamps survive.
+        assert_eq!(restored.lstat("/proj/a.js").unwrap().mtime, 1234);
+    }
+
+    #[test]
+    fn manifest_refcounts_survive_so_unlink_frees_correctly() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        write_file(&mut vfs, "/a", b"dup");
+        write_file(&mut vfs, "/b", b"dup");
+        let mut restored = persist_and_restore(&vfs, &mounts);
+        assert_eq!(restored.chunk_count(), 1);
+        // Refcount must be 2 after hydrate: unlinking one keeps the chunk.
+        restored.unlink("/a").unwrap();
+        assert_eq!(restored.chunk_count(), 1, "still referenced by /b");
+        restored.unlink("/b").unwrap();
+        assert_eq!(restored.chunk_count(), 0, "last reference gone");
+    }
+
+    #[test]
+    fn hydrate_manifest_rejects_corrupt_blob() {
+        let mut vfs = fs();
+        assert_eq!(vfs.hydrate_manifest(b"XX").unwrap_err(), Errno::Inval);
+        assert_eq!(vfs.hydrate_manifest(b"WOM1\x01\x09").unwrap_err(), Errno::Inval);
+    }
 
     #[test]
     fn identical_files_share_one_chunk() {
