@@ -59,7 +59,10 @@ pub fn transform(src: &str) -> String {
     let mut program = ret.program;
     let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
     ModuleRunnerTransform::new().transform(&allocator, &mut program, scoping);
-    Codegen::new().build(&program).code
+    // oxc emits Vite's runner hook names (`__vite_ssr_import__`, …); rename them to
+    // WorkerOS's own — these are internal identifiers the guest runtime binds, no
+    // Vite involved.
+    Codegen::new().build(&program).code.replace("__vite_ssr_", "__workeros_")
 }
 
 /// Transform the UTF-8 source at `ptr`/`len`; returns packed pointer/length of the
@@ -82,8 +85,9 @@ mod tests {
         let a = "import { b } from './b.js';\nexport function a() { return b(); }";
         let out = transform(a);
         // import use rewritten to a live property read; export is a getter.
-        assert!(out.contains("__vite_ssr_import__(\"./b.js\""), "import: {out}");
-        assert!(out.contains("__vite_ssr_import_0__.b"), "live import use: {out}");
-        assert!(out.contains("__vite_ssr_exports__"), "export getter: {out}");
+        assert!(out.contains("__workeros_import__(\"./b.js\""), "import: {out}");
+        assert!(out.contains("__workeros_import_0__.b"), "live import use: {out}");
+        assert!(out.contains("__workeros_exports__"), "export getter: {out}");
+        assert!(!out.contains("vite"), "no vite branding: {out}");
     }
 }
