@@ -131,6 +131,12 @@ guest runtime. Format:
   aliases), and `concat`/`compare`/`equals`/`copy`/`fill`/`indexOf`. Registered in
   `makeBuiltins`, so `require('buffer')` and `import { Buffer } from 'node:buffer'`
   resolve too. Unit-tested against Node's own Buffer as the oracle.
+- **`node:assert` + `node:assert/strict`** (`src/node/assert.js`). A pragmatic
+  assertion builtin over the guest `util.isDeepStrictEqual` helper: `ok`, the
+  equality/deep-equality variants, `match`/`doesNotMatch`, `throws`/
+  `doesNotThrow`, `rejects`/`doesNotReject`, `ifError`, `AssertionError`, and the
+  `strict` variant exposed both as `assert.strict` and the `assert/strict`
+  entrypoint. Covered directly and through guest `require()` in `tools/assert.test.js`.
 - **`node:string_decoder`** (`src/node/string_decoder.js`). The incremental
   `StringDecoder` utility packages use when multibyte characters may be split
   across chunk boundaries. Covers the practical encodings npm-style stream code

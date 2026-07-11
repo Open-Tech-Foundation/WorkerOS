@@ -19,6 +19,8 @@ export const NODE_BUILTINS = new Set([
   "process",
   "tty",
   "buffer",
+  "assert",
+  "assert/strict",
   "string_decoder",
   "events",
   "util",

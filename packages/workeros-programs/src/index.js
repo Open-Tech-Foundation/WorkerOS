@@ -108,6 +108,7 @@ export const libraries = [
   { path: "/lib/workeros-node/path.js", source: () => fetchText("./node/path.js") },
   { path: "/lib/workeros-node/os.js", source: () => fetchText("./node/os.js") },
   { path: "/lib/workeros-node/buffer.js", source: () => fetchText("./node/buffer.js") },
+  { path: "/lib/workeros-node/assert.js", source: () => fetchText("./node/assert.js") },
   { path: "/lib/workeros-node/string_decoder.js", source: () => fetchText("./node/string_decoder.js") },
   { path: "/lib/workeros-node/events.js", source: () => fetchText("./node/events.js") },
   { path: "/lib/workeros-node/util.js", source: () => fetchText("./node/util.js") },
