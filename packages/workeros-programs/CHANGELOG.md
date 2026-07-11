@@ -8,6 +8,21 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **WASM codec behind `node:zlib` + `node:crypto`** (`crates/workeros-codec`,
+  `src/node/wasm-codec.js`). A freestanding Rust→wasm module (miniz_oxide DEFLATE +
+  RustCrypto hashes) accelerates the CPU-bound hot paths behind the *same* APIs.
+  It carries a manual pointer/length ABI (no wasm-bindgen) so the guest can
+  instantiate it **synchronously** — `new WebAssembly.Instance` off the main
+  thread — and call it from inside Node's sync `gzipSync`/`createHash`. Loaded
+  lazily per process from `/lib/workeros-codec/codec.wasm` via the sync-fs channel;
+  `zlib`/`crypto` prefer it when present and fall back to the pure-JS impls
+  otherwise (plain-Node unit tests, or an env that didn't run `npm run
+  build:codec` — the binary is gitignored like `grep.wasm`). Measured: raw DEFLATE
+  ~5× faster **and 2.8× smaller** (miniz's dynamic Huffman vs the JS fixed-Huffman
+  encoder); SHA-256 ~1.2× (1 MB) to ~5× (small inputs) faster. The wasm is
+  cross-validated against real Node zlib/crypto (`tools/codec.test.js`), and an
+  end-to-end test proves it's actually active in a booted kernel by asserting gzip
+  emits dynamic-Huffman blocks (`@opentf/workeros-web` `tools/archive-tools.test.js`).
 - **`node:fs` file watching: `fs.watch` + `watchFile`** (`src/node/fs.js`). A real
   `FSWatcher` (an event emitter with `on`/`once`/`off`/`close`) that emits
   `change` `(eventType, filename)` — the kernel pushes change events to the

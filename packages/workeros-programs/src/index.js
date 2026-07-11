@@ -119,6 +119,10 @@ export const libraries = [
   { path: "/lib/workeros-node/http.js", source: () => fetchText("./node/http.js") },
   { path: "/lib/workeros-node/crypto.js", source: () => fetchText("./node/crypto.js") },
   { path: "/lib/workeros-node/zlib.js", source: () => fetchText("./node/zlib.js") },
+  { path: "/lib/workeros-node/wasm-codec.js", source: () => fetchText("./node/wasm-codec.js") },
+  // The codec wasm (crates/workeros-codec) — a binary library. `fetchBytes` returns
+  // null when it isn't built, so zlib/crypto transparently use their JS fallback.
+  { path: "/lib/workeros-codec/codec.wasm", source: () => fetchBytes("./codec/codec.wasm") },
   // Archive framing shared by /bin/tar, /bin/zip, /bin/unzip. Pure bytes-in/out;
   // zip takes the node:zlib codec by injection (no cross-tree import).
   { path: "/lib/workeros-archive/tar.js", source: () => fetchText("./archive/tar.js") },

@@ -1,0 +1,20 @@
+[package]
+name = "workeros-codec"
+description = "Raw-wasm DEFLATE + hashing codec for the WorkerOS guest — a synchronous, dependency-light acceleration of node:zlib/node:crypto's hot paths."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+# cdylib → a freestanding .wasm with a manual pointer/length ABI (no wasm-bindgen),
+# so the guest can instantiate it *synchronously* (`new WebAssembly.Instance`) and
+# call it inside Node's sync APIs (gzipSync/createHash).
+crate-type = ["cdylib"]
+
+[dependencies]
+miniz_oxide = "0.8"
+sha2 = { version = "0.10", default-features = false }
+sha1 = { version = "0.10", default-features = false }
+md-5 = { version = "0.10", default-features = false }

@@ -126,6 +126,28 @@ test("zip -r then unzip round-trips a directory tree", opts, async () => {
   assert.equal(result.css, "body{color:red}\n".repeat(40));
 });
 
+test("the wasm codec is actually active (gzip emits dynamic-Huffman blocks)", opts, async () => {
+  // Proof the codec wasm is wired, not silently falling back to JS: miniz (the
+  // codec) picks *dynamic* Huffman for varied input — the first DEFLATE byte's low
+  // 3 bits are 0b101 (BFINAL=1, BTYPE=10). The pure-JS encoder always emits *fixed*
+  // Huffman (0b011). We assert dynamic, which only the wasm path produces.
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const text = "the quick brown fox jumps over the lazy dog. ".repeat(200);
+      await os.fs.write("/c/data.txt", text);
+      const r = await window.run(os, ["gzip", "-kf", "data.txt"], { cwd: "/c" }); // -k keep, -f force
+      const gz = await os.fs.read("/c/data.txt.gz"); // 10-byte gzip header, then DEFLATE
+      return { r, firstDeflate: gz[10] & 7, len: gz.length, orig: text.length };
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.r.code, 0, result.r.err);
+  assert.equal(result.firstDeflate, 5, "gzip must emit dynamic-Huffman → the wasm codec is active (JS fallback would be 3)");
+  assert.ok(result.len < result.orig, "compressed");
+});
+
 test("a tar archive made in the shell is readable by real GNU tar (byte-level interop)", opts, async () => {
   // Pull the produced archive bytes out of the VFS and assert the format is sound
   // by checking the ustar magic — the pure-lib suite already proves full GNU-tar

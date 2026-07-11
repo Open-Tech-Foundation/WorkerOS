@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/workeros-kernel",
+    "crates/workeros-codec",
     "packages/workeros-web/wasm",
 ]
 

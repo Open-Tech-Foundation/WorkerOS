@@ -15,6 +15,7 @@
 // (`createGzip`, …) are a follow-up; the one-shot sync + async API lands here.
 
 import { Buffer } from "./buffer.js";
+import { getCodec } from "./wasm-codec.js";
 
 // ---- input coercion -------------------------------------------------------
 function toBytes(data) {
@@ -35,12 +36,12 @@ const CRC_TABLE = (() => {
   }
   return t;
 })();
-function crc32(data) {
+function crc32Js(data) {
   let c = 0xffffffff;
   for (let i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
-function adler32(data) {
+function adler32Js(data) {
   let a = 1, b = 0;
   const MOD = 65521;
   // Process in blocks to defer the modulo (a/b can't overflow a double here).
@@ -85,7 +86,7 @@ const FIXED_LITLEN_CODE = canonicalCodes(FIXED_LITLEN_LEN);
 const FIXED_DIST_CODE = canonicalCodes(FIXED_DIST_LEN);
 
 // ---- INFLATE (RFC 1951) ---------------------------------------------------
-function inflateRaw(input) {
+function inflateRawJs(input) {
   let bitPos = 0;
   const getBit = () => { const b = (input[bitPos >> 3] >> (bitPos & 7)) & 1; bitPos++; return b; };
   const getBits = (n) => { let v = 0; for (let i = 0; i < n; i++) v |= getBit() << i; return v; };
@@ -194,7 +195,7 @@ function distCodeOf(dist) {
   return [0, 0, 0];
 }
 
-function deflateRaw(input) {
+function deflateRawJs(input) {
   const data = input;
   const n = data.length;
   const bytes = [];
@@ -254,6 +255,16 @@ function deflateRaw(input) {
   if (bitCnt > 0) bytes.push(bitBuf);
   return Uint8Array.from(bytes);
 }
+
+// ---- codec dispatch -------------------------------------------------------
+// Prefer the wasm codec (crates/workeros-codec) for the CPU-bound raw DEFLATE +
+// checksums when it's installed and instantiable; fall back to the pure-JS impls
+// above (plain Node unit tests, or an environment that didn't build the wasm). The
+// framing below (gzip/zlib headers) stays in JS either way — it's negligible.
+const deflateRaw = (data) => { const c = getCodec(); return c ? c.deflateRaw(data) : deflateRawJs(data); };
+const inflateRaw = (data) => { const c = getCodec(); return c ? c.inflateRaw(data) : inflateRawJs(data); };
+const crc32 = (data) => { const c = getCodec(); return c ? c.crc32(data) : crc32Js(data); };
+const adler32 = (data) => { const c = getCodec(); return c ? c.adler32(data) : adler32Js(data); };
 
 // ---- format wrappers ------------------------------------------------------
 function u32le(v) { return [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]; }

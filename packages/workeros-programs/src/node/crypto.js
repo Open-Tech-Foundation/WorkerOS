@@ -18,6 +18,7 @@
 // so it is fully unit-testable on its own.
 
 import { Buffer } from "./buffer.js";
+import { getCodec } from "./wasm-codec.js";
 
 // ---- byte helpers ---------------------------------------------------------
 function toBytes(data, enc) {
@@ -253,6 +254,12 @@ const sha384 = (input) => sha512core(input, SHA384_H, 48);
 // ---- algorithm registry ---------------------------------------------------
 const HASHERS = { md5, sha1, sha224, sha256, sha384, sha512 };
 const BLOCK = { md5: 64, sha1: 64, sha224: 64, sha256: 64, sha384: 128, sha512: 128 };
+// Prefer the wasm codec's hash for the CPU-bound digest when it's installed;
+// fall back to the pure-JS implementation above (unit tests, or no built wasm).
+function digestWith(algo, data) {
+  const c = getCodec();
+  return c && c[algo] ? c[algo](data) : HASHERS[algo](data);
+}
 // Node/OpenSSL accept case- and separator-insensitive names ("SHA-256", "sha256").
 const normAlgo = (algo) => String(algo).toLowerCase().replace(/[-_]/g, "");
 function lookup(algo) {
@@ -277,7 +284,7 @@ class Hash {
   digest(encoding) {
     if (this._done) throw new Error("Digest already called");
     this._done = true;
-    return encodeOut(HASHERS[this._algo](concat(this._chunks)), encoding);
+    return encodeOut(digestWith(this._algo, concat(this._chunks)), encoding);
   }
 }
 
@@ -285,10 +292,9 @@ class Hash {
 class Hmac {
   constructor(algo, key) {
     this._algo = lookup(algo);
-    const fn = HASHERS[this._algo];
     const block = BLOCK[this._algo];
     let k = toBytes(key);
-    if (k.length > block) k = fn(k);
+    if (k.length > block) k = digestWith(this._algo, k);
     const ipad = new Uint8Array(block);
     this._opad = new Uint8Array(block);
     for (let i = 0; i < block; i++) {
@@ -307,9 +313,8 @@ class Hmac {
   digest(encoding) {
     if (this._done) throw new Error("Digest already called");
     this._done = true;
-    const fn = HASHERS[this._algo];
-    const inner = fn(concat(this._chunks));
-    return encodeOut(fn(concat([this._opad, inner])), encoding);
+    const inner = digestWith(this._algo, concat(this._chunks));
+    return encodeOut(digestWith(this._algo, concat([this._opad, inner])), encoding);
   }
 }
 

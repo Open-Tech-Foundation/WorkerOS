@@ -773,7 +773,9 @@ self.onmessage = async (ev) => {
         // Install the guest runtime library (/lib/workeros-node): the CommonJS
         // runtime + node: builtins that /bin/node imports at load time (INV-2).
         for (const lib of osLibraries) {
-          kernel.fs_write(lib.path, enc.encode(await lib.source()));
+          const data = await lib.source();
+          if (data == null) continue; // an optional binary lib (codec.wasm) not built here
+          kernel.fs_write(lib.path, typeof data === "string" ? enc.encode(data) : new Uint8Array(data));
         }
         // Restore the durable filesystem (ADR-022) on top of the freshly
         // installed OS, from the content-addressed block store. The manifest
