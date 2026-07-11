@@ -7,6 +7,7 @@ import assert from "node:assert";
 import realZlib from "node:zlib";
 import { Buffer } from "../src/node/buffer.js";
 import { zlib } from "../src/node/zlib.js";
+import { stream as streamModule } from "../src/node/stream.js";
 
 globalThis.Buffer = Buffer;
 
@@ -89,4 +90,66 @@ test("crc32 matches Node and constants are present", () => {
   assert.equal(zlib.crc32(Buffer.from("The quick brown fox jumps over the lazy dog")), 0x414fa339);
   assert.equal(zlib.constants.Z_DEFLATED, 8);
   assert.equal(zlib.constants.Z_FINISH, 4);
+});
+
+test("stream constructors are exposed and are Transform streams", () => {
+  const gz = zlib.createGzip();
+  assert.ok(gz instanceof zlib.Gzip);
+  assert.ok(gz instanceof streamModule.Transform);
+  assert.equal(typeof zlib.createGunzip, "function");
+  assert.equal(typeof zlib.createDeflate, "function");
+  assert.equal(typeof zlib.createInflate, "function");
+  assert.equal(typeof zlib.createDeflateRaw, "function");
+  assert.equal(typeof zlib.createInflateRaw, "function");
+  assert.equal(typeof zlib.createUnzip, "function");
+});
+
+async function collect(stream, writeChunks) {
+  const out = [];
+  stream.on("data", (chunk) => out.push(Buffer.from(chunk)));
+  if (writeChunks) for (const chunk of writeChunks) stream.write(chunk);
+  stream.end();
+  await streamModule.promises.finished(stream);
+  return Buffer.concat(out);
+}
+
+test("createGzip buffers chunked writes and emits gzip output on end", async () => {
+  const input = Buffer.from("stream gzip ".repeat(200));
+  const out = await collect(zlib.createGzip(), [
+    input.subarray(0, 50),
+    input.subarray(50, 175),
+    input.subarray(175),
+  ]);
+  assert.ok(eq(realZlib.gunzipSync(out), input));
+});
+
+test("createGunzip decodes chunked gzip input", async () => {
+  const input = Buffer.from("stream gunzip ".repeat(200));
+  const gz = realZlib.gzipSync(input);
+  const out = await collect(zlib.createGunzip(), [
+    gz.subarray(0, 10),
+    gz.subarray(10, 80),
+    gz.subarray(80),
+  ]);
+  assert.ok(eq(out, input));
+});
+
+test("deflate/inflate stream pairs round-trip", async () => {
+  const input = Buffer.from("stream deflate ".repeat(180));
+  const deflated = await collect(zlib.createDeflate(), [input.subarray(0, 90), input.subarray(90)]);
+  assert.ok(eq(realZlib.inflateSync(deflated), input));
+  const inflated = await collect(zlib.createInflate(), [deflated.subarray(0, 20), deflated.subarray(20)]);
+  assert.ok(eq(inflated, input));
+});
+
+test("raw and unzip stream variants interoperate with real Node", async () => {
+  const input = Buffer.from("stream raw ".repeat(220));
+  const raw = await collect(zlib.createDeflateRaw(), [input]);
+  assert.ok(eq(realZlib.inflateRawSync(raw), input));
+  const rawBack = await collect(zlib.createInflateRaw(), [raw.subarray(0, 13), raw.subarray(13)]);
+  assert.ok(eq(rawBack, input));
+
+  const gz = realZlib.gzipSync(input);
+  const unzipped = await collect(zlib.createUnzip(), [gz.subarray(0, 25), gz.subarray(25)]);
+  assert.ok(eq(unzipped, input));
 });

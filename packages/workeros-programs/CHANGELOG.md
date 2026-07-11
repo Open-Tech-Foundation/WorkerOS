@@ -83,8 +83,12 @@ guest runtime. Format:
   both directions in `tools/zlib.test.js` (Node's inflate decodes ours; our
   inflate decodes Node's dynamic-Huffman output). Honest surface (INV-5): the
   encoder emits valid fixed-Huffman blocks (a little ratio for a small verifiable
-  codec); Brotli has no host/JS backing and is *absent*, and streaming classes
-  (`createGzip`, …) are a follow-up.
+  codec); Brotli has no host/JS backing and is *absent*. The stream surface now
+  includes `createGzip`/`createGunzip`/`createDeflate`/`createInflate`/
+  `createDeflateRaw`/`createInflateRaw`/`createUnzip` and their classes, exposed
+  as buffered `Transform`s over the same codecs (chunked writes, payload emitted
+  on flush/end) rather than byte-perfect incremental flush semantics. Covered by
+  `tools/zlib.test.js`.
 - **`node:crypto`** (`src/node/crypto.js`). A guest builtin covering the sync
   surface build tooling (Vite) and most of npm reach for. Two honest sources,
   split by what the browser does *synchronously* (Node's crypto API is sync):

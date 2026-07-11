@@ -11,11 +11,14 @@
 // Honest surface (INV-5): the DEFLATE encoder emits valid fixed-Huffman blocks
 // (decodable by real zlib/Node), trading a little ratio for a small, verifiable
 // codec — good enough for size reporting and interop. Brotli has no host backing
-// and no small JS codec, so it is *absent* (not faked). Streaming classes
-// (`createGzip`, …) are a follow-up; the one-shot sync + async API lands here.
+// and no small JS codec, so it is *absent* (not faked). The stream classes below
+// are buffered transforms: they accept chunked writes and expose the standard
+// constructors, but emit their payload on flush/end rather than implementing
+// byte-perfect incremental zlib flush semantics.
 
 import { Buffer } from "./buffer.js";
 import { getCodec } from "./wasm-codec.js";
+import { stream as streamModule } from "./stream.js";
 
 // ---- input coercion -------------------------------------------------------
 function toBytes(data) {
@@ -330,6 +333,83 @@ const asyncify = (syncFn) => (data, opts, cb) => {
   });
 };
 
+class ZlibBase extends streamModule.Transform {
+  constructor(syncFn, options = {}) {
+    super(options);
+    this._syncFn = syncFn;
+    this._chunks = [];
+    this.bytesWritten = 0;
+  }
+
+  _transform(chunk, _encoding, cb) {
+    const buf = toBytes(chunk);
+    this._chunks.push(buf);
+    this.bytesWritten += buf.length;
+    cb();
+  }
+
+  _flush(cb) {
+    try {
+      const total = this._chunks.length === 1 ? this._chunks[0] : Buffer.concat(this._chunks.map((c) => Buffer.from(c)));
+      this._chunks = [];
+      cb(null, this._syncFn(total));
+    } catch (e) {
+      cb(e);
+    }
+  }
+
+  flush(kind, cb) {
+    if (typeof kind === "function") {
+      cb = kind;
+      kind = constants.Z_FULL_FLUSH;
+    }
+    queueMicrotask(() => {
+      if (cb) cb();
+    });
+    return this;
+  }
+
+  params(level, strategy, cb) {
+    if (typeof cb === "function") queueMicrotask(cb);
+    return this;
+  }
+
+  reset() {
+    this._chunks = [];
+    this.bytesWritten = 0;
+  }
+}
+
+class Gzip extends ZlibBase {
+  constructor(options = {}) { super(gzipSync, options); }
+}
+class Gunzip extends ZlibBase {
+  constructor(options = {}) { super(gunzipSync, options); }
+}
+class Deflate extends ZlibBase {
+  constructor(options = {}) { super(deflateSync, options); }
+}
+class Inflate extends ZlibBase {
+  constructor(options = {}) { super(inflateSync, options); }
+}
+class DeflateRaw extends ZlibBase {
+  constructor(options = {}) { super(deflateRawSync, options); }
+}
+class InflateRaw extends ZlibBase {
+  constructor(options = {}) { super(inflateRawSync, options); }
+}
+class Unzip extends ZlibBase {
+  constructor(options = {}) { super(unzipSync, options); }
+}
+
+const createGzip = (options) => new Gzip(options);
+const createGunzip = (options) => new Gunzip(options);
+const createDeflate = (options) => new Deflate(options);
+const createInflate = (options) => new Inflate(options);
+const createDeflateRaw = (options) => new DeflateRaw(options);
+const createInflateRaw = (options) => new InflateRaw(options);
+const createUnzip = (options) => new Unzip(options);
+
 // ---- constants (a pragmatic subset of Node's zlib.constants) --------------
 const constants = {
   Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4, Z_BLOCK: 5, Z_TREES: 6,
@@ -341,6 +421,20 @@ const constants = {
 
 // The `node:zlib` module object registered as a builtin (import + require).
 export const zlib = {
+  createGzip,
+  createGunzip,
+  createDeflate,
+  createInflate,
+  createDeflateRaw,
+  createInflateRaw,
+  createUnzip,
+  Gzip,
+  Gunzip,
+  Deflate,
+  Inflate,
+  DeflateRaw,
+  InflateRaw,
+  Unzip,
   gzipSync, gunzipSync, deflateSync, inflateSync, deflateRawSync, inflateRawSync, unzipSync,
   gzip: asyncify(gzipSync),
   gunzip: asyncify(gunzipSync),
