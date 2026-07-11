@@ -387,7 +387,15 @@ guest runtime. Format:
     and they were pulled into the static graph. A missing target **rejects the
     promise** (as in Node) instead of aborting the process at graph-build time, so
     `import('optional').catch(…)` degrades gracefully. Modules keep singleton
-    identity across dynamic imports via the shared blob cache.
+    identity across dynamic imports via the shared blob cache. A pending dynamic
+    import holds the event loop open (Node keeps the process alive while a module
+    loads), so a program whose only remaining work is `import(…).then(…)` runs to
+    completion instead of exiting early.
+  - **CJS ⇄ ESM dynamic interop.** The loader is now installed unconditionally
+    (before either entry path), so a **CommonJS** program can `import()` an ESM
+    module too — the `node:module` CJS loader routes `import()` through the same
+    fs-backed hook (`src/node/module.js`). Both directions are covered end-to-end
+    (`workeros-web`'s `tools/cjs-in-esm.test.js`).
   - **CJS-vs-ESM format decided Node's way** (`detectFormat`). Extension is
     authoritative (`.mjs` → ESM, `.cjs`/`.json` → CJS) and, for `.js`, the nearest
     `package.json` `"type"` decides — `"module"` → ESM, otherwise CommonJS —

@@ -76,3 +76,31 @@ test("ESM entry imports a CJS package (default + named interop, nested require)"
   assert.equal(result.code, 0, result.err);
   assert.deepEqual(result.out.trim().split("\n"), ["default: hi cjs", "named: 42"]);
 });
+
+test("CJS entry dynamically import()s an ESM module (reverse interop)", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const files = {
+        // A CommonJS entry (require + module-scope) that pulls in an ESM module via
+        // dynamic import() — the specifier resolves + loads lazily out of the VFS.
+        "/proj/app.js": [
+          "const dep = require('./cjsdep');",
+          "console.log('req:', dep.tag);",
+          "import('./esmdep.js').then((m) => {",
+          "  console.log('imp-default:', m.default(3));",
+          "  console.log('imp-named:', m.tri(3));",
+          "});",
+        ].join("\n"),
+        "/proj/cjsdep.js": "module.exports = { tag: 'cjs-dep' };\n",
+        "/proj/esmdep.js": "export default (n) => n * 2;\nexport const tri = (n) => n * 3;\n",
+      };
+      for (const [p, src] of Object.entries(files)) await os.fs.write(p, src);
+      return await window.run(os, ["node", "app.js"], { cwd: "/proj" });
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.out.trim().split("\n"), ["req: cjs-dep", "imp-default: 6", "imp-named: 9"]);
+});

@@ -12,6 +12,7 @@
 // the core `node:` builtins. Pure over an injected `fs`/`path`/`url` — unit-testable.
 
 import { createResolver, builtinKey } from "./resolve.js";
+import { transformModule } from "./esm-graph.js";
 
 function moduleNotFound(spec, fromDir) {
   const e = new Error(`Cannot find module '${spec}' from '${fromDir}'`);
@@ -64,7 +65,10 @@ export function createModule({ fs, path, url, builtins }) {
     };
     cache.set(absPath, module.exports); // seed before eval for require cycles
     const require = makeRequire(module.path);
-    const source = fs.readFileSync(absPath, "utf8");
+    // Route dynamic `import()` to the fs-backed loader so a CJS module can import an
+    // ESM one (as in Node). CJS has no static import/import.meta, so for ordinary
+    // modules `transformModule` returns the source untouched.
+    const source = transformModule(fs.readFileSync(absPath, "utf8"), absPath, { staticUrl: () => undefined });
     const fn = new Function("require", "module", "exports", "__dirname", "__filename", source);
     fn(require, module, module.exports, module.path, absPath);
     module.loaded = true;

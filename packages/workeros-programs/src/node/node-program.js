@@ -267,17 +267,11 @@ if (evalSource != null) {
   entrySource = new TextDecoder().decode(entryBytes);
 }
 
-// CommonJS entry (`require`/`module.exports`): run it through the CJS runtime,
-// which resolves the `require` graph out of the VFS and provides the `node:`
-// builtins (fs/path). A plain ESM script falls through to the stitch path below.
-// `-e`/`-p` has no file scope, so its format is syntax-only; a real entry uses the
-// nearest package.json `"type"` (Node's rule), not a source sniff.
-if (detectFormat(entrySource, entryAbs, evalSource != null ? undefined : { fs, path }) === "cjs") {
-  const run = createNodeRuntime(sys, nodeBuiltins);
-  await run(entryAbs, entrySource);
-} else {
-
-// Node module resolution is *userland* (INV-1). We build the entry's ESM graph and
+// The ESM loader is set up *unconditionally* (before the entry runs, whatever its
+// format), so a CommonJS program can also `import()` an ESM module — the hooks live
+// on globalThis, ready for either entry path (Node interop).
+//
+// Node module resolution is *userland* (INV-1). We build a script's ESM graph and
 // stitch it for evaluation. The browser's native ESM loader (in this worker) can
 // only fetch blob:/data: URLs — never a VFS path — so a blob per module is the
 // unavoidable eval primitive. But nothing user-observable is blob-shaped: the
@@ -394,22 +388,36 @@ globalThis.__workerosMeta = (abs) => ({
 // missing target rejects the returned promise (as in Node) instead of aborting the
 // process at graph-build time — so `import('optional').catch(...)` degrades.
 globalThis.__workerosImport = async (base, spec) => {
-  spec = String(spec);
-  if (isBuiltinSpec(spec)) return import(builtinBlob(builtinKey(spec)));
-  const target = spec.startsWith("file://") ? urlMod.fileURLToPath(spec) : spec;
-  const abs = resolver.resolveFrom(path.dirname(base), target);
-  if (!abs) throw new Error(`Cannot find module '${spec}' imported from ${base}`);
-  const source = fs.readFileSync(abs, "utf8");
-  if (detectFormat(source, abs, { fs, path }) === "cjs") return import(cjsBlob(abs));
-  return import(stitchGraph(buildEsmGraph({ fs, path, resolver }, abs, source)));
+  // Hold the event loop open while the import is in flight (Node keeps the process
+  // alive during a pending dynamic import) — otherwise a CJS entry whose only
+  // remaining work is `import('…').then(…)` would exit before the module loads.
+  loop.ref();
+  try {
+    spec = String(spec);
+    if (isBuiltinSpec(spec)) return await import(builtinBlob(builtinKey(spec)));
+    const target = spec.startsWith("file://") ? urlMod.fileURLToPath(spec) : spec;
+    const abs = resolver.resolveFrom(path.dirname(base), target);
+    if (!abs) throw new Error(`Cannot find module '${spec}' imported from ${base}`);
+    const source = fs.readFileSync(abs, "utf8");
+    if (detectFormat(source, abs, { fs, path }) === "cjs") return await import(cjsBlob(abs));
+    return await import(stitchGraph(buildEsmGraph({ fs, path, resolver }, abs, source)));
+  } finally {
+    loop.unref();
+  }
 };
 
-// Evaluate the script. A ProcessExit thrown by process.exit (via sys.exit) unwinds
-// past here and is caught by the program worker, which reports the code; a genuine
-// error likewise propagates to the worker's handler (stack + exit 1).
-await import(stitchGraph(buildEsmGraph({ fs, path, resolver }, entryAbs, entrySource)));
-
-} // end ESM branch
+// Evaluate the entry on the path its format selects: a CommonJS entry runs through
+// the sync CJS runtime; an ESM entry is stitched and imported. (`-e`/`-p` has no
+// file scope, so its format is syntax-only; a real entry uses the nearest
+// package.json `"type"` — Node's rule — not a source sniff.) A ProcessExit thrown by
+// process.exit (via sys.exit) unwinds past here and is caught by the program worker,
+// which reports the code; a genuine error likewise propagates (stack + exit 1).
+if (detectFormat(entrySource, entryAbs, evalSource != null ? undefined : { fs, path }) === "cjs") {
+  const run = createNodeRuntime(sys, nodeBuiltins);
+  await run(entryAbs, entrySource);
+} else {
+  await import(stitchGraph(buildEsmGraph({ fs, path, resolver }, entryAbs, entrySource)));
+}
 
 // Node stays alive past top level while the event loop has ref'd work; do the
 // same, so timer-driven scripts (spinners, polling, deferred writes) actually run
