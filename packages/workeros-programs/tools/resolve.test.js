@@ -31,7 +31,8 @@ function fakeFs(files) {
   };
 }
 
-const mk = (files) => createResolver({ fs: fakeFs(files), path: createPath() });
+const mk = (files, conditions) =>
+  createResolver({ fs: fakeFs(files), path: createPath(), conditions });
 
 test("builtin detection", () => {
   assert.equal(isBuiltinSpec("fs"), true);
@@ -129,6 +130,103 @@ test("package #imports: chalk-style subpath imports with conditions and wildcard
   assert.equal(r.resolveImports(src, "#util/fmt"), src + "/util/fmt.js");
   // A `#` spec with no matching key in the enclosing package is unresolved.
   assert.equal(r.resolveImports(src, "#nope"), null);
+});
+
+test("conditions honor the caller: require gets the CJS target, import the ESM one", () => {
+  // A dual package. The resolver is condition-aware: an `import` caller (default)
+  // takes ./esm.js, a `require` caller takes ./cjs.js — the split Node makes.
+  const files = {
+    "/proj/node_modules/dual/package.json":
+      '{"exports":{".":{"import":"./esm.js","require":"./cjs.js"}}}',
+    "/proj/node_modules/dual/esm.js": "",
+    "/proj/node_modules/dual/cjs.js": "",
+  };
+  assert.equal(mk(files).resolveFrom("/proj", "dual"), "/proj/node_modules/dual/esm.js");
+  assert.equal(
+    mk(files, ["node", "require"]).resolveFrom("/proj", "dual"),
+    "/proj/node_modules/dual/cjs.js",
+  );
+});
+
+test("conditions match in package.json key order (not a fixed priority)", () => {
+  // `default` appears before `node`; declaration order wins, so `default` is taken
+  // even though a naive resolver might prefer the more specific `node`.
+  const r = mk({
+    "/proj/node_modules/ord/package.json":
+      '{"exports":{".":{"default":"./d.js","node":"./n.js"}}}',
+    "/proj/node_modules/ord/d.js": "",
+    "/proj/node_modules/ord/n.js": "",
+  });
+  assert.equal(r.resolveFrom("/proj", "ord"), "/proj/node_modules/ord/d.js");
+});
+
+test("a string `exports` seals the package: subpaths are not exported", () => {
+  // Node: a string (or bare-conditions) exports exposes only ".". A subpath request
+  // must NOT fall through to a plain file — the package is encapsulated.
+  const r = mk({
+    "/proj/node_modules/sealed/package.json": '{"exports":"./index.js"}',
+    "/proj/node_modules/sealed/index.js": "",
+    "/proj/node_modules/sealed/internal.js": "",
+  });
+  assert.equal(r.resolveFrom("/proj", "sealed"), "/proj/node_modules/sealed/index.js");
+  assert.equal(r.resolveFrom("/proj", "sealed/internal"), null);
+  assert.equal(r.resolveFrom("/proj", "sealed/internal.js"), null);
+});
+
+test("a null exports target blocks a subpath", () => {
+  const r = mk({
+    "/proj/node_modules/blk/package.json":
+      '{"exports":{"./ok":"./ok.js","./secret":null}}',
+    "/proj/node_modules/blk/ok.js": "",
+    "/proj/node_modules/blk/secret.js": "",
+  });
+  assert.equal(r.resolveFrom("/proj", "blk/ok"), "/proj/node_modules/blk/ok.js");
+  assert.equal(r.resolveFrom("/proj", "blk/secret"), null);
+});
+
+test("wildcard exports pick the most-specific (longest) matching pattern", () => {
+  // Two patterns match `feat/x`; Node's PATTERN_KEY_COMPARE takes the longer base.
+  const r = mk({
+    "/proj/node_modules/w/package.json":
+      '{"exports":{"./*":"./src/*.js","./feat/*":"./built/feat/*.js"}}',
+    "/proj/node_modules/w/src/a.js": "",
+    "/proj/node_modules/w/built/feat/x.js": "",
+  });
+  assert.equal(r.resolveFrom("/proj", "w/a"), "/proj/node_modules/w/src/a.js");
+  assert.equal(r.resolveFrom("/proj", "w/feat/x"), "/proj/node_modules/w/built/feat/x.js");
+});
+
+test("package self-reference by its own name via exports", () => {
+  // A file inside package `foo` importing `foo/feature` resolves through foo's own
+  // exports (Node self-reference), without any foo entry under node_modules.
+  const r = mk({
+    "/proj/node_modules/foo/package.json":
+      '{"name":"foo","exports":{".":"./index.js","./feature":"./feat.js"}}',
+    "/proj/node_modules/foo/index.js": "",
+    "/proj/node_modules/foo/feat.js": "",
+    "/proj/node_modules/foo/lib/deep.js": "",
+  });
+  const from = "/proj/node_modules/foo/lib";
+  assert.equal(r.resolveFrom(from, "foo"), "/proj/node_modules/foo/index.js");
+  assert.equal(r.resolveFrom(from, "foo/feature"), "/proj/node_modules/foo/feat.js");
+  // A subpath the package does not export is unresolved even via self-reference.
+  assert.equal(r.resolveFrom(from, "foo/lib/deep"), null);
+});
+
+test("package #imports honor the caller's condition", () => {
+  const files = {
+    "/proj/node_modules/c/package.json": JSON.stringify({
+      imports: { "#dep": { import: "./esm.js", require: "./cjs.js" } },
+    }),
+    "/proj/node_modules/c/esm.js": "",
+    "/proj/node_modules/c/cjs.js": "",
+  };
+  const from = "/proj/node_modules/c";
+  assert.equal(mk(files).resolveImports(from, "#dep"), "/proj/node_modules/c/esm.js");
+  assert.equal(
+    mk(files, ["node", "require"]).resolveImports(from, "#dep"),
+    "/proj/node_modules/c/cjs.js",
+  );
 });
 
 test("package #imports are scoped to the nearest package.json", () => {

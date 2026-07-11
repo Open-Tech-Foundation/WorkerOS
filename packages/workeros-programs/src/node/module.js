@@ -30,7 +30,10 @@ export function createModule({ fs, path, url, builtins }) {
     }
   };
 
-  const resolver = createResolver({ fs, path });
+  // CJS require path: match packages' `require`/`node` export conditions, so a dual
+  // package hands us its CommonJS build (not its ESM one) — the caller-context split
+  // Node makes between `require(...)` and `import ...`.
+  const resolver = createResolver({ fs, path, conditions: ["node", "require"] });
 
   // Node exposes require.cache keyed by filename → a { exports } record.
   const cacheProxy = new Proxy(

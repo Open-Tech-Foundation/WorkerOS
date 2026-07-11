@@ -8,6 +8,34 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:worker_threads`** (`src/node/worker-threads.js`). Real background
+  threads: `Worker`, `parentPort`, `isMainThread`, `threadId`, `workerData`,
+  `MessageChannel`/`MessagePort`, `terminate()`, and the `getEnvironmentData`/
+  `setEnvironmentData`/`markAsUntransferable`/`receiveMessageOnPort` surface. GUEST
+  code (INV-1): a `Worker` is just another `/bin/node` process the kernel spawns
+  (like `child_process`), plus a structured-clone message channel **relayed through
+  the kernel worker** — so objects/typed arrays/Maps survive `postMessage` in both
+  directions. New syscalls: `spawnWorker` (launch a worker, or `-e` source for
+  `{ eval:true }`), `workerPost` (fire-and-forget relay to `"parent"` or a worker by
+  threadId), `onWorkerEvent` (inbound messages/exit), and `workerInit` — queried
+  once at `/bin/node` startup so the worker learns it is *not* the main thread and
+  receives its `workerData`. Ports queue inbound messages until a `message` listener
+  attaches (Node's paused-port semantics), and the transport buffers a worker's
+  first messages until its script has installed the dispatcher — without both, a
+  message that races ahead of the listener was dropped. Keep-alive is Node-accurate:
+  the spawner stays alive while a worker runs, and a worker stays alive while
+  `parentPort` has `message` listeners (releasing on `close()`/last removal), so
+  `terminate()` (a real SIGTERM → exit 143) or a clean drain both exit deterministically.
+  Honest limits (INV-5): transferables are copied not moved; `MessageChannel` ports
+  are in-thread only (a port can't be transferred to a worker); a worker's console
+  output goes to the parent's stdout rather than a `worker.stdout` stream; an
+  uncaught worker throw surfaces as a non-zero `exit`, not an `error` with the real
+  stack; `receiveMessageOnPort` (the Atomics sync pattern) is a stub. This is the
+  last Node-compat gate under esbuild/Vite (the esbuild spike's `worker:false`
+  fallback is no longer required). Unit-tested over a fake `sys` (round-trip, buffered
+  pre-online post, terminate, spawn error, MessageChannel), and driven end-to-end in
+  a booted kernel — a real worker computes over `workerData` and replies, then a
+  long-running worker is terminated (`workeros-web`'s `tools/worker-threads.test.js`).
 - **`node:perf_hooks`** (`src/node/perf-hooks.js`). Exposes the worker-native Web
   Performance clock, entries, marks, measures, and observer classes with Node's
   module shape, plus `performance.timerify`, `eventLoopUtilization`, recordable
@@ -337,6 +365,29 @@ guest runtime. Format:
   replacing the ad-hoc helper.
 
 ### Changed
+- **Node-accurate `exports`/`imports` resolution** (`src/node/resolve.js`,
+  `src/node/module.js`). The resolver now implements Node's package-resolution
+  algorithm faithfully rather than approximating it:
+  - **`require`-vs-`import` condition split.** `createResolver` takes the caller's
+    active `conditions`; the ESM graph builder passes `["node","import"]`, the CJS
+    `require` runtime passes `["node","require"]`. A dual package (`exports: { ".":
+    { "import": …, "require": … } }`) now hands `require()` its **CommonJS** build
+    and `import` its **ESM** build — previously every caller got the `import`
+    target.
+  - **Conditions match in package.json key order**, not a fixed
+    `import/node/default/require` priority — so a package that deliberately orders
+    `default` before a more specific condition resolves as Node does.
+  - **`exports` seals the package.** A string or bare-conditions `exports` exposes
+    only `"."`; subpath requests (`pkg/internal`) are no longer allowed to fall
+    through to a plain file, matching Node's encapsulation. `main`/`module` are
+    ignored when `exports` is present.
+  - **`*` subpath patterns use most-specific (longest-base, then longest-trailer)
+    match** (Node's `PATTERN_KEY_COMPARE`), and expand **every** `*` in the target;
+    a **`null` target blocks** a subpath.
+  - **Package self-reference** — a package may import itself by its own `name` via
+    its `exports`.
+  Covered by new cases in `tools/resolve.test.js` (caller conditions, key order,
+  sealing, null block, longest-match, self-reference, conditional `#imports`).
 - **CommonJS loading now reuses the shared Node resolver** (`src/node/module.js`,
   `src/node/require-runtime.js`). The sync `node:module` loader and `/bin/node`'s
   CJS entry path both resolve through `src/node/resolve.js`, removing the older
