@@ -8,6 +8,11 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:perf_hooks`** (`src/node/perf-hooks.js`). Exposes the worker-native Web
+  Performance clock, entries, marks, measures, and observer classes with Node's
+  module shape, plus `performance.timerify`, `eventLoopUtilization`, recordable
+  histograms, and a timer-sampled `monitorEventLoopDelay`. Libuv-specific metrics
+  are documented approximations rather than fabricated host data.
 - **`node:querystring`** (`src/node/querystring.js`). Implements the legacy
   `parse`/`decode`, `stringify`/`encode`, `escape`, `unescape`, and
   `unescapeBuffer` API, including repeated keys, custom separators/codecs,
