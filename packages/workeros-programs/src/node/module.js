@@ -22,6 +22,12 @@ function moduleNotFound(spec, fromDir) {
 
 export function createModule({ fs, path, url, builtins }) {
   const cache = new Map(); // absPath → module.exports
+  const moduleObjs = new Map(); // absPath → the CJS `module` object (for require.main identity)
+  // The process's entry `module` (Node's `require.main` / `process.mainModule`) —
+  // set when a CommonJS *entry* is loaded, so `require.main === module` is true in
+  // the entry and the same object everywhere else. Undefined for an ESM entry (no
+  // CJS main), matching Node.
+  let mainModule;
 
   const kind = (p) => {
     try {
@@ -49,7 +55,7 @@ export function createModule({ fs, path, url, builtins }) {
     },
   );
 
-  function load(absPath) {
+  function load(absPath, isMain = false) {
     if (cache.has(absPath)) return cache.get(absPath);
     if (absPath.endsWith(".json")) {
       const val = JSON.parse(fs.readFileSync(absPath, "utf8"));
@@ -58,11 +64,13 @@ export function createModule({ fs, path, url, builtins }) {
     }
     const module = {
       exports: {},
-      id: absPath,
+      id: isMain ? "." : absPath, // Node ids the entry module "."
       filename: absPath,
       path: path.dirname(absPath),
       loaded: false,
     };
+    moduleObjs.set(absPath, module);
+    if (isMain) mainModule = module;
     cache.set(absPath, module.exports); // seed before eval for require cycles
     const require = makeRequire(module.path);
     // Route dynamic `import()` to the fs-backed loader so a CJS module can import an
@@ -91,7 +99,10 @@ export function createModule({ fs, path, url, builtins }) {
       return abs;
     };
     require.cache = cacheProxy;
-    require.main = undefined;
+    // `require.main` is the process entry module (Node's `process.mainModule`) —
+    // the same object for every require, so `require.main === module` holds only in
+    // the entry. A getter so it reflects the main set when the entry loads.
+    Object.defineProperty(require, "main", { get: () => mainModule, enumerable: true, configurable: true });
     require.extensions = { ".js": null, ".json": null, ".cjs": null };
     return require;
   }
@@ -120,6 +131,10 @@ export function createModule({ fs, path, url, builtins }) {
     isBuiltin,
     syncRequire: makeRequire, // internal: a require rooted at an arbitrary dir
     _load: load, // internal: load a CJS module by absolute path (ESM-graph interop)
+    _loadMain: (p) => load(p, true), // internal: load the entry as the process main
+    get mainModule() {
+      return mainModule;
+    },
     wrap: (src) =>
       "(function (exports, require, module, __filename, __dirname) { " + src + "\n});",
     _cache: cacheProxy,

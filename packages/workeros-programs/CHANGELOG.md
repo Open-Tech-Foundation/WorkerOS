@@ -396,6 +396,14 @@ guest runtime. Format:
     module too — the `node:module` CJS loader routes `import()` through the same
     fs-backed hook (`src/node/module.js`). Both directions are covered end-to-end
     (`workeros-web`'s `tools/cjs-in-esm.test.js`).
+  - **`require.main === module`** (`src/node/module.js`,
+    `src/node/require-runtime.js`). The CommonJS entry is now loaded as the process
+    **main module**: `require.main` is that module object (Node's
+    `process.mainModule`) — the *same* object for every `require` in the process, so
+    the `require.main === module` "am I the entry?" idiom is `true` only in the
+    entry, and a dependency sees the entry (not itself). The entry's `module.id` is
+    `"."` as in Node; an ESM entry leaves `require.main` undefined. Covered e2e
+    (`workeros-web`'s `tools/node-builtins.test.js`).
   - **CJS-vs-ESM format decided Node's way** (`detectFormat`). Extension is
     authoritative (`.mjs` → ESM, `.cjs`/`.json` → CJS) and, for `.js`, the nearest
     `package.json` `"type"` decides — `"module"` → ESM, otherwise CommonJS —

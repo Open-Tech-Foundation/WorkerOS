@@ -89,3 +89,35 @@ test("os/url/module builtins + grown process work end-to-end under /bin/node", o
     "nextTick: true",
   ]);
 });
+
+test("require.main === module in the CJS entry, and is the same object in a dep", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const files = {
+        // A CommonJS entry: `require.main === module` is Node's "am I the entry?" idiom.
+        "/proj/app.js": [
+          "const dep = require('./dep');",
+          "console.log('entry-is-main:', require.main === module);",
+          "console.log('dep-sees-main:', dep.mainIsEntry(module));",
+          "console.log('main-id:', require.main.id, 'main-file:', require.main.filename);",
+        ].join("\n"),
+        // A dependency sees the SAME require.main (the entry), not itself.
+        "/proj/dep.js": [
+          "exports.mainIsEntry = (entryModule) =>",
+          "  require.main !== module && require.main === entryModule;",
+        ].join("\n"),
+      };
+      for (const [p, src] of Object.entries(files)) await os.fs.write(p, src);
+      return await window.run(os, ["node", "app.js"], { cwd: "/proj" });
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.out.trim().split("\n"), [
+    "entry-is-main: true",
+    "dep-sees-main: true",
+    "main-id: . main-file: /proj/app.js",
+  ]);
+});

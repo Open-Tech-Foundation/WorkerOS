@@ -177,6 +177,6 @@ export function createNodeRuntime(sys, extras) {
     };
     const mod = createModule({ fs: shadowFs, path, url, builtins });
     builtins.set("module", mod);
-    mod._load(entryPath);
+    mod._loadMain(entryPath); // the entry is the process main: require.main === module
   };
 }
