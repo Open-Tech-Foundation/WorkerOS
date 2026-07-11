@@ -24,6 +24,7 @@ import { crypto as cryptoModule } from "./crypto.js";
 import { stream as streamModule } from "./stream.js";
 import { createTimers } from "./timers.js";
 import { createTimersPromises } from "./timers-promises.js";
+import { createReadline } from "./readline.js";
 import { zlib as zlibModule } from "./zlib.js";
 import { createChildProcess } from "./child-process.js";
 
@@ -50,6 +51,7 @@ export function makeBuiltins(sys, extras) {
   const http = createHttp(sys, EventEmitter, net);
   const timers = createTimers(globalThis);
   const timersPromises = createTimersPromises(globalThis);
+  const readline = createReadline(sys);
   // `child_process` runs sub-commands through the shell driver over two syscalls
   // the runtime adds (`execCapture`/`execCaptureSync`); pure over `sys`, like net.
   const childProcess = createChildProcess(sys);
@@ -69,6 +71,7 @@ export function makeBuiltins(sys, extras) {
     ["stream", streamModule],
     ["timers", timers],
     ["timers/promises", timersPromises],
+    ["readline", readline],
     ["net", net],
     ["http", http],
     ["crypto", cryptoModule],

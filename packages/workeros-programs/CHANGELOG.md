@@ -198,6 +198,12 @@ guest runtime. Format:
   Supports the common `{ ref: false, signal }` options and aborts with
   `AbortError`, while keeping all real scheduling in `event-loop.js` rather than
   duplicating timer logic. Covered by `tools/timers-promises.test.js`.
+- **`node:readline`** (`src/node/readline.js`). A pragmatic line-reader over the
+  current runtime I/O: `createInterface()`, `question()`, `close()`/`prompt()`,
+  the cursor helpers (`cursorTo`/`moveCursor`/`clearLine`/`clearScreenDown`), and
+  a minimal `promises` facade. It intentionally reads whole cooked-stdin lines
+  from the input fd (or a `data`-emitting stream) rather than pretending the
+  runtime already has a raw keypress event stream. Covered by `tools/readline.test.js`.
 - **Node event-loop keep-alive** (`src/node/event-loop.js`, `node-program.js`).
   `/bin/node` returned to the program worker the instant the script's synchronous
   top level settled, so a top-level `setInterval`/`setTimeout` never fired (the

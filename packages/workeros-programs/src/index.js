@@ -115,6 +115,7 @@ export const libraries = [
   { path: "/lib/workeros-node/stream.js", source: () => fetchText("./node/stream.js") },
   { path: "/lib/workeros-node/timers.js", source: () => fetchText("./node/timers.js") },
   { path: "/lib/workeros-node/timers-promises.js", source: () => fetchText("./node/timers-promises.js") },
+  { path: "/lib/workeros-node/readline.js", source: () => fetchText("./node/readline.js") },
   { path: "/lib/workeros-node/tty.js", source: () => fetchText("./node/tty.js") },
   { path: "/lib/workeros-node/event-loop.js", source: () => fetchText("./node/event-loop.js") },
   { path: "/lib/workeros-node/url.js", source: () => fetchText("./node/url.js") },
