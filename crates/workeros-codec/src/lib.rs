@@ -11,6 +11,12 @@
 //! Guest code (INV-1): userland acceleration behind stable APIs, with the pure-JS
 //! implementations kept as the always-present fallback. The kernel is untouched.
 
+// The exported functions form an internal wasm ABI called only by the trusted JS
+// facade (`node/wasm-codec.js`), which upholds the pointer/length contracts. The
+// per-function safety contract is documented on `cdc_dealloc`; repeating a `#
+// Safety` section on every thin `from_raw_parts` wrapper is noise here.
+#![allow(clippy::missing_safety_doc)]
+
 use core::slice;
 use md5::Md5;
 use sha1::Sha1;

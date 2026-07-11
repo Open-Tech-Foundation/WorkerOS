@@ -85,21 +85,30 @@ function readWasmBytes(syncFs, path) {
   }
 }
 
-let cached; // undefined = not yet tried, null = unavailable, object = facade
+let cached; // undefined = not yet loaded, or a facade
+
+// Inject a codec directly (used by `node --test`, which has no `sys` channel to
+// read the wasm through — the test preload instantiates it and hands it here).
+export function setCodec(facade) {
+  cached = facade;
+}
+
+// Load the codec from the VFS (production) if not already set. Throws if it can't
+// be loaded: the wasm is the sole implementation, so a missing codec is a real
+// failure, not a cue to silently fall back to a slower, lower-ratio JS encoder.
 export function getCodec() {
   if (cached !== undefined) return cached;
-  cached = null;
-  try {
-    const sys = globalThis.sys;
-    if (!sys || !sys.syncFs || typeof WebAssembly === "undefined") return cached;
-    const bytes = readWasmBytes(sys.syncFs, CODEC_PATH);
-    if (!bytes || bytes.length === 0) return cached;
-    // Sync compile + instantiate — permitted at any size off the main thread (the
-    // program worker), unlike the 4 KB main-thread limit.
-    const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
-    cached = codecFromExports(instance.exports);
-  } catch {
-    cached = null; // any failure → pure-JS fallback
+  const sys = globalThis.sys;
+  if (!sys || !sys.syncFs || typeof WebAssembly === "undefined") {
+    throw new Error("workeros codec unavailable: no sync-fs channel to load " + CODEC_PATH);
   }
+  const bytes = readWasmBytes(sys.syncFs, CODEC_PATH);
+  if (!bytes || bytes.length === 0) {
+    throw new Error("workeros codec not installed at " + CODEC_PATH + " (build it: npm run build:codec)");
+  }
+  // Sync compile + instantiate — permitted at any size off the main thread (the
+  // program worker), unlike the 4 KB main-thread limit.
+  const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
+  cached = codecFromExports(instance.exports);
   return cached;
 }

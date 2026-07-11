@@ -30,21 +30,25 @@ guest runtime. Format:
   Honest scope (INV-5): this is a pragmatic compatibility layer, not a full
   Node backpressure/object-mode implementation yet. Covered by
   `tools/stream.test.js`.
-- **WASM codec behind `node:zlib` + `node:crypto`** (`crates/workeros-codec`,
-  `src/node/wasm-codec.js`). A freestanding Rust→wasm module (miniz_oxide DEFLATE +
-  RustCrypto hashes) accelerates the CPU-bound hot paths behind the *same* APIs.
-  It carries a manual pointer/length ABI (no wasm-bindgen) so the guest can
-  instantiate it **synchronously** — `new WebAssembly.Instance` off the main
-  thread — and call it from inside Node's sync `gzipSync`/`createHash`. Loaded
-  lazily per process from `/lib/workeros-codec/codec.wasm` via the sync-fs channel;
-  `zlib`/`crypto` prefer it when present and fall back to the pure-JS impls
-  otherwise (plain-Node unit tests, or an env that didn't run `npm run
-  build:codec` — the binary is gitignored like `grep.wasm`). Measured: raw DEFLATE
-  ~5× faster **and 2.8× smaller** (miniz's dynamic Huffman vs the JS fixed-Huffman
-  encoder); SHA-256 ~1.2× (1 MB) to ~5× (small inputs) faster. The wasm is
-  cross-validated against real Node zlib/crypto (`tools/codec.test.js`), and an
-  end-to-end test proves it's actually active in a booted kernel by asserting gzip
-  emits dynamic-Huffman blocks (`@opentf/workeros-web` `tools/archive-tools.test.js`).
+- **`node:zlib` + `node:crypto` run on a WASM codec — the sole implementation**
+  (`crates/workeros-codec`, `src/node/wasm-codec.js`). A freestanding Rust→wasm
+  module (miniz_oxide DEFLATE + RustCrypto hashes) *is* the codec behind
+  `gzip`/`deflate`/`inflate`/`crc32`/`adler32` and `createHash`/`createHmac` — no
+  pure-JS shadow. It carries a manual pointer/length ABI (no wasm-bindgen) so the
+  guest instantiates it **synchronously** (`new WebAssembly.Instance`, off the main
+  thread) and calls it from inside Node's sync APIs. Loaded once per process from
+  `/lib/workeros-codec/codec.wasm` via the sync-fs channel; `getCodec()` **throws**
+  if it can't be loaded (a missing codec is a real failure, not a cue to silently
+  fall back to a slower, lower-ratio encoder). The earlier hand-rolled JS
+  DEFLATE/INFLATE and SHA/MD5 implementations are deleted (~500 lines). Measured:
+  raw DEFLATE ~5× faster **and 2.8× smaller** (miniz dynamic Huffman); SHA-256
+  ~1.2× (1 MB) to ~5× (small) faster. `node --test` has no kernel to load the wasm
+  through, so a `--import` preload (`tools/codec-setup.mjs`) instantiates it from
+  disk and injects it via `setCodec`, and `pretest` builds it; CI builds it before
+  the browser boot test. Cross-validated against real Node zlib/crypto
+  (`tools/codec.test.js`); an E2E test proves it's live in a booted kernel by
+  asserting gzip emits dynamic-Huffman blocks (`@opentf/workeros-web`
+  `tools/archive-tools.test.js`).
 - **`node:fs` file watching: `fs.watch` + `watchFile`** (`src/node/fs.js`). A real
   `FSWatcher` (an event emitter with `on`/`once`/`off`/`close`) that emits
   `change` `(eventType, filename)` — the kernel pushes change events to the
