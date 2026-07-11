@@ -14,6 +14,7 @@ import { createUrl } from "./url.js";
 import { createFs } from "./fs.js";
 import { createModule } from "./module.js";
 import { buffer as bufferModule } from "./buffer.js";
+import { stringDecoder as stringDecoderModule } from "./string_decoder.js";
 import { EventEmitter } from "./events.js";
 import { util as utilModule } from "./util.js";
 import { createNet } from "./net.js";
@@ -51,6 +52,7 @@ export function makeBuiltins(sys, extras) {
     ["os", os],
     ["url", url],
     ["buffer", bufferModule],
+    ["string_decoder", stringDecoderModule],
     ["events", EventEmitter],
     ["util", utilModule],
     ["stream", streamModule],

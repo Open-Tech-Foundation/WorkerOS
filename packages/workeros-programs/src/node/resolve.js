@@ -19,6 +19,7 @@ export const NODE_BUILTINS = new Set([
   "process",
   "tty",
   "buffer",
+  "string_decoder",
   "events",
   "util",
   "stream",

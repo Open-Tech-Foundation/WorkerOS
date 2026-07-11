@@ -125,6 +125,14 @@ guest runtime. Format:
   aliases), and `concat`/`compare`/`equals`/`copy`/`fill`/`indexOf`. Registered in
   `makeBuiltins`, so `require('buffer')` and `import { Buffer } from 'node:buffer'`
   resolve too. Unit-tested against Node's own Buffer as the oracle.
+- **`node:string_decoder`** (`src/node/string_decoder.js`). The incremental
+  `StringDecoder` utility packages use when multibyte characters may be split
+  across chunk boundaries. Covers the practical encodings npm-style stream code
+  reaches for: `utf8`, `utf16le`/`ucs2`, `base64`, `latin1`, `ascii`, and `hex`,
+  preserving partial-byte state between writes and emitting replacement on an
+  incomplete UTF-8 tail at `end()`. Registered as both `string_decoder` and
+  `node:string_decoder`; parity-tested against the host module and through the
+  guest CommonJS runtime in `tools/string-decoder.test.js`.
 - **Node event-loop keep-alive** (`src/node/event-loop.js`, `node-program.js`).
   `/bin/node` returned to the program worker the instant the script's synchronous
   top level settled, so a top-level `setInterval`/`setTimeout` never fired (the
