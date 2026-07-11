@@ -21,6 +21,7 @@ import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 import { buildEsmGraph } from "/lib/workeros-node/esm-graph.js";
 import { createTty } from "/lib/workeros-node/tty.js";
 import { createEventLoop } from "/lib/workeros-node/event-loop.js";
+import { createWorkerThreads } from "/lib/workeros-node/worker-threads.js";
 
 const enc = new TextEncoder();
 const err = (s) => sys.write(2, enc.encode(s));
@@ -67,8 +68,11 @@ const toBytes = (chunk) =>
 // size. process.std*.isTTY must be a plain boolean (Node code reads it
 // synchronously), so we resolve it here rather than on each access. (This is what
 // makes chalk/ora/readline detect a terminal — reversing the old isTTY=false stub.)
-const [in0, out1, err2, ws] = await Promise.all([
-  sys.isatty(0), sys.isatty(1), sys.isatty(2), sys.winsize(),
+// `workerInit` is resolved here too: node:worker_threads needs `isMainThread`/
+// `workerData`/`threadId` as synchronous values at module load, so we ask the
+// kernel once (is this /bin/node a spawned Worker?) before the script runs.
+const [in0, out1, err2, ws, workerInit] = await Promise.all([
+  sys.isatty(0), sys.isatty(1), sys.isatty(2), sys.winsize(), sys.workerInit(),
 ]);
 // Live terminal geometry: seeded from the startup probe, kept current by the
 // SIGWINCH handler below so tty.WriteStream.getWindowSize()/columns stay accurate.
@@ -213,10 +217,12 @@ sys.onSignal(async (sig) => {
 // knows nothing of any of that.
 // The `node:` builtins that only this running program can supply — `process` and
 // `tty` carry per-process state (argv/env/stdio, the fds' TTY-ness) that the pure
-// `makeBuiltins` factory can't. Threaded into both the ESM registry here and the
-// CJS runtime below, so `import process from 'node:process'` / `require('tty')`
-// alike resolve to these exact objects. (chalk's supports-color needs both.)
-const nodeBuiltins = { process, tty };
+// `makeBuiltins` factory can't; `worker_threads` carries this process's own thread
+// identity (isMainThread/threadId/workerData from the startup `workerInit` probe).
+// Threaded into both the ESM registry here and the CJS runtime below, so
+// `import process from 'node:process'` / `require('tty')` alike resolve to these
+// exact objects. (chalk's supports-color needs both.)
+const nodeBuiltins = { process, tty, worker_threads: createWorkerThreads(sys, workerInit) };
 const builtins = makeBuiltins(sys, nodeBuiltins);
 const fs = builtins.get("fs");
 const path = builtins.get("path");

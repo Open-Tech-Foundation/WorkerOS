@@ -126,6 +126,10 @@ const foreground = new Set(); // pids of the current foreground pipeline (for ^C
 const history = []; // interactive command history (for the readline prompt)
 let activeReadline = null; // the line editor while the prompt is being edited
 const caughtSignals = new Map(); // pid → Set<signal> the guest installed a handler for
+// node:worker_threads: pid → { parentPid, workerData, threadId } for a process
+// spawned as a Worker. Lets a worker answer `workerInit` (am I a worker? my data)
+// and lets `workerPost` route a child→parent message to the right spawner.
+const workerContexts = new Map();
 
 // Deliver a cooperative signal to a live JS program (posted to its worker).
 function deliverSignal(pid, signal) {
@@ -317,6 +321,9 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
     try {
       sink.stderr(enc.encode(String(e.message) + "\n"));
     } catch {}
+    // An *async* uncaught error (a timer/callback throw the guest didn't report):
+    // relay it too, so a worker_threads Worker still fires `error` for these.
+    relayWorkerError(spawned.pid, { message: String(e.message || e), stack: e.filename ? `${e.message}\n    at ${e.filename}:${e.lineno}` : undefined, name: "Error" });
     handleExit(spawned.pid, 1);
   };
   worker.postMessage({
@@ -364,6 +371,7 @@ function handleExit(pid, code) {
     kernel.tty_set_attr({ canonical: true, echo: true, isig: true });
   }
   caughtSignals.delete(pid);
+  workerContexts.delete(pid);
   pendingReads = pendingReads.filter((pr) => pr.pid !== pid);
   pendingAccepts = pendingAccepts.filter((pa) => pa.pid !== pid);
   try {
@@ -657,6 +665,19 @@ function onProgramMessage(pid, msg) {
       else set.delete(msg.signal);
       break;
     }
+    case MSG.WORKER_ERROR_REPORT:
+      relayWorkerError(pid, { message: msg.message, stack: msg.stack, name: msg.name });
+      break;
+  }
+}
+
+// Relay a worker's uncaught error to its spawner (→ `worker.on('error')`). A no-op
+// if `workerPid` isn't a live worker (a normal process reporting is ignored).
+function relayWorkerError(workerPid, info) {
+  const ctx = workerContexts.get(workerPid);
+  const pw = ctx && programs.get(ctx.parentPid);
+  if (pw && !pw.done) {
+    pw.worker.postMessage({ type: MSG.WORKER_ERROR, threadId: workerPid, ...info });
   }
 }
 
@@ -836,13 +857,68 @@ function handleSyscall(pid, msg) {
         break;
       }
       case "childKill": {
-        // node:child_process kill(): signal a spawned child. Mirrors the client
-        // MSG.KILL path — a delivered signal hard-exits the process (128+signal).
+        // node:child_process kill() / worker_threads terminate(): signal a spawned
+        // child. Mirrors the client MSG.KILL path — a delivered signal hard-exits
+        // the process (128+signal).
         const sig = args.signal | 0;
         const delivered = kernel.kill(args.pid, sig);
         if (delivered) handleExit(args.pid, 128 + sig);
         reply(pid, id, true, delivered);
         break;
+      }
+      case "spawnWorker": {
+        // node:worker_threads Worker: spawn `/bin/node <file>` (or `-e <code>`) as a
+        // real child thread. Its stdout/stderr go to the *parent's* sink (a worker's
+        // console output surfaces on the parent's stdout, Node's default); messages
+        // travel over `workerPost`, not stdio. Record the worker context so the child
+        // can answer `workerInit` and its child→parent messages can be routed.
+        const parentRec = programs.get(pid);
+        const argv = args.eval ? ["node", "-e", args.file] : ["node", args.file, ...(args.argv || [])];
+        const env = args.env || (parentRec && parentRec.env) || {};
+        const cwd = args.cwd || session.cwd;
+        let spawned;
+        try {
+          spawned = spawnKernel(argv, env, cwd, null);
+        } catch (e) {
+          reply(pid, id, false, String(e && e.message ? e.message : e));
+          break;
+        }
+        const workerPid = spawned.pid;
+        workerContexts.set(workerPid, { parentPid: pid, workerData: args.workerData ?? null, threadId: workerPid });
+        const parentWorker = parentRec && parentRec.worker;
+        startWorker(spawned, {
+          argv,
+          env,
+          cwd,
+          sink: (parentRec && parentRec.sink) || { stdout: () => {}, stderr: () => {} },
+          onExit: (code) => {
+            if (parentWorker) parentWorker.postMessage({ type: MSG.WORKER_EXIT, threadId: workerPid, code: code | 0 });
+          },
+        });
+        reply(pid, id, true, { threadId: workerPid });
+        break;
+      }
+      case "workerInit": {
+        // A starting /bin/node asks whether it is a worker (and if so, its data).
+        const ctx = workerContexts.get(pid);
+        reply(pid, id, true, ctx
+          ? { isMainThread: false, threadId: ctx.threadId, workerData: ctx.workerData }
+          : { isMainThread: true, threadId: 0, workerData: null });
+        break;
+      }
+      case "workerPost": {
+        // Relay a structured-clone message. From a worker (`to === "parent"`) →
+        // route to its spawner as coming from thread 0; from the main side (`to` is a
+        // worker's threadId) → route to that worker as coming from the parent (0).
+        if (args.to === "parent") {
+          const ctx = workerContexts.get(pid);
+          const pw = ctx && programs.get(ctx.parentPid);
+          if (pw && !pw.done) pw.worker.postMessage({ type: MSG.WORKER_MESSAGE, threadId: pid, data: args.data });
+        } else {
+          const cw = programs.get(args.to | 0);
+          if (cw && !cw.done) cw.worker.postMessage({ type: MSG.WORKER_MESSAGE, threadId: 0, data: args.data });
+        }
+        break; // fire-and-forget: no reply
       }
       default:
         reply(pid, id, false, "unknown syscall: " + call);

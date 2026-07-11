@@ -129,6 +129,7 @@ export const libraries = [
   { path: "/lib/workeros-node/crypto.js", source: () => fetchText("./node/crypto.js") },
   { path: "/lib/workeros-node/zlib.js", source: () => fetchText("./node/zlib.js") },
   { path: "/lib/workeros-node/child-process.js", source: () => fetchText("./node/child-process.js") },
+  { path: "/lib/workeros-node/worker-threads.js", source: () => fetchText("./node/worker-threads.js") },
   { path: "/lib/workeros-node/wasm-codec.js", source: () => fetchText("./node/wasm-codec.js") },
   // The codec wasm (crates/workeros-codec) — a binary library. `fetchBytes` returns
   // null when it isn't built, so zlib/crypto transparently use their JS fallback.

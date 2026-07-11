@@ -52,6 +52,14 @@ let fsEventDispatch = null;
 // The kernel worker delivers CHILD_STDOUT/CHILD_STDERR/CHILD_EXIT for spawned
 // children; node:child_process routes each to the right ChildProcess by pid.
 let childDispatch = null;
+// The guest's worker_threads event dispatcher (installed by node:worker_threads).
+// The kernel worker delivers WORKER_MESSAGE/WORKER_EXIT for spawned workers;
+// node:worker_threads routes each to the right Worker / parentPort by thread id.
+// A worker receives its first parent message *before* its script has run (the
+// spawner posts as soon as it's online), so events that arrive before the guest
+// registers the dispatcher are buffered here and flushed when it does.
+let workerEventDispatch = null;
+let pendingWorkerEvents = [];
 
 let exited = false;
 function reportExit(code) {
@@ -165,6 +173,22 @@ function makeSys(start, syncCall) {
     spawnChild: (opts) => call("spawnChild", opts),
     childKill: (childPid, signal) => call("childKill", { pid: childPid, signal }),
     onChildEvent: (cb) => { childDispatch = cb; },
+    // node:worker_threads. `spawnWorker` launches a `/bin/node` worker thread and
+    // resolves its `{ threadId }`; `workerInit` (queried once at /bin/node startup)
+    // reports whether *this* process is a worker and its `workerData`; `workerPost`
+    // relays a structured-clone message (fire-and-forget) to the parent (`"parent"`)
+    // or to a worker by threadId; messages/exits arrive via the dispatcher set with
+    // `onWorkerEvent`. Termination reuses `childKill`.
+    spawnWorker: (opts) => call("spawnWorker", opts),
+    workerInit: () => call("workerInit", {}),
+    workerPost: (to, data) =>
+      kernel.postMessage({ type: MSG.SYSCALL, call: "workerPost", args: { to, data } }),
+    onWorkerEvent: (cb) => {
+      workerEventDispatch = cb;
+      const queued = pendingWorkerEvents;
+      pendingWorkerEvents = [];
+      for (const ev of queued) cb(ev.threadId, ev.kind, ev.payload);
+    },
     execCaptureSync: (line, input) => {
       const r = syncCall("execCapture", { line }, true, input || undefined);
       if (r.status < 0) {
@@ -325,6 +349,21 @@ self.onmessage = async (ev) => {
     }
     return;
   }
+  if (msg.type === MSG.WORKER_MESSAGE || msg.type === MSG.WORKER_EXIT || msg.type === MSG.WORKER_ERROR) {
+    // node:worker_threads traffic — hand it to the worker dispatcher (if any),
+    // keyed by the peer thread id (0 = the parent, for a worker's inbound).
+    const kind =
+      msg.type === MSG.WORKER_MESSAGE ? "message" : msg.type === MSG.WORKER_EXIT ? "exit" : "error";
+    const payload =
+      kind === "exit" ? { code: msg.code }
+      : kind === "error" ? { message: msg.message, stack: msg.stack, name: msg.name }
+      : msg.data;
+    if (!workerEventDispatch) { pendingWorkerEvents.push({ threadId: msg.threadId, kind, payload }); return; }
+    try { workerEventDispatch(msg.threadId, kind, payload); } catch (e) {
+      writeBytes(2, new TextEncoder().encode("worker_threads handler error: " + (e?.message ?? e) + "\n"));
+    }
+    return;
+  }
   if (msg.type !== MSG.START) return;
 
   // One synchronous-syscall channel per process (SAB + Atomics). Both the WASI
@@ -353,6 +392,20 @@ self.onmessage = async (ev) => {
       return;
     }
     writeBytes(2, new TextEncoder().encode(String(err && err.stack ? err.stack : err) + "\n"));
+    // If this process is a worker_threads Worker, hand the error to the kernel to
+    // relay to the spawner (→ `worker.on('error')`); a no-op for a normal process.
+    reportWorkerError(err);
     reportExit(1);
   }
 };
+
+/** Report an uncaught error to the kernel worker; it relays a WORKER_ERROR to the
+ *  spawner iff this process was spawned as a worker_threads Worker (else ignored). */
+function reportWorkerError(err) {
+  kernel.postMessage({
+    type: MSG.WORKER_ERROR_REPORT,
+    message: err && err.message ? String(err.message) : String(err),
+    stack: err && err.stack ? String(err.stack) : undefined,
+    name: err && err.name ? String(err.name) : "Error",
+  });
+}

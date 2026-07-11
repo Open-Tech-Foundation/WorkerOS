@@ -26,16 +26,22 @@ guest runtime. Format:
   the spawner stays alive while a worker runs, and a worker stays alive while
   `parentPort` has `message` listeners (releasing on `close()`/last removal), so
   `terminate()` (a real SIGTERM → exit 143) or a clean drain both exit deterministically.
-  Honest limits (INV-5): transferables are copied not moved; `MessageChannel` ports
-  are in-thread only (a port can't be transferred to a worker); a worker's console
-  output goes to the parent's stdout rather than a `worker.stdout` stream; an
-  uncaught worker throw surfaces as a non-zero `exit`, not an `error` with the real
-  stack; `receiveMessageOnPort` (the Atomics sync pattern) is a stub. This is the
+  An uncaught throw in a worker — synchronous *or* async — fires the spawner's
+  `error` event with a reconstructed Error (message/stack/name relayed from the
+  worker's process, then its `exit`), so worker-pool libraries detect a dead worker;
+  `receiveMessageOnPort(port)` synchronously drains a queued message. Honest limits
+  (INV-5): a worker's console output goes to the parent's stdout (Node's default) —
+  a per-worker `worker.stdout`/`stderr` stream isn't surfaced; `transferList`
+  transferables are copied not moved (the data still arrives — structured clone
+  copies it — but the sender's copy isn't neutered); and a `MessagePort` can't be
+  *transferred* to another thread (in-thread `MessageChannel` works). Those need
+  shared-memory/pipe plumbing (a separate effort) and are not faked. This is the
   last Node-compat gate under esbuild/Vite (the esbuild spike's `worker:false`
   fallback is no longer required). Unit-tested over a fake `sys` (round-trip, buffered
-  pre-online post, terminate, spawn error, MessageChannel), and driven end-to-end in
-  a booted kernel — a real worker computes over `workerData` and replies, then a
-  long-running worker is terminated (`workeros-web`'s `tools/worker-threads.test.js`).
+  pre-online post, terminate, worker error, spawn error, MessageChannel,
+  receiveMessageOnPort), and driven end-to-end in a booted kernel — a real worker
+  computes over `workerData` and replies, a long-running worker is terminated, and a
+  throwing worker surfaces its error (`workeros-web`'s `tools/worker-threads.test.js`).
 - **`node:perf_hooks`** (`src/node/perf-hooks.js`). Exposes the worker-native Web
   Performance clock, entries, marks, measures, and observer classes with Node's
   module shape, plus `performance.timerify`, `eventLoopUtilization`, recordable

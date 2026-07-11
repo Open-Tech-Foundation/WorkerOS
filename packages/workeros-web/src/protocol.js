@@ -58,8 +58,22 @@ export const MSG = Object.freeze({
   CHILD_STDOUT: "child_stdout",
   CHILD_STDERR: "child_stderr",
   CHILD_EXIT: "child_exit",
+  // kernel worker → program worker: node:worker_threads traffic. A structured-clone
+  // message relayed between a Worker and its spawner ({ threadId, data }; threadId
+  // 0 = the parent), or a worker's exit ({ threadId, code }). Routed to the guest's
+  // worker dispatcher (`sys.onWorkerEvent`).
+  WORKER_MESSAGE: "worker_message",
+  WORKER_EXIT: "worker_exit",
+  // kernel worker → program worker: a worker threw an uncaught error; relayed to
+  // the spawner so `worker.on('error')` fires with a reconstructed Error
+  // ({ threadId, message, stack, name }).
+  WORKER_ERROR: "worker_error",
   // program worker → kernel worker
   SYSCALL: "syscall",
+  // program worker → kernel worker: this process (if it is a worker) threw an
+  // uncaught error; the kernel relays it to the spawner as WORKER_ERROR before the
+  // process's exit. Carries { message, stack, name }.
+  WORKER_ERROR_REPORT: "worker_error_report",
   // program worker → kernel worker: the guest installed/removed a handler for a
   // signal, so the kernel routes it cooperatively instead of hard-killing.
   SIGACTION: "sigaction",
