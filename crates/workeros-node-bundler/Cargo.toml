@@ -1,0 +1,18 @@
+[package]
+name = "workeros-node-bundler"
+description = "Raw-wasm ESM→module-runner transform for the WorkerOS guest — oxc parses/analyzes/rewrites `import`/`export` into live-binding runner calls, so /bin/node loads ESM (cycles + require(esm) included) through its CJS runtime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+# cdylib → a freestanding .wasm with a manual pointer/length ABI (no wasm-bindgen),
+# instantiated *synchronously* by the guest (`new WebAssembly.Instance`) so an ESM
+# module can be transformed inside a synchronous `require(esm)`, mirroring the codec.
+crate-type = ["cdylib"]
+
+[dependencies]
+oxc = { version = "0.137", features = ["codegen", "semantic", "transformer"] }
+oxc_transformer_plugins = "0.137"
