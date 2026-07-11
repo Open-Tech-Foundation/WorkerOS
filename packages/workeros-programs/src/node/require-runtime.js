@@ -30,6 +30,7 @@ import { zlib as zlibModule } from "./zlib.js";
 import { createChildProcess } from "./child-process.js";
 import querystringModule from "./querystring.js";
 import perfHooksModule from "./perf-hooks.js";
+import { vm as vmModule } from "./vm.js";
 
 // ---- core builtins --------------------------------------------------------
 // `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
@@ -82,6 +83,7 @@ export function makeBuiltins(sys, extras) {
     ["child_process", childProcess],
     ["querystring", querystringModule],
     ["perf_hooks", perfHooksModule],
+    ["vm", vmModule],
   ]);
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.

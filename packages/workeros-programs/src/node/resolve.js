@@ -46,6 +46,7 @@ export const NODE_BUILTINS = new Set([
   "querystring",
   "perf_hooks",
   "worker_threads",
+  "vm",
 ]);
 
 export const isBuiltinSpec = (spec) => spec.startsWith("node:") || NODE_BUILTINS.has(spec);

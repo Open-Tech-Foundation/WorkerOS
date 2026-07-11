@@ -16,7 +16,7 @@
   "blocked": [
     {
       "file": "test/parallel/test-querystring.js",
-      "reason": "requires node:vm and the private test/common harness"
+      "reason": "requires the private test/common harness (node:vm is now provided)"
     },
     {
       "file": "test/parallel/test-fs-write-sync.js",

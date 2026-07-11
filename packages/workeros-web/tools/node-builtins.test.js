@@ -121,3 +121,46 @@ test("require.main === module in the CJS entry, and is the same object in a dep"
     "main-id: . main-file: /proj/app.js",
   ]);
 });
+
+test("node:vm contextifies a sandbox and runs code end-to-end under /bin/node", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      // An ESM entry so this drives the `node:vm` ESM-stitch registration path (the
+      // synthesized re-export blob for `import { … } from 'node:vm'`), the more
+      // failure-prone of the two registration paths. The headline is contextify: a
+      // sandbox object gains and keeps globals across runs, while `runInThisContext`
+      // runs in /bin/node's own global scope, seeing none of them.
+      await os.fs.write(
+        "/proj/app.mjs",
+        [
+          "import vm, { runInThisContext, isContext } from 'node:vm';",
+          "const sandbox = { x: 5, count: 0 };",
+          "vm.createContext(sandbox);",
+          "console.log('is-context:', isContext(sandbox));",
+          "console.log('read:', vm.runInContext('x + 1', sandbox));",
+          "vm.runInContext('count += 10; y = 99', sandbox);",
+          "console.log('write:', sandbox.count, sandbox.y);",
+          "console.log('new-context:', vm.runInNewContext('a * b', { a: 6, b: 7 }));",
+          "console.log('this-context:', runInThisContext('typeof sandbox'));",
+          "console.log('script:', new vm.Script('Math.abs(-9)').runInThisContext());",
+          "console.log('compile:', vm.compileFunction('return a + b', ['a', 'b'])(2, 3));",
+        ].join("\n"),
+      );
+      return await window.run(os, ["node", "app.mjs"], { cwd: "/proj" });
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.out.trim().split("\n"), [
+    "is-context: true",
+    "read: 6",
+    "write: 10 99",
+    "new-context: 42",
+    // `runInThisContext` runs in /bin/node's global scope, which has no `sandbox`.
+    "this-context: undefined",
+    "script: 9",
+    "compile: 5",
+  ]);
+});
