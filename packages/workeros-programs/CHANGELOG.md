@@ -8,6 +8,19 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:zlib`** (`src/node/zlib.js`). Gzip/DEFLATE for the guest, one-shot sync
+  + async. As with `node:crypto`, Node's API is *synchronous* (Vite's build
+  reporter calls `gzipSync` inline) but the browser's only compressor,
+  `CompressionStream`, is async-only — so the sync core is self-contained here: a
+  full RFC-1951 INFLATE and a fixed-Huffman + LZ77 DEFLATE, wrapped for gzip
+  (RFC 1952, CRC-32) and zlib (RFC 1950, Adler-32). Covers `{gzip,gunzip,deflate,
+  inflate,deflateRaw,inflateRaw,unzip}Sync`, their async-callback forms,
+  `zlib.crc32`, and `constants`. Cross-validated against **real Node's zlib** in
+  both directions in `tools/zlib.test.js` (Node's inflate decodes ours; our
+  inflate decodes Node's dynamic-Huffman output). Honest surface (INV-5): the
+  encoder emits valid fixed-Huffman blocks (a little ratio for a small verifiable
+  codec); Brotli has no host/JS backing and is *absent*, and streaming classes
+  (`createGzip`, …) are a follow-up.
 - **`node:crypto`** (`src/node/crypto.js`). A guest builtin covering the sync
   surface build tooling (Vite) and most of npm reach for. Two honest sources,
   split by what the browser does *synchronously* (Node's crypto API is sync):

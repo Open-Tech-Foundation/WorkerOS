@@ -24,6 +24,7 @@ export const NODE_BUILTINS = new Set([
   "net",
   "http",
   "crypto",
+  "zlib",
 ]);
 
 export const isBuiltinSpec = (spec) => spec.startsWith("node:") || NODE_BUILTINS.has(spec);

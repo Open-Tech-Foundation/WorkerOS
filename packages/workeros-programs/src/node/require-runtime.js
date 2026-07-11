@@ -25,6 +25,7 @@ import { util as utilModule } from "./util.js";
 import { createNet } from "./net.js";
 import { createHttp } from "./http.js";
 import { crypto as cryptoModule } from "./crypto.js";
+import { zlib as zlibModule } from "./zlib.js";
 
 // ---- core builtins --------------------------------------------------------
 // `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
@@ -60,6 +61,7 @@ export function makeBuiltins(sys, extras) {
     ["net", net],
     ["http", http],
     ["crypto", cryptoModule],
+    ["zlib", zlibModule],
   ]);
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.
