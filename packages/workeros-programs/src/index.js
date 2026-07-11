@@ -132,9 +132,14 @@ export const libraries = [
   { path: "/lib/workeros-node/child-process.js", source: () => fetchText("./node/child-process.js") },
   { path: "/lib/workeros-node/worker-threads.js", source: () => fetchText("./node/worker-threads.js") },
   { path: "/lib/workeros-node/wasm-codec.js", source: () => fetchText("./node/wasm-codec.js") },
+  { path: "/lib/workeros-node/node-bundler.js", source: () => fetchText("./node/node-bundler.js") },
   // The codec wasm (crates/workeros-codec) — a binary library. `fetchBytes` returns
   // null when it isn't built, so zlib/crypto transparently use their JS fallback.
   { path: "/lib/workeros-codec/codec.wasm", source: () => fetchBytes("./codec/codec.wasm") },
+  // The node-bundler wasm (crates/workeros-node-bundler) — the oxc ESM→module-runner
+  // transform that lets /bin/node load ESM (cycles + require(esm)) through the CJS
+  // runtime. `fetchBytes` returns null when it isn't built.
+  { path: "/lib/workeros-node-bundler/bundler.wasm", source: () => fetchBytes("./node-bundler/bundler.wasm") },
   // Archive framing shared by /bin/tar, /bin/zip, /bin/unzip. Pure bytes-in/out;
   // zip takes the node:zlib codec by injection (no cross-tree import).
   { path: "/lib/workeros-archive/tar.js", source: () => fetchText("./archive/tar.js") },
