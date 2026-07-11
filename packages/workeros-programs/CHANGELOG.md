@@ -140,6 +140,12 @@ guest runtime. Format:
   still probe. This keeps one timer implementation in `event-loop.js` and exposes
   the standard module entrypoint many packages import directly. Covered by
   `tools/timers.test.js`.
+- **`node:timers/promises`** (`src/node/timers-promises.js`). Promise and
+  async-iterator timer helpers over the same event-loop-backed globals:
+  `setTimeout`, `setImmediate`, `setInterval`, and `scheduler.wait`/`yield`.
+  Supports the common `{ ref: false, signal }` options and aborts with
+  `AbortError`, while keeping all real scheduling in `event-loop.js` rather than
+  duplicating timer logic. Covered by `tools/timers-promises.test.js`.
 - **Node event-loop keep-alive** (`src/node/event-loop.js`, `node-program.js`).
   `/bin/node` returned to the program worker the instant the script's synchronous
   top level settled, so a top-level `setInterval`/`setTimeout` never fired (the

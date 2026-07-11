@@ -24,6 +24,7 @@ export const NODE_BUILTINS = new Set([
   "util",
   "stream",
   "timers",
+  "timers/promises",
   "net",
   "http",
   "crypto",
