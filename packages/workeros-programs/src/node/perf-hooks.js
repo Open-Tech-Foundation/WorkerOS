@@ -140,10 +140,15 @@ function timerify(fn, options = {}) {
 
 // Expose the browser Performance object with Node's two additional helpers. Most
 // workers let us extend it; use a binding proxy only on hosts that freeze it.
+//
+// `timerify` is always our own: it pairs with our `createHistogram()`, so it must
+// not defer to a host native `timerify` (Node's rejects any histogram that isn't
+// its internal RecordableHistogram). `eventLoopUtilization` has no such coupling,
+// so we keep a host-native one when present and only fill it in otherwise.
 const extendPerformance = () => {
   try {
     if (!hostPerformance.eventLoopUtilization) hostPerformance.eventLoopUtilization = eventLoopUtilization;
-    if (!hostPerformance.timerify) hostPerformance.timerify = timerify;
+    hostPerformance.timerify = timerify;
     return hostPerformance;
   } catch {
     return new Proxy(hostPerformance, {

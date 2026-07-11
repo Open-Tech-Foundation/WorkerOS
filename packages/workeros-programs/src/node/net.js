@@ -126,6 +126,10 @@ export function createNet(sys, EventEmitter) {
       this.emit("close", false);
     }
 
+    // Node's abrupt close: on a loopback pipe there is no RST to send, so this is
+    // an immediate destroy (the peer sees EOF on its next read — INV-6).
+    resetAndDestroy() { return this.destroy(); }
+
     // Tuning knobs Node exposes that have no meaning on a loopback pipe (INV-5).
     setNoDelay() { return this; }
     setKeepAlive() { return this; }
@@ -186,6 +190,12 @@ export function createNet(sys, EventEmitter) {
 
     address() { return { address: "127.0.0.1", family: "IPv4", port: this._port }; }
 
+    // A listening server holds the event loop open (like Node); unref() lets the
+    // process exit while it keeps listening, ref() re-arms it. Idempotent via the
+    // same _refd flag listen()/close() manage.
+    ref() { if (!this._refd) { this._refd = true; loop()?.ref(); } return this; }
+    unref() { if (this._refd) { this._refd = false; loop()?.unref(); } return this; }
+
     close(cb) {
       this.listening = false;
       if (this._refd) { this._refd = false; loop()?.unref(); }
@@ -216,12 +226,119 @@ export function createNet(sys, EventEmitter) {
 
   const createServer = (opts, connectionListener) => new Server(opts, connectionListener);
 
+  // net.SocketAddress — a value object describing an address/port/family, used by
+  // BlockList and returned by newer socket APIs.
+  class SocketAddress {
+    constructor(options = {}) {
+      const family = (options.family || "ipv4").toLowerCase();
+      if (family !== "ipv4" && family !== "ipv6") {
+        throw new TypeError('The "family" argument must be one of: "ipv4", "ipv6"');
+      }
+      this.address = options.address || (family === "ipv4" ? "127.0.0.1" : "::");
+      this.port = options.port | 0;
+      this.family = family;
+      this.flowlabel = options.flowlabel | 0;
+    }
+  }
+
+  // net.BlockList — an allow/deny set of addresses, ranges, and subnets. WorkerOS
+  // is loopback-only, but packages and Node's tests construct and query these, so
+  // the rule engine is implemented for IPv4 (IPv6 is compared literally).
+  const ipv4ToInt = (s) => {
+    const parts = String(s).split(".");
+    if (parts.length !== 4) return null;
+    let n = 0;
+    for (const p of parts) {
+      const b = Number(p);
+      if (!Number.isInteger(b) || b < 0 || b > 255) return null;
+      n = n * 256 + b;
+    }
+    return n >>> 0;
+  };
+  const addrOf = (value, family) =>
+    value instanceof SocketAddress ? value.address : String(value);
+  const familyOf = (value, family) =>
+    (value instanceof SocketAddress ? value.family : family || "ipv4").toLowerCase();
+
+  class BlockList {
+    constructor() { this.rules = []; }
+    get [Symbol.toStringTag]() { return "BlockList"; }
+
+    addAddress(address, family = "ipv4") {
+      const fam = familyOf(address, family);
+      this.rules.push({ kind: "address", address: addrOf(address, fam), family: fam });
+    }
+    addRange(start, end, family = "ipv4") {
+      const fam = familyOf(start, family);
+      this.rules.push({ kind: "range", start: addrOf(start, fam), end: addrOf(end, fam), family: fam });
+    }
+    addSubnet(net, prefix, family = "ipv4") {
+      const fam = familyOf(net, family);
+      this.rules.push({ kind: "subnet", net: addrOf(net, fam), prefix: prefix | 0, family: fam });
+    }
+    check(address, family = "ipv4") {
+      const fam = familyOf(address, family);
+      const addr = addrOf(address, fam);
+      for (const rule of this.rules) {
+        if (rule.family !== fam) continue;
+        if (fam === "ipv4") {
+          const a = ipv4ToInt(addr);
+          if (a == null) continue;
+          if (rule.kind === "address" && a === ipv4ToInt(rule.address)) return true;
+          if (rule.kind === "range" && a >= ipv4ToInt(rule.start) && a <= ipv4ToInt(rule.end)) return true;
+          if (rule.kind === "subnet") {
+            const base = ipv4ToInt(rule.net);
+            const mask = rule.prefix === 0 ? 0 : (0xffffffff << (32 - rule.prefix)) >>> 0;
+            if ((a & mask) === (base & mask)) return true;
+          }
+        } else if (rule.kind === "address" && rule.address === addr) {
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+
+  // net.Server()/net.Socket() must work with or without `new` (Node calls them
+  // both ways); a Proxy adds the missing call behavior while leaving `new`,
+  // `instanceof`, and subclassing (`class X extends net.Socket`) intact.
+  const callable = (Cls) =>
+    new Proxy(Cls, { apply: (Target, _thisArg, args) => Reflect.construct(Target, args) });
+
   // Loose IP helpers Node exposes; good enough for feature-detection.
   const isIPv4 = (s) => /^(\d{1,3}\.){3}\d{1,3}$/.test(String(s));
   const isIPv6 = (s) => String(s).includes(":");
   const isIP = (s) => (isIPv4(s) ? 4 : isIPv6(s) ? 6 : 0);
 
-  const net = { Server, Socket, createServer, connect, createConnection: connect, isIP, isIPv4, isIPv6 };
+  // Node's Happy Eyeballs tuning state. WorkerOS loopback has no address-family
+  // race, but packages and Node's test harness use these accessors for setup.
+  let autoSelectFamilyAttemptTimeout = 250;
+  const getDefaultAutoSelectFamilyAttemptTimeout = () => autoSelectFamilyAttemptTimeout;
+  const setDefaultAutoSelectFamilyAttemptTimeout = (value) => {
+    const timeout = Number(value);
+    if (!Number.isInteger(timeout) || timeout < 1) {
+      throw new RangeError("attempt timeout must be a positive integer");
+    }
+    autoSelectFamilyAttemptTimeout = timeout;
+  };
+
+  const net = {
+    Server: callable(Server),
+    Socket: callable(Socket),
+    Stream: callable(Socket), // legacy alias Node still exposes
+    BlockList,
+    SocketAddress,
+    createServer,
+    connect,
+    createConnection: connect,
+    isIP,
+    isIPv4,
+    isIPv6,
+    getDefaultAutoSelectFamilyAttemptTimeout,
+    setDefaultAutoSelectFamilyAttemptTimeout,
+    // Windows-only internal Node exposes; a no-op everywhere else.
+    _setSimultaneousAccepts() {},
+  };
   net.default = net;
   return net;
 }

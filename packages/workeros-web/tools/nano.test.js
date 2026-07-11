@@ -58,9 +58,9 @@ test("nano: type text, ^O to write out, ^X to exit — then the shell resumes", 
 
     await waitFor("$");
     os.input("nano /note.txt\r");
-    await waitFor("nano"); // the title bar — nano is up and in raw mode
+    await waitFor("Ln 1, Col 1"); // status bar painted → nano is up and in raw mode
     os.input("hello raw world"); // per-keystroke raw input
-    await sleep(150);
+    await waitFor("hello raw world"); // the buffer shows the typed text
     os.input("\x0f"); // ^O: Write Out (default filename = /note.txt)
     await waitFor("File Name to Write");
     os.input("\r"); // accept the name → save
@@ -136,9 +136,9 @@ test("nano: M-U undoes a typing run and M-E redoes it", opts, async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await waitFor("$");
     os.input("nano /u.txt\r");
-    await waitFor("nano");
+    await waitFor("Ln 1, Col 1"); // status bar painted → nano is up and in raw mode
     os.input("hello world"); // one coalesced typing run
-    await sleep(150);
+    await waitFor("hello world"); // the buffer shows the typed text
     os.input("\x1bu"); // M-U (ESC u): undo → empties the buffer
     await waitFor("Undid change");
     os.input("\x1be"); // M-E (ESC e): redo → restores "hello world"

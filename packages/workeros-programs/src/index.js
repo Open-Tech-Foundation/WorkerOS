@@ -36,7 +36,14 @@ async function fetchBytes(rel) {
 
 /**
  * The installable programs, written to `bin` in the VFS at boot.
- * @type {{ bin: string, type: "js" | "wasm", source: () => Promise<string | ArrayBuffer> }[]}
+ *
+ * Each `js` program ships as a single **self-contained bundle**: the build step
+ * (`tools/bundle.mjs`, esbuild) inlines its `/lib/workeros-*` and relative
+ * imports, so the program reaches the kernel as one module with no imports to
+ * resolve. `entry` is the raw source (the bundler's input); `source` — filled in
+ * below — fetches the built bundle. Dev, tests, and production all load the same
+ * bundle. WASM programs carry their own `source` (raw bytes, not bundled).
+ * @type {{ bin: string, type: "js" | "wasm", entry?: string, source?: () => Promise<string | ArrayBuffer> }[]}
  */
 export const programs = [
   {
@@ -46,44 +53,28 @@ export const programs = [
     // grow Node coverage; the kernel keeps only the native `js` execution core.
     bin: "/bin/node",
     type: "js",
-    source: () => fetchText("./node/node-program.js"),
+    entry: "./node/node-program.js",
   },
-  {
-    bin: "/bin/npm",
-    type: "js",
-    source: () => fetchText("./npm/npm-program.js"),
-  },
-  {
-    bin: "/bin/curl",
-    type: "js",
-    source: () => fetchText("./curl/curl-program.js"),
-  },
+  { bin: "/bin/npm", type: "js", entry: "./npm/npm-program.js" },
+  { bin: "/bin/curl", type: "js", entry: "./curl/curl-program.js" },
   // Archive/compression tools — day-to-day CLIs over node:zlib + the shared
   // /lib/workeros-archive framing. `gzip`/`gunzip`/`zcat` are one program that
   // dispatches on its invoked name.
-  { bin: "/bin/gzip", type: "js", source: () => fetchText("./gzip/gzip-program.js") },
-  { bin: "/bin/gunzip", type: "js", source: () => fetchText("./gzip/gzip-program.js") },
-  { bin: "/bin/zcat", type: "js", source: () => fetchText("./gzip/gzip-program.js") },
-  { bin: "/bin/tar", type: "js", source: () => fetchText("./tar/tar-program.js") },
-  { bin: "/bin/zip", type: "js", source: () => fetchText("./zip/zip-program.js") },
-  { bin: "/bin/unzip", type: "js", source: () => fetchText("./unzip/unzip-program.js") },
+  { bin: "/bin/gzip", type: "js", entry: "./gzip/gzip-program.js" },
+  { bin: "/bin/gunzip", type: "js", entry: "./gzip/gzip-program.js" },
+  { bin: "/bin/zcat", type: "js", entry: "./gzip/gzip-program.js" },
+  { bin: "/bin/tar", type: "js", entry: "./tar/tar-program.js" },
+  { bin: "/bin/zip", type: "js", entry: "./zip/zip-program.js" },
+  { bin: "/bin/unzip", type: "js", entry: "./unzip/unzip-program.js" },
   {
     // `nano` — a small modeless full-screen text editor. A TUI: it drives the
     // terminal in raw mode (tcsetattr) and paints frames itself.
     bin: "/bin/nano",
     type: "js",
-    source: () => fetchText("./nano/nano-program.js"),
+    entry: "./nano/nano-program.js",
   },
-  {
-    bin: "/bin/sh",
-    type: "js",
-    source: () => fetchText("./sh/sh-program.js"),
-  },
-  {
-    bin: "/bin/bash",
-    type: "js",
-    source: () => fetchText("./sh/sh-program.js"),
-  },
+  { bin: "/bin/sh", type: "js", entry: "./sh/sh-program.js" },
+  { bin: "/bin/bash", type: "js", entry: "./sh/sh-program.js" },
   {
     // `grep` — a Rust `regex` binary compiled to wasm32-wasip1 (crates/wsh-grep),
     // run through the WASI host. Built by `npm run build:grep` into ./grep/.
@@ -92,6 +83,14 @@ export const programs = [
     source: () => fetchBytes("./grep/grep.wasm"),
   },
 ];
+
+// Load a bundled program: its source `entry` (e.g. `./node/node-program.js`) is
+// built to `./bundles/node/node-program.js` (tools/bundle.mjs). Fetched
+// same-origin like any other program text — the boot image sees one flat module.
+const bundledText = (entry) => fetchText(entry.replace(/^\.\//, "./bundles/"));
+for (const prog of programs) {
+  if (prog.type === "js" && prog.entry) prog.source = () => bundledText(prog.entry);
+}
 
 /**
  * Guest runtime *library* files installed into the VFS at boot (not `/bin`

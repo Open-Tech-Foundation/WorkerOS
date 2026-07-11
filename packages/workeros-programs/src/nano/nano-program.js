@@ -10,8 +10,11 @@
 // the saved termios and the main screen. It also honors SIGWINCH, re-querying
 // the window size and re-laying-out when the terminal is resized.
 //
-// Authored as a plain top-level-await script (no import/export) so it runs
-// through the program worker's ESM path, which awaits top-level await.
+// Authored as a top-level-await ESM script: it pulls the shared argv tokenizer
+// from the VFS (like every other program) and otherwise runs straight through
+// the program worker's ESM path, which awaits top-level await.
+
+import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -1646,7 +1649,6 @@ async function main() {
   // Args: flags then a filename. `-l`/`--linenumbers`, `-L`/`--nolinenumbers`.
   let arg = null;
   try {
-    const { ArgError, tokenizeArgv } = await import("/lib/workeros-cli/args.js");
     for (const tok of tokenizeArgv(sys.argv.slice(1), {
       shortAlias: { l: "linenumbers", L: "nolinenumbers" },
       stopAtFirstOperand: true,

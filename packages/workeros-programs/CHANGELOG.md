@@ -8,6 +8,14 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:net` API surface** (`src/node/net.js`). `net.Server`/`net.Socket` are now
+  callable with or without `new` (via a Proxy that preserves `instanceof` and
+  `class X extends net.Socket` subclassing); added `Server.ref()`/`unref()`, the
+  legacy `net.Stream` alias, `socket.resetAndDestroy()`, `net.SocketAddress`, a
+  functional IPv4 `net.BlockList` (address/range/subnet `check`), and the
+  Windows-only `net._setSimultaneousAccepts` no-op. Clears the bulk of the
+  "cannot be invoked without new" / missing-constructor failures in the official
+  `net` compat suite.
 - **`node:util/types`** (`src/node/util.js`). Exposes the complete Node v22.23.1
   public predicate surface as the same object available at `util.types`, including
   typed-array/view, boxed primitive, iterator, generator, promise, collection,
