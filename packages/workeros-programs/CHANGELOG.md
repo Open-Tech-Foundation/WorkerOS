@@ -8,6 +8,11 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:util/types`** (`src/node/util.js`). Exposes the complete Node v22.23.1
+  public predicate surface as the same object available at `util.types`, including
+  typed-array/view, boxed primitive, iterator, generator, promise, collection,
+  module-namespace, and CryptoKey checks. V8-only external/key/proxy detection
+  returns an honest `false` in the browser host. Registered for CJS and ESM.
 - **ESM import cycles via an oxc runner** (`crates/workeros-node-bundler`,
   `src/node/node-bundler.js`, `src/node/esm-runner.js`, `src/node/node-program.js`).
   The browser's native ESM loader (which `/bin/node` used to stitch blobs onto)
@@ -25,6 +30,14 @@ guest runtime. Format:
   the real wasm: a two-module cycle and later-exported live bindings execute correctly
   (`tools/esm-runner.test.js`), and `node a.js` with `a.js ⇄ b.js` runs in a booted
   kernel (`workeros-web`'s `tools/esm-resolve.test.js`).
+  Also completes **`require(esm)`** — a CommonJS module synchronously `require()`-ing
+  an ES module (Node allows it for modules without top-level await). Loading is
+  already synchronous (the `fs` is sync), so the runner strips the `await` the
+  transform inserts before each static import and runs the module as a plain function
+  with a synchronous import hook; the CJS loader (`module.js`) detects an ESM target
+  and returns its namespace. A module with real top-level await surfaces as a require
+  failure, as in Node. Covered by `tools/esm-runner.test.js` (sync load) and end to
+  end (`workeros-web`'s `tools/cjs-in-esm.test.js`).
 - **`node:worker_threads`** (`src/node/worker-threads.js`). Real background
   threads: `Worker`, `parentPort`, `isMainThread`, `threadId`, `workerData`,
   `MessageChannel`/`MessagePort`, `terminate()`, and the `getEnvironmentData`/

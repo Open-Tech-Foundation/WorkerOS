@@ -83,5 +83,56 @@ export function createEsmRunner({ fs, path, resolver, transform, detectFormat, m
     return exports;
   };
 
-  return { load, importFrom, registry };
+  // ---- synchronous path (require(esm)) --------------------------------------
+  // Node lets a CommonJS module `require()` an ES module (without top-level await).
+  // Loading is already synchronous here (the `fs` is sync), so the only async in a
+  // transformed module is the `await` the transform puts before each *static*
+  // `__workeros_import__`. Strip that and run the body as a plain function with a
+  // synchronous import hook — static imports resolve inline, so the whole graph
+  // loads synchronously. A module with real top-level `await` becomes an `await`
+  // outside an async function → a SyntaxError, which surfaces as a require failure,
+  // exactly as Node rejects `require()` of an async ES module. (Dynamic `import()`
+  // keeps its own `await` and its async hook — it still returns a promise.)
+  const importFromSync = (fromDir, spec) => {
+    if (isBuiltinSpec(spec)) {
+      const key = builtinKey(spec);
+      if (!registry.has(key)) registry.set(key, interopNamespace(getBuiltin(key)));
+      return registry.get(key);
+    }
+    const abs = resolver.resolveFrom(fromDir, spec);
+    if (!abs) throw new Error(`Cannot find module '${spec}' from '${fromDir}'`);
+    return loadSync(abs);
+  };
+
+  const loadSync = (abs) => {
+    const existing = registry.get(abs);
+    if (existing) return existing;
+    const source = fs.readFileSync(abs, "utf8");
+    if (detectFormat(source, abs, { fs, path }) === "cjs") {
+      const ns = interopNamespace(loadCjs(abs));
+      registry.set(abs, ns);
+      return ns;
+    }
+    const exports = Object.create(null);
+    registry.set(abs, exports);
+    const code = transform(source).replaceAll("await __workeros_import__(", "__workeros_import__(");
+    const dir = path.dirname(abs);
+    // eslint-disable-next-line no-new-func
+    const fn = new Function(
+      "__workeros_import__",
+      "__workeros_exports__",
+      "__workeros_dynamic_import__",
+      "__workeros_import_meta__",
+      code,
+    );
+    fn(
+      (s) => importFromSync(dir, s),
+      exports,
+      (s) => importFrom(dir, s), // dynamic import() stays async → returns a promise
+      makeMeta(abs),
+    );
+    return exports;
+  };
+
+  return { load, loadSync, importFrom, registry };
 }

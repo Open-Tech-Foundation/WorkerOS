@@ -104,3 +104,37 @@ test("CJS entry dynamically import()s an ESM module (reverse interop)", opts, as
   assert.equal(result.code, 0, result.err);
   assert.deepEqual(result.out.trim().split("\n"), ["req: cjs-dep", "imp-default: 6", "imp-named: 9"]);
 });
+
+test("CJS entry require()s an ES module synchronously (require(esm))", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const files = {
+        // A CommonJS entry that synchronously require()s an ES module — Node allows
+        // this for ESM without top-level await. Returns the module namespace.
+        "/proj/app.js": [
+          "const esm = require('./mod.mjs');",
+          "console.log('default:', esm.default);",
+          "console.log('named:', esm.add(2, 3));",
+          "console.log('keys:', Object.keys(esm).sort().join(','));",
+        ].join("\n"),
+        "/proj/mod.mjs": [
+          "import { base } from './base.mjs';",
+          "export const add = (a, b) => a + b + base;",
+          "export default 'esm-default';",
+        ].join("\n"),
+        "/proj/base.mjs": "export const base = 0;\n",
+      };
+      for (const [p, src] of Object.entries(files)) await os.fs.write(p, src);
+      return await window.run(os, ["node", "app.js"], { cwd: "/proj" });
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.out.trim().split("\n"), [
+    "default: esm-default",
+    "named: 5",
+    "keys: add,default",
+  ]);
+});

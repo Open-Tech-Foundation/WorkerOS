@@ -20,7 +20,7 @@ function moduleNotFound(spec, fromDir) {
   return e;
 }
 
-export function createModule({ fs, path, url, builtins }) {
+export function createModule({ fs, path, url, builtins, detectFormat }) {
   const cache = new Map(); // absPath → module.exports
   const moduleObjs = new Map(); // absPath → the CJS `module` object (for require.main identity)
   // The process's entry `module` (Node's `require.main` / `process.mainModule`) —
@@ -61,6 +61,20 @@ export function createModule({ fs, path, url, builtins }) {
       const val = JSON.parse(fs.readFileSync(absPath, "utf8"));
       cache.set(absPath, val);
       return val;
+    }
+    // `require(esm)`: a CommonJS module requiring an ES module (Node allows it for
+    // modules without top-level await). Hand it to the synchronous ESM runner
+    // (`/bin/node` installs `__workerosRequireEsm`) and cache the returned namespace.
+    if (detectFormat && !absPath.endsWith(".cjs")) {
+      const src = fs.readFileSync(absPath, "utf8");
+      if (detectFormat(src, absPath, { fs, path }) === "esm") {
+        if (!globalThis.__workerosRequireEsm) {
+          throw new Error("require() of ES Module " + absPath + " is not supported in this context");
+        }
+        const ns = globalThis.__workerosRequireEsm(absPath);
+        cache.set(absPath, ns);
+        return ns;
+      }
     }
     const module = {
       exports: {},

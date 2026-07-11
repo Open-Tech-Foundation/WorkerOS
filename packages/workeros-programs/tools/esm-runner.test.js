@@ -76,6 +76,22 @@ test("a two-module import cycle executes correctly through the runner", opts, as
   assert.equal(a.getA(), "A");
 });
 
+test("loadSync: require(esm)-style synchronous load of an ES module graph", opts, () => {
+  const runner = runnerOver({
+    "/p/main.js": [
+      "import { twice } from './util.js';",
+      "export const four = twice(2);",
+      "export function run() { return twice(5); }",
+      "export default 'main';",
+    ].join("\n"),
+    "/p/util.js": "export const twice = (n) => n * 2;\n",
+  });
+  const ns = runner.loadSync("/p/main.js"); // synchronous — no await, no promise
+  assert.equal(ns.four, 4);
+  assert.equal(ns.run(), 10);
+  assert.equal(ns.default, "main");
+});
+
 test("live bindings: a value exported later is seen through the cycle", opts, async () => {
   const runner = runnerOver({
     "/p/x.js": [

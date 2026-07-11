@@ -72,6 +72,7 @@ export function makeBuiltins(sys, extras) {
     ["string_decoder", stringDecoderModule],
     ["events", EventEmitter],
     ["util", utilModule],
+    ["util/types", utilModule.types],
     ["stream", streamModule],
     ["timers", timers],
     ["timers/promises", timersPromises],
@@ -88,7 +89,7 @@ export function makeBuiltins(sys, extras) {
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.
   reg.set("module", null);
-  reg.set("module", createModule({ fs, path, url, builtins: reg }));
+  reg.set("module", createModule({ fs, path, url, builtins: reg, detectFormat }));
   if (extras) for (const [k, v] of Object.entries(extras)) if (v !== undefined) reg.set(k, v);
   return reg;
 }
@@ -177,7 +178,7 @@ export function createNodeRuntime(sys, extras) {
         return fs.readFileSync(p, options);
       },
     };
-    const mod = createModule({ fs: shadowFs, path, url, builtins });
+    const mod = createModule({ fs: shadowFs, path, url, builtins, detectFormat });
     builtins.set("module", mod);
     mod._loadMain(entryPath); // the entry is the process main: require.main === module
   };

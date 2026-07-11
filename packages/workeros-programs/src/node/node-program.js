@@ -446,6 +446,13 @@ const evalEsm = async (abs, source, isFile = true) => {
   }
 };
 
+// `require(esm)` — a CommonJS module synchronously requiring an ES module (Node
+// allows this for modules without top-level await). The CJS loader (`module.js`)
+// calls this with a resolved ESM file; the runner loads it synchronously and
+// returns its namespace. A module with real top-level await surfaces as a require
+// failure, as in Node.
+globalThis.__workerosRequireEsm = (abs) => getRunner().loadSync(abs);
+
 // `import.meta` for a module: a real `file://` URL plus fs-derived
 // filename/dirname and a `resolve()` that runs the same resolver (as Node's
 // `import.meta.resolve`). This is what `createRequire(import.meta.url)`,
