@@ -14,6 +14,7 @@ import { createLineEditor } from "./shell/readline.js";
 import { coreutils } from "../../workeros-coreutils/src/index.js";
 import { programs as osPrograms, libraries as osLibraries } from "../../workeros-programs/src/index.js";
 import { allocSyncBuffer, readRequest, requestBytes, writeResponse } from "./sync-syscall.js";
+import { frameExecResult } from "./exec-frame.js";
 import { openPersistence } from "./persistence.js";
 
 const enc = new TextEncoder();
@@ -268,6 +269,31 @@ const PROGRAM_WORKER_URL = new URL("./program-worker.js", import.meta.url);
 
 function post(msg) {
   self.postMessage(msg);
+}
+
+/** Concatenate a list of Uint8Array chunks into one. */
+function concatChunks(chunks) {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+
+/** Run `line` through the shell driver with output *captured* (not routed to a
+ *  process's streams), feeding `input` as its stdin. Resolves the child's exit
+ *  code with the collected stdout/stderr — the primitive `child_process` builds
+ *  on for both its async (`execCapture`) and sync (`execCaptureSync`) syscalls. */
+function runCaptured(line, input) {
+  const outChunks = [];
+  const errChunks = [];
+  const sink = { stdout: (b) => outChunks.push(b), stderr: (b) => errChunks.push(b) };
+  return shell.exec(line, sink, input).then((code) => ({
+    code: code | 0,
+    stdout: concatChunks(outChunks),
+    stderr: concatChunks(errChunks),
+  }));
 }
 
 // ---- process lifecycle -----------------------------------------------------
@@ -571,6 +597,18 @@ function serviceSync(pid) {
         kernel.sys_rename(pid, req.from, req.to);
         writeResponse(rec.syncSab, 0, {});
         break;
+      case "execCapture": {
+        // node:child_process synchronous forms (execSync/spawnSync/…). The guest
+        // thread is parked on Atomics.wait; the shell driver runs async on *this*
+        // (kernel) thread — spawning the child worker, servicing its syscalls —
+        // and we write the framed { code, stdout, stderr } back when it exits,
+        // waking the guest. `input` (this request's payload) is the child's stdin.
+        const input = requestBytes(rec.syncSab);
+        runCaptured(req.line, input.length ? input : undefined)
+          .then((res) => writeResponse(rec.syncSab, 0, frameExecResult(res.code, res.stdout, res.stderr)))
+          .catch((e) => writeResponse(rec.syncSab, -1, { error: String(e && e.message ? e.message : e) }));
+        return; // response is written asynchronously above (no immediate write)
+      }
       default:
         writeResponse(rec.syncSab, -1, { error: "unknown sync call: " + req.call });
     }
@@ -747,6 +785,15 @@ function handleSyscall(pid, msg) {
         shell
           .exec(args.line, sink)
           .then((code) => reply(pid, id, true, code | 0))
+          .catch((e) => reply(pid, id, false, String(e && e.message ? e.message : e)));
+        break; // reply happens asynchronously above
+      }
+      case "execCapture": {
+        // node:child_process (async): run a command with its output *captured*
+        // and stdin fed from `args.input`, replying with { code, stdout, stderr }
+        // once it exits. Bytes ride the structured-clone reply directly.
+        runCaptured(args.line, args.input && args.input.length ? args.input : undefined)
+          .then((res) => reply(pid, id, true, res))
           .catch((e) => reply(pid, id, false, String(e && e.message ? e.message : e)));
         break; // reply happens asynchronously above
       }

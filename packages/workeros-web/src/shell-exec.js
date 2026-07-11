@@ -12,7 +12,7 @@
 // so the kernel (Rust) decides *what* happens (parse, resolve, spawn, VFS) and
 // this driver performs the async plumbing between those kernel-owned steps.
 
-import { createInterpreter } from "./shell/interp.js";
+import { createInterpreter, StdinReader } from "./shell/interp.js";
 
 const enc = new TextEncoder();
 
@@ -141,9 +141,15 @@ export function createShell({ kernel, startProcess, session, readLine }) {
 
   const interp = createInterpreter({ runtime, session });
 
-  /** Run a full command line / script; stream output to `sink`; resolve exit code. */
-  async function exec(line, sink) {
-    const io = { stdin: null, out: (b) => sink.stdout(b), err: (b) => sink.stderr(b) };
+  /** Run a full command line / script; stream output to `sink`; resolve exit code.
+   *  `input` (optional bytes) is fed as the command's stdin — the path
+   *  `child_process`'s `execCapture` uses to deliver a child's piped input. */
+  async function exec(line, sink, input) {
+    const io = {
+      stdin: input && input.length ? new StdinReader(input) : null,
+      out: (b) => sink.stdout(b),
+      err: (b) => sink.stderr(b),
+    };
     try {
       return await interp.run(line, io);
     } catch (e) {

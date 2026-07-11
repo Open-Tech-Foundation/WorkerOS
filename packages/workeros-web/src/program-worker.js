@@ -17,6 +17,7 @@ import { MSG } from "./protocol.js";
 import { ProcessExit } from "../../workeros-programs/src/node/process-shim.js";
 import { createWasiImports } from "../../workeros-programs/src/wasi/host.js";
 import { makeSyncCaller } from "./sync-syscall.js";
+import { unframeExecResult } from "./exec-frame.js";
 
 const kernel = self; // the kernel worker created us; postMessage talks back to it.
 
@@ -149,6 +150,22 @@ function makeSys(start, syncCall) {
     // routed to this process's streams. Resolves with the exit code. Used by `npm
     // run`. The kernel worker services it with the shell driver.
     exec: (line) => call("exec", { line }),
+    // node:child_process. `execCapture` runs a command with its stdout/stderr
+    // *captured* (not routed to this process's streams) and `input` fed as its
+    // stdin, resolving with { code, stdout, stderr }. `execCaptureSync` is the
+    // blocking form over the SAB channel — the guest parks while the kernel worker
+    // runs the child, then unpacks the framed result. (Output is capped at the
+    // sync channel's 1 MiB payload — the same bound as Node's default maxBuffer.)
+    execCapture: (line, input) => call("execCapture", { line, input }),
+    execCaptureSync: (line, input) => {
+      const r = syncCall("execCapture", { line }, true, input || undefined);
+      if (r.status < 0) {
+        let msg = "execCapture failed";
+        try { msg = JSON.parse(new TextDecoder().decode(r.bytes)).error; } catch {}
+        throw new Error(msg);
+      }
+      return unframeExecResult(r.bytes);
+    },
     // Port-keyed loopback sockets (`otf:net_*`, ADR-021). A connection is a pair
     // of pipe fds; read/write it with the ordinary `sys.read`/`sys.write` above.
     // `netListen` → listener id; `netConnect` → `{ rfd, wfd }`; `netAccept`

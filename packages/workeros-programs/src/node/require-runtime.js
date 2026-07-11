@@ -25,6 +25,7 @@ import { stream as streamModule } from "./stream.js";
 import { createTimers } from "./timers.js";
 import { createTimersPromises } from "./timers-promises.js";
 import { zlib as zlibModule } from "./zlib.js";
+import { createChildProcess } from "./child-process.js";
 
 // ---- core builtins --------------------------------------------------------
 // `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
@@ -49,6 +50,9 @@ export function makeBuiltins(sys, extras) {
   const http = createHttp(sys, EventEmitter, net);
   const timers = createTimers(globalThis);
   const timersPromises = createTimersPromises(globalThis);
+  // `child_process` runs sub-commands through the shell driver over two syscalls
+  // the runtime adds (`execCapture`/`execCaptureSync`); pure over `sys`, like net.
+  const childProcess = createChildProcess(sys);
   const reg = new Map([
     ["fs", fs],
     ["fs/promises", fs.promises],
@@ -69,6 +73,7 @@ export function makeBuiltins(sys, extras) {
     ["http", http],
     ["crypto", cryptoModule],
     ["zlib", zlibModule],
+    ["child_process", childProcess],
   ]);
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.

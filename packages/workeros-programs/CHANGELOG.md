@@ -8,6 +8,25 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:child_process`** (`src/node/child-process.js`). Running sub-processes
+  from a Node program — `spawn`, `exec`, `execFile`, `fork`, and the synchronous
+  `execSync` / `execFileSync` / `spawnSync`. GUEST code (INV-1): a child is just
+  another command run through the same `wsh` driver a terminal uses, reached over
+  two syscalls the runtime adds on top of `exec` — `execCapture` (async) and
+  `execCaptureSync` (blocking, over the SAB channel) — which run a command with
+  its stdout/stderr *captured* (not routed to the parent's streams) and feed piped
+  stdin, handing back `{ code, stdout, stderr }`. `cwd`/`env` options are honored
+  via an isolating subshell (`( cd …; export …; cmd )`) so they never leak into
+  the shared shell session; `execFile`/`spawn` quote each arg literally (no shell
+  interpretation), matching Node's no-shell semantics. The synchronous forms block
+  the guest thread on the sync channel while the kernel worker runs the child on
+  its own thread. Honest limits (INV-5): output is buffered and delivered at child
+  exit (no live streaming — `spawn().stdout` emits its `data` once at close);
+  `kill()` is a best-effort flag (a running child can't be signalled); `fork()`
+  runs `node <module>` but has no IPC channel; sync output is capped at the sync
+  channel's 1 MiB (the same bound as Node's default `maxBuffer`). Unit-tested over
+  a fake `sys`, and driven end-to-end in a booted kernel
+  (`workeros-web`'s `tools/child-process.test.js`).
 - **`npm install -g` + `npm create` / `npm init <initializer>`**
   (`src/npm/npm-program.js`). Two package-manager gaps, both kept in userland
   (INV-1 — the kernel learns nothing). `npm install -g <pkg>` installs into the

@@ -28,7 +28,7 @@ class ContinueSignal { constructor(n) { this.n = n; } }
 
 // A shared, mutable cursor over piped/redirected stdin. Passed by reference so
 // successive `read` calls (e.g. inside `while read line`) advance the same input.
-class StdinReader {
+export class StdinReader {
   constructor(bytes) { this.s = bytes ? dec.decode(bytes) : ""; this.pos = 0; }
   eof() { return this.pos >= this.s.length; }
   readLine() {
