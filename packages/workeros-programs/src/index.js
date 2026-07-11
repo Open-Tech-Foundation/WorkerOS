@@ -108,4 +108,5 @@ export const libraries = [
   { path: "/lib/workeros-node/esm-graph.js", source: () => fetchText("./node/esm-graph.js") },
   { path: "/lib/workeros-node/net.js", source: () => fetchText("./node/net.js") },
   { path: "/lib/workeros-node/http.js", source: () => fetchText("./node/http.js") },
+  { path: "/lib/workeros-node/crypto.js", source: () => fetchText("./node/crypto.js") },
 ];

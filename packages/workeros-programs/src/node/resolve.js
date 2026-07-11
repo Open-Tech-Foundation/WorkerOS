@@ -23,6 +23,7 @@ export const NODE_BUILTINS = new Set([
   "util",
   "net",
   "http",
+  "crypto",
 ]);
 
 export const isBuiltinSpec = (spec) => spec.startsWith("node:") || NODE_BUILTINS.has(spec);

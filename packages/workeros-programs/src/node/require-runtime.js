@@ -24,11 +24,12 @@ import { EventEmitter } from "./events.js";
 import { util as utilModule } from "./util.js";
 import { createNet } from "./net.js";
 import { createHttp } from "./http.js";
+import { crypto as cryptoModule } from "./crypto.js";
 
 // ---- core builtins --------------------------------------------------------
 // `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
 // not to files in the VFS (PLAN Phase 5·C, B). The registry grows here as more
-// `node:` builtins land (`crypto`, `stream`, …). Exported so `/bin/node`'s ESM
+// `node:` builtins land (`stream`, `zlib`, …). Exported so `/bin/node`'s ESM
 // stitch can synthesize a re-export module for each `node:` import the kernel
 // marked as a builtin edge (Phase 5·C-ESM). The map's keys are the builtin keys
 // the kernel resolves to (see `resolver.rs` `NODE_BUILTINS`).
@@ -58,6 +59,7 @@ export function makeBuiltins(sys, extras) {
     ["util", utilModule],
     ["net", net],
     ["http", http],
+    ["crypto", cryptoModule],
   ]);
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.

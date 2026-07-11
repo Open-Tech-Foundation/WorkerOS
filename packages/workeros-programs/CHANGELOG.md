@@ -8,6 +8,18 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:crypto`** (`src/node/crypto.js`). A guest builtin covering the sync
+  surface build tooling (Vite) and most of npm reach for. Two honest sources,
+  split by what the browser does *synchronously* (Node's crypto API is sync):
+  randomness (`randomBytes`/`randomFillSync`/`randomUUID`/`randomInt`) is backed
+  by the host Web Crypto (`crypto.getRandomValues`), a real CSPRNG; hashing
+  (`createHash`/`createHmac`) is self-contained sync digests — MD5, SHA-1/224/256/
+  384/512 and HMAC over any of them — because the host's only hash
+  (`crypto.subtle.digest`) is async and can't back a sync `.digest()`. Also
+  `timingSafeEqual`, `getHashes`, and `webcrypto` (the host WebCrypto passthrough).
+  Implementing the digests in-guest mirrors the kernel's own `hash.rs` and keeps
+  the kernel ABI generic (INV-1) — a hash is not a primitive the kernel must own.
+  Digests are checked against known-answer vectors in `tools/crypto.test.js`.
 - **`node:events` + `node:util`** (`src/node/events.js`, `src/node/util.js`). Two
   pure builtins depended on transitively by much of npm. `events.js` is a real
   `EventEmitter` (the class packages extend): the full listener surface
