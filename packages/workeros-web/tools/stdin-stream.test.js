@@ -99,3 +99,34 @@ test("raw mode delivers individual keystrokes (arrow-key menus)", opts, async ()
   assert.equal(result.code, 0, "raw-mode reader saw the ESC sequence and exited");
   assert.match(result.out, /^RAW:27,91,66,/);
 });
+
+test("readline.emitKeypressEvents drives an arrow-key menu end-to-end", opts, async () => {
+  const { result, pageErrors } = await withOs(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    // The real prompt-library pattern: emitKeypressEvents + raw mode, then react
+    // to named keys. Records each keypress and submits on Enter.
+    await os.fs.write("/menu.js",
+      "const readline = require('readline');\n" +
+      "readline.emitKeypressEvents(process.stdin);\n" +
+      "process.stdin.setRawMode(true);\n" +
+      "const picks = [];\n" +
+      "process.stdin.on('keypress', (str, key) => {\n" +
+      "  if (key.name === 'return') { console.log('KEYS:' + picks.join(',')); process.exit(0); }\n" +
+      "  picks.push(key.name || str);\n" +
+      "});\n");
+    let out = "";
+    const proc = await os.spawn(["node", "/menu.js"], {});
+    proc.onStdout((b) => (out += dec.decode(b)));
+    await new Promise((r) => setTimeout(r, 400));
+    os.input("\x1b[B"); // Down
+    os.input("\x1b[B"); // Down
+    os.input("\x1b[A"); // Up
+    os.input("\r");     // Enter → submit
+    const code = await Promise.race([proc.exited, new Promise((r) => setTimeout(() => r("TIMEOUT"), 5000))]);
+    return { out: out.trim(), code };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "KEYS:down,down,up");
+});

@@ -224,9 +224,15 @@ guest runtime. Format:
 - **`node:readline`** (`src/node/readline.js`). A pragmatic line-reader over the
   current runtime I/O: `createInterface()`, `question()`, `close()`/`prompt()`,
   the cursor helpers (`cursorTo`/`moveCursor`/`clearLine`/`clearScreenDown`), and
-  a minimal `promises` facade. It intentionally reads whole cooked-stdin lines
-  from the input fd (or a `data`-emitting stream) rather than pretending the
-  runtime already has a raw keypress event stream. Covered by `tools/readline.test.js`.
+  a minimal `promises` facade — plus a **real `emitKeypressEvents`** that decodes
+  the (now evented) `process.stdin` byte stream into Node's `keypress` (str, key)
+  events: printable chars, Enter/Tab/Backspace/Escape/Space, `Ctrl-<letter>`, the
+  arrow keys (CSI + SS3), Home/End/Insert/Delete/PageUp·Down, F1–F12, xterm
+  modifier params (`ESC[1;5A` = Ctrl-Up), shift-Tab, and Alt/meta — buffering a
+  partial escape sequence split across chunks. This is what lets arrow-key prompt
+  libraries (prompts/enquirer/inquirer) drive `process.stdin` in raw mode. Covered
+  by `tools/readline.test.js` + `tools/readline-keypress.test.js`, and end-to-end
+  (an arrow-key menu in a booted kernel) by `workeros-web` `tools/stdin-stream.test.js`.
 - **Node event-loop keep-alive** (`src/node/event-loop.js`, `node-program.js`).
   `/bin/node` returned to the program worker the instant the script's synchronous
   top level settled, so a top-level `setInterval`/`setTimeout` never fired (the
