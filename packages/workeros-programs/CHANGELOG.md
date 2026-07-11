@@ -8,6 +8,22 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **Archive CLIs: `tar`, `gzip`/`gunzip`/`zcat`, `zip`/`unzip`** (`src/tar`,
+  `src/gzip`, `src/zip`, `src/unzip`, `src/archive/{tar,zip}.js`). Day-to-day
+  compression tools as real `/bin` guest programs (INV-1). The container framing
+  lives in a shared, pure, dependency-free `/lib/workeros-archive` library —
+  ustar (POSIX tar) and ZIP (local headers + central directory + EOCD) — with the
+  DEFLATE payload + CRC-32 supplied by `node:zlib` (injected into the zip lib, not
+  imported, so it carries no path coupling to the node tree). `tar` does
+  create/list/extract with bundled or dashed flags, `-z` gzip (auto-detected on
+  extract for `.gz`/`.tgz`), `-f`, `-C`, `-v`; `gzip` follows GNU semantics
+  (in-place `.gz`, `-k`/`-c`/`-d`/`-f`, stdin→stdout, name-dispatched
+  `gunzip`/`zcat`); `zip -r`/`unzip -l`/`-d` round-trip directory trees. The pure
+  libs are cross-validated against **real GNU `tar` and Info-ZIP** in both
+  directions (`tools/{tar,zip}.test.js`); the programs are driven end-to-end in a
+  real booted kernel (`@opentf/workeros-web` `tools/archive-tools.test.js`).
+  Honest scope (INV-5): `zip` writes a fresh archive (no in-place update); the VFS
+  has no mode bits, so default permissions are used.
 - **`node:fs` symlinks + real timestamps** (`src/node/fs.js`). Now that the VFS
   models symlinks and inode times (ADR-022), `fs` exposes them: `symlinkSync`,
   `readlinkSync` (with `'buffer'` encoding), and a proper `lstatSync` that does

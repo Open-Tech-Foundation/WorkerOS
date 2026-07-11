@@ -58,6 +58,15 @@ export const programs = [
     type: "js",
     source: () => fetchText("./curl/curl-program.js"),
   },
+  // Archive/compression tools — day-to-day CLIs over node:zlib + the shared
+  // /lib/workeros-archive framing. `gzip`/`gunzip`/`zcat` are one program that
+  // dispatches on its invoked name.
+  { bin: "/bin/gzip", type: "js", source: () => fetchText("./gzip/gzip-program.js") },
+  { bin: "/bin/gunzip", type: "js", source: () => fetchText("./gzip/gzip-program.js") },
+  { bin: "/bin/zcat", type: "js", source: () => fetchText("./gzip/gzip-program.js") },
+  { bin: "/bin/tar", type: "js", source: () => fetchText("./tar/tar-program.js") },
+  { bin: "/bin/zip", type: "js", source: () => fetchText("./zip/zip-program.js") },
+  { bin: "/bin/unzip", type: "js", source: () => fetchText("./unzip/unzip-program.js") },
   {
     // `nano` — a small modeless full-screen text editor. A TUI: it drives the
     // terminal in raw mode (tcsetattr) and paints frames itself.
@@ -110,4 +119,8 @@ export const libraries = [
   { path: "/lib/workeros-node/http.js", source: () => fetchText("./node/http.js") },
   { path: "/lib/workeros-node/crypto.js", source: () => fetchText("./node/crypto.js") },
   { path: "/lib/workeros-node/zlib.js", source: () => fetchText("./node/zlib.js") },
+  // Archive framing shared by /bin/tar, /bin/zip, /bin/unzip. Pure bytes-in/out;
+  // zip takes the node:zlib codec by injection (no cross-tree import).
+  { path: "/lib/workeros-archive/tar.js", source: () => fetchText("./archive/tar.js") },
+  { path: "/lib/workeros-archive/zip.js", source: () => fetchText("./archive/zip.js") },
 ];
