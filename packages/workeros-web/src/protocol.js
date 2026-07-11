@@ -52,6 +52,12 @@ export const MSG = Object.freeze({
   // kernel worker → program worker: a filesystem change matched one of this
   // process's `fs.watch` registrations. Carries { watchId, eventType, filename }.
   FS_EVENT: "fs_event",
+  // kernel worker → program worker: live stdio/exit of a child this process
+  // spawned via node:child_process (`spawnChild`). Carry { pid, data } / { pid,
+  // code, signal }. Routed to the guest's child dispatcher (`sys.onChildEvent`).
+  CHILD_STDOUT: "child_stdout",
+  CHILD_STDERR: "child_stderr",
+  CHILD_EXIT: "child_exit",
   // program worker → kernel worker
   SYSCALL: "syscall",
   // program worker → kernel worker: the guest installed/removed a handler for a

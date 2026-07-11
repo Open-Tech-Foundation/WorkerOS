@@ -4,9 +4,9 @@
 // either JSON *or* a single raw byte block. `child_process`'s synchronous forms
 // (`execSync`/`spawnSync`/…) need three values back at once — the exit code plus
 // captured stdout *and* stderr — so we pack them into one byte block with a tiny
-// fixed header and unpack it on the guest side. (The async `execCapture` path
-// uses postMessage, whose structured clone carries the fields directly, so it
-// needs none of this.)
+// fixed header and unpack it on the guest side. (The live/streaming async forms
+// go through a different path entirely — `spawnChild` + postMessage'd CHILD_*
+// events — and need none of this.)
 //
 //   [0..4)  int32  exit code (little-endian)
 //   [4..8)  uint32 stdout byte length (little-endian); stderr is the remainder

@@ -1,23 +1,27 @@
 // `node:child_process` — running sub-processes from a WorkerOS Node program.
 //
-// GUEST code (INV-1): the kernel has no `child_process` concept. A child here is
-// just another command run through the same shell driver (`wsh`) that services a
-// terminal command line — reached via two syscalls the runtime adds on top of the
-// existing `exec` primitive:
+// GUEST code (INV-1): the kernel has no `child_process` concept. A child is just
+// another process the kernel spawns; this module drives it over syscalls the
+// runtime adds:
 //
-//   • `sys.execCapture(line, input)`      → Promise<{ code, stdout, stderr }>
-//   • `sys.execCaptureSync(line, input)`  → { code, stdout, stderr } (blocking)
+//   • `sys.spawnChild({ argv, env, cwd, input })` → Promise<{ pid }>
+//   • `sys.onChildEvent(cb)`   cb(pid, "stdout"|"stderr", bytes) / (pid, "exit", {code})
+//   • `sys.childKill(pid, signal)`
+//   • `sys.execCaptureSync(line, input)` → { code, stdout, stderr }  (blocking)
 //
-// Both run `line` as a `wsh` command (PATH + `node_modules/.bin` resolution, glob,
-// redirects — everything a shell does), feed `input` as its stdin, and hand back
-// the exit code with stdout/stderr *captured* (not routed to this process's
-// streams). Every API here is built on those two calls.
+// The async APIs (`spawn`/`exec`/`execFile`/`fork`) launch a *real, live* child:
+// its stdout/stderr stream back **incrementally** (`child.stdout` emits `data` as
+// output arrives, not once at the end), `kill()` really signals it, and the exit
+// code/signal are real. cwd/env are passed to the kernel natively, and the no-shell
+// APIs pass argv verbatim (no shell interpretation). The synchronous forms
+// (`execSync`/`execFileSync`/`spawnSync`) block the guest thread on the SAB channel
+// while the kernel runs the child, then return its buffered output.
 //
-// Honest limits (INV-5): output is buffered and delivered when the child exits —
-// there is no live streaming, so `spawn().stdout` emits its `data` once at close,
-// not incrementally; and a child can't be signalled mid-run (`kill()` is a
-// best-effort flag). `fork()` runs `node <module>` but has no IPC channel. These
-// mirror what the shell driver can currently express, and grow with it.
+// Honest limits (INV-5): stdin is delivered from a temp file collected up to the
+// child's launch (synchronous `stdin.write(...)` + `stdin.end()`), so a slow async
+// drip of stdin *after* launch isn't seen; `fork()` runs `node <module>` but has no
+// IPC channel; synchronous output is capped at the sync channel's 1 MiB (Node's
+// default `maxBuffer`). These grow with the underlying primitives.
 
 import { EventEmitter } from "./events.js";
 import { Buffer } from "./buffer.js";
@@ -27,20 +31,23 @@ const enc = new TextEncoder();
 const toBytes = (v) =>
   v == null ? new Uint8Array(0) : typeof v === "string" ? enc.encode(v) : new Uint8Array(v.buffer || v);
 
-// POSIX single-quote escaping: wrap in '…', and represent an embedded ' as '\''.
-// Used to pass an argv element to the shell as a single literal word — this is
-// what makes `execFile`/`spawn` (no-shell APIs) treat their args verbatim, with
-// no glob/expansion, even when they contain shell metacharacters.
-const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+// Signal name → number, for kill(). A delivered signal hard-exits the child in
+// the kernel (128 + signal), matching the terminal's own kill path.
+const SIGNUM = {
+  SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGUSR1: 10,
+  SIGUSR2: 12, SIGTERM: 15, SIGCONT: 18, SIGSTOP: 19,
+};
 
-// Turn a (file, args) pair into a shell line with every word quoted literally.
+// POSIX single-quote escaping — used only by the synchronous forms, which run
+// through the shell driver (`execCaptureSync`) and so must quote each argv word to
+// keep it literal (no glob/expansion). The async forms pass argv to the kernel
+// directly and need none of this.
+const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 const quoteArgv = (file, args) => [file, ...(args || [])].map(q).join(" ");
 
-// Wrap `line` so it honors `cwd`/`env` without leaking into the shared shell
-// session: a subshell `( … )` snapshots and restores cwd + variables, so a
-// `cd`/`export` here is scoped to this one child. `env` is *merged* onto the
-// inherited environment (not a hard replacement) — the common
-// `{ ...process.env, EXTRA }` case works; a from-scratch env does not (INV-5).
+// Wrap a synchronous command so it honors `cwd`/`env` without leaking into the
+// shared shell session: a subshell `( … )` snapshots and restores cwd + variables.
+// `env` is *merged* onto the inherited environment (not a hard replacement).
 function wrapLine(line, options) {
   const pre = [];
   if (options.cwd != null) pre.push("cd " + q(options.cwd));
@@ -52,10 +59,9 @@ function wrapLine(line, options) {
   return pre.length ? "( " + pre.join("; ") + "; " + line + " )" : line;
 }
 
-// Decode captured bytes per the `encoding` option. `child_process` splits on
-// default: the string APIs (`exec`/`execFile`) default to utf8 text, while the
-// buffer APIs (`execSync`/`spawnSync`) default to a Buffer. `'buffer'` always
-// means a Buffer; any other encoding name means a decoded string.
+// Decode captured bytes per the `encoding` option. The string APIs (`exec`/
+// `execFile`) default to utf8 text; the buffer APIs (`execSync`/`spawnSync`)
+// default to a Buffer. `'buffer'` always means a Buffer.
 function decodeOutput(bytes, encoding, defaultString) {
   const buf = Buffer.from(bytes);
   if (encoding === "buffer") return buf;
@@ -76,23 +82,35 @@ function normalizeOpts(options, callback) {
 }
 
 export function createChildProcess(sys = globalThis.sys) {
-  let nextPid = 90000; // synthetic pids — the shell driver doesn't surface a real one
+  let nextFakePid = 90000; // for the synchronous forms (no real pid surfaced)
+  const children = new Map(); // real pid → live ChildProcess
 
-  // While an async child is running, hold /bin/node's event loop open (as net/http
-  // do for live sockets) so the process doesn't exit the instant the script's
-  // synchronous top level returns — mirroring how a pending child keeps Node alive.
-  // `undefined` outside /bin/node (e.g. a unit test), so guarded.
+  // While a live child runs, hold /bin/node's event loop open (as net/http do for
+  // sockets) so the process doesn't exit before the child's output/exit arrive.
   const refLoop = () => globalThis.__workerosLoop?.ref();
   const unrefLoop = () => globalThis.__workerosLoop?.unref();
 
-  // A one-shot readable side of a child stream: the whole captured output arrives
-  // at once (INV-5 buffered limit), so we emit a single `data` then `end` on the
-  // next tick, after the caller has had a turn to attach listeners.
+  // One dispatcher for every live child: the kernel worker posts a child's stdout/
+  // stderr/exit tagged with its pid; route each to the owning ChildProcess.
+  sys.onChildEvent?.((pid, kind, payload) => {
+    const child = children.get(pid);
+    if (!child) return;
+    if (kind === "stdout") child.stdout._push(payload);
+    else if (kind === "stderr") child.stderr._push(payload);
+    else if (kind === "exit") {
+      children.delete(pid);
+      child._finish(payload && typeof payload.code === "number" ? payload.code : 0);
+    }
+  });
+
+  // The readable side of a child stream: push-driven, so `data` fires as chunks
+  // arrive (real streaming) and `end`/`close` on the child's exit.
   class ChildStream extends EventEmitter {
     constructor() {
       super();
       this.readable = true;
       this._encoding = null;
+      this._ended = false;
     }
     setEncoding(e) { this._encoding = e; return this; }
     pause() { return this; }
@@ -102,20 +120,22 @@ export function createChildProcess(sys = globalThis.sys) {
       this.on("end", () => dest.end && dest.end());
       return dest;
     }
-    _deliver(bytes) {
-      if (bytes && bytes.length) {
-        this.emit("data", this._encoding ? Buffer.from(bytes).toString(this._encoding) : Buffer.from(bytes));
-      }
+    _push(bytes) {
+      if (!bytes || bytes.length === 0) return;
+      this.emit("data", this._encoding ? Buffer.from(bytes).toString(this._encoding) : Buffer.from(bytes));
+    }
+    _end() {
+      if (this._ended) return;
+      this._ended = true;
       this.emit("end");
       this.emit("close");
     }
   }
 
-  // The writable stdin of a child. Writes are buffered; the child is actually
-  // launched once stdin is `end()`ed (or, if the caller never touches stdin, on
-  // the microtask after `spawn()` returns — see below). This matches the common
-  // `child.stdin.write(x); child.stdin.end()` shape; a slow async drip of stdin
-  // after other output has been awaited is the honest limit (INV-5).
+  // The writable stdin of a child. Writes buffer until stdin is `end()`ed (or, if
+  // the caller never touches stdin, until the microtask after `spawn()` returns);
+  // that buffer is the child's stdin (a temp file, EOF-correct). A drip of stdin
+  // *after* the child launches is the honest limit (INV-5).
   class ChildStdin extends EventEmitter {
     constructor(onEnd) {
       super();
@@ -126,7 +146,7 @@ export function createChildProcess(sys = globalThis.sys) {
       this._onEnd = onEnd;
     }
     write(chunk, encoding, cb) {
-      if (typeof encoding === "function") { cb = encoding; }
+      if (typeof encoding === "function") cb = encoding;
       this._touched = true;
       if (chunk != null) this._chunks.push(toBytes(chunk));
       if (cb) queueMicrotask(cb);
@@ -134,7 +154,7 @@ export function createChildProcess(sys = globalThis.sys) {
     }
     end(chunk, encoding, cb) {
       if (typeof chunk === "function") { cb = chunk; chunk = undefined; }
-      else if (typeof encoding === "function") { cb = encoding; }
+      else if (typeof encoding === "function") cb = encoding;
       if (chunk != null) this.write(chunk);
       if (!this._ended) {
         this._ended = true;
@@ -157,7 +177,7 @@ export function createChildProcess(sys = globalThis.sys) {
   class ChildProcess extends EventEmitter {
     constructor() {
       super();
-      this.pid = nextPid++;
+      this.pid = null;
       this.exitCode = null;
       this.signalCode = null;
       this.killed = false;
@@ -167,11 +187,11 @@ export function createChildProcess(sys = globalThis.sys) {
       this.stdin = new ChildStdin(() => launch && launch());
       this._setLaunch = (fn) => { launch = fn; };
     }
-    // Honest limit (INV-5): a buffered child can't be signalled once running.
-    // Flag it as Node does and report the request as delivered.
     kill(signal) {
       this.killed = true;
       this.signalCode = typeof signal === "string" ? signal : "SIGTERM";
+      const num = typeof signal === "number" ? signal : SIGNUM[this.signalCode] || SIGNUM.SIGTERM;
+      if (this.pid != null) sys.childKill(this.pid, num);
       return true;
     }
     ref() { return this; }
@@ -179,89 +199,117 @@ export function createChildProcess(sys = globalThis.sys) {
     // No IPC channel for `fork` (INV-5) — the message never sends.
     send() { return false; }
     disconnect() {}
+    // Called by the dispatcher on the child's exit: close the streams, then report
+    // exit/close. A killed child reports code null + the signal name, as in Node.
+    _finish(code) {
+      this.stdout._end();
+      this.stderr._end();
+      const sig = this.killed ? this.signalCode : null;
+      this.exitCode = sig ? null : code;
+      this.emit("exit", this.exitCode, sig);
+      this.emit("close", this.exitCode, sig);
+      unrefLoop();
+    }
   }
 
-  // Launch a ChildProcess: run `line` (with any buffered stdin), then fan the
-  // captured result out onto the child's streams and lifecycle events.
-  function runChild(child, line) {
+  // Turn (command, args, options) into the argv the kernel spawns. With `shell`,
+  // run the whole thing through a shell (`sh -c "<line>"`, honoring a custom shell
+  // path); otherwise pass argv verbatim — no interpretation (Node's no-shell rule).
+  function buildArgv(command, args, options) {
+    if (options.shell) {
+      const shell = typeof options.shell === "string" ? options.shell : "/bin/sh";
+      const line = [command, ...(args || [])].join(" ");
+      return [shell, "-c", line];
+    }
+    return [command, ...(args || [])];
+  }
+
+  // Launch a ChildProcess: gather its buffered stdin, ask the kernel to spawn it,
+  // and register it so the dispatcher can route its streamed output + exit.
+  async function launchChild(child, argv, options) {
     const input = child.stdin._input();
+    const env = options.env || globalThis.process?.env || {};
+    const cwd = options.cwd != null ? String(options.cwd) : globalThis.process?.cwd?.() ?? sys.cwd;
+    try {
+      const { pid } = await sys.spawnChild({ argv, env, cwd, input });
+      child.pid = pid;
+      children.set(pid, child);
+      child.emit("spawn");
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      child.stdout._end();
+      child.stderr._end();
+      child.emit("error", err);
+      child.emit("close", null, null);
+      unrefLoop();
+    }
+  }
+
+  // spawn(command[, args][, options]) — the live, streaming API.
+  function spawn(command, args, options) {
+    const n = normalizeArgs(args, options, undefined);
+    const argv = buildArgv(command, n.args, n.options);
+    const child = new ChildProcess();
+    // Hold /bin/node's event loop open from the moment spawn() is called — *before*
+    // the deferred launch below — so a `spawn()` right after an awaited child (whose
+    // exit dropped the ref count to 0) doesn't let the process go idle and exit in
+    // the gap. Released once in _finish (or the launch error path).
     refLoop();
-    sys
-      .execCapture(line, input)
-      .then(({ code, stdout, stderr }) => {
-        child.exitCode = code;
-        child.stdout._deliver(stdout);
-        child.stderr._deliver(stderr);
-        // A signalled child reports code null + the signal, as in Node.
-        const sig = child.killed ? child.signalCode : null;
-        child.emit("exit", sig ? null : code, sig);
-        child.emit("close", sig ? null : code, sig);
-      })
-      .catch((e) => child.emit("error", e instanceof Error ? e : new Error(String(e))))
-      .finally(unrefLoop);
+    let launched = false;
+    const launch = () => { if (launched) return; launched = true; launchChild(child, argv, n.options); };
+    child._setLaunch(launch);
+    // Launch once stdin closes; if the caller never writes stdin, launch on the
+    // next microtask (after synchronous setup), with empty stdin.
+    queueMicrotask(() => { if (!child.stdin._touched || child.stdin._ended) launch(); });
     return child;
   }
 
-  // spawn(command[, args][, options]) — the streaming-shaped API (buffered here).
-  function spawn(command, args, options) {
-    const n = normalizeArgs(args, options, undefined);
-    const opts = n.options;
-    const useShell = opts.shell;
-    const base = useShell ? [command, ...(n.args || [])].join(" ") : quoteArgv(command, n.args);
-    const line = wrapLine(base, opts);
-    const child = new ChildProcess();
-    let launched = false;
-    const launch = () => { if (launched) return; launched = true; runChild(child, line); };
-    child._setLaunch(launch);
-    // Launch once stdin is closed; if the caller never writes stdin, launch on the
-    // next microtask (after synchronous setup runs), with no stdin.
-    queueMicrotask(() => { if (!child.stdin._touched || child.stdin._ended) launch(); });
+  // Buffer a live child's streamed output, then hand it to a Node-style callback.
+  // Shared by exec/execFile — the difference is only how argv is built.
+  function bufferedExec(child, command, opts, cb) {
+    const outChunks = [];
+    const errChunks = [];
+    child.stdout.on("data", (d) => outChunks.push(toBytes(d)));
+    child.stderr.on("data", (d) => errChunks.push(toBytes(d)));
+    let done = false;
+    const finish = (err, code) => {
+      if (done) return;
+      done = true;
+      const so = decodeOutput(concat(outChunks), opts.encoding, true);
+      const se = decodeOutput(concat(errChunks), opts.encoding, true);
+      if (err) { if (cb) cb(err, so, se); return; }
+      if (code !== 0) {
+        const e = new Error("Command failed: " + command + (se ? "\n" + se : ""));
+        e.code = code;
+        e.cmd = command;
+        if (cb) cb(e, so, se);
+      } else if (cb) cb(null, so, se);
+    };
+    child.on("error", (err) => finish(err, null));
+    child.on("close", (code) => finish(null, code));
+    // exec/execFile launch immediately: end stdin now (feeding `input` if given).
+    child.stdin.end(opts.input != null ? toBytes(opts.input) : undefined);
     return child;
   }
 
   // exec(command[, options][, callback]) — run a shell command, buffer output.
   function exec(command, options, callback) {
     const { options: opts, callback: cb } = normalizeOpts(options, callback);
-    const line = wrapLine(command, opts);
-    const child = new ChildProcess();
-    child._setLaunch(() => {});
-    refLoop();
-    sys
-      .execCapture(line, toBytes(opts.input).length ? toBytes(opts.input) : null)
-      .then(({ code, stdout, stderr }) => {
-        const so = decodeOutput(stdout, opts.encoding, true);
-        const se = decodeOutput(stderr, opts.encoding, true);
-        child.exitCode = code;
-        child.stdout._deliver(stdout);
-        child.stderr._deliver(stderr);
-        child.emit("exit", code, null);
-        child.emit("close", code, null);
-        if (code !== 0) {
-          const err = new Error("Command failed: " + command + (se ? "\n" + se : ""));
-          err.code = code;
-          err.cmd = command;
-          if (cb) cb(err, so, se);
-        } else if (cb) cb(null, so, se);
-      })
-      .catch((e) => {
-        const err = e instanceof Error ? e : new Error(String(e));
-        child.emit("error", err);
-        if (cb) cb(err, decodeOutput(new Uint8Array(0), opts.encoding, true), "");
-      })
-      .finally(unrefLoop);
-    return child;
+    const child = spawn(command, [], { ...opts, shell: opts.shell ?? true });
+    return bufferedExec(child, command, opts, cb);
   }
 
   // execFile(file[, args][, options][, callback]) — no shell; args passed literally.
   function execFile(file, args, options, callback) {
     const n = normalizeArgs(args, options, callback);
-    return exec(quoteArgv(file, n.args), n.options, n.callback);
+    const child = spawn(file, n.args, { ...n.options, shell: n.options.shell || false });
+    return bufferedExec(child, file, n.options, n.callback);
   }
 
   // fork(modulePath[, args][, options]) — run `node <module>` as a child. No IPC.
   function fork(modulePath, args, options) {
     const n = normalizeArgs(args, options, undefined);
-    return spawn("node", [modulePath, ...(n.args || [])], n.options);
+    return spawn("node", [modulePath, ...(n.args || [])], { ...n.options, shell: false });
   }
 
   // ---- synchronous forms (block on the sync-syscall channel) ----------------
@@ -300,12 +348,12 @@ export function createChildProcess(sys = globalThis.sys) {
       result = runSync(wrapLine(base, opts), opts);
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
-      return { pid: nextPid++, output: [null, null, null], stdout: null, stderr: null, status: null, signal: null, error: err };
+      return { pid: nextFakePid++, output: [null, null, null], stdout: null, stderr: null, status: null, signal: null, error: err };
     }
     const stdout = decodeOutput(result.stdout, opts.encoding, false);
     const stderr = decodeOutput(result.stderr, opts.encoding, false);
     return {
-      pid: nextPid++,
+      pid: nextFakePid++,
       output: [null, stdout, stderr],
       stdout,
       stderr,
@@ -327,4 +375,13 @@ export function createChildProcess(sys = globalThis.sys) {
   };
   mod.default = mod;
   return mod;
+}
+
+function concat(chunks) {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
 }

@@ -78,14 +78,24 @@ test("child_process runs sub-commands end-to-end under /bin/node", opts, async (
           "  const asyncOut = await new Promise((res) =>",
           "    cp.exec('echo async-out', (e, out) => res(out.trim())));",
           "  console.log('exec:', asyncOut);",
-          // spawn: buffered streaming + close event.
+          // spawn: a nested node child that writes TWO chunks 30ms apart, proving
+          // stdout arrives incrementally (>=2 data events), not buffered to the end.
           "  const spawnOut = await new Promise((res) => {",
-          "    const child = cp.spawn('echo', ['streamed']);",
-          "    let buf = '';",
-          "    child.stdout.on('data', (d) => (buf += d.toString()));",
-          "    child.on('close', (code) => res(buf.trim() + '#' + code));",
+          "    const child = cp.spawn('node', ['-e',",
+          "      \"process.stdout.write('one'); setTimeout(()=>process.stdout.write('two'),30)\"]);",
+          "    let events = 0, buf = '';",
+          "    child.stdout.on('data', (d) => { events++; buf += d.toString(); });",
+          "    child.on('error', (e) => res('ERROR ' + e.message));",
+          "    child.on('close', (code) => res('events=' + events + ' out=' + buf + ' code=' + code));",
           "  });",
           "  console.log('spawn:', spawnOut);",
+          // kill: a long-lived nested node child, terminated -> code null + signal.
+          "  const killOut = await new Promise((res) => {",
+          "    const child = cp.spawn('node', ['-e', 'setInterval(()=>{}, 1000)']);",
+          "    child.on('spawn', () => child.kill());",
+          "    child.on('close', (code, signal) => res('code=' + code + ' signal=' + signal));",
+          "  });",
+          "  console.log('kill:', killOut);",
           "})();",
         ].join("\n"),
       );
@@ -100,5 +110,11 @@ test("child_process runs sub-commands end-to-end under /bin/node", opts, async (
   assert.ok(lines.includes("nonzero: status=1"), result.out);
   assert.ok(lines.includes('spawnSync: 0 "a b"'), result.out);
   assert.ok(lines.includes("exec: async-out"), result.out);
-  assert.ok(lines.includes("spawn: streamed#0"), result.out);
+  // Incremental streaming: two separate stdout writes → two `data` events.
+  const spawnLine = lines.find((l) => l.startsWith("spawn:")) || "";
+  assert.match(spawnLine, /out=onetwo code=0/, result.out);
+  const events = Number(spawnLine.match(/events=(\d+)/)?.[1] || 0);
+  assert.ok(events >= 2, "expected >=2 incremental data events, got: " + spawnLine);
+  // Real kill: terminated child reports code null + the signal name.
+  assert.ok(lines.includes("kill: code=null signal=SIGTERM"), result.out);
 });

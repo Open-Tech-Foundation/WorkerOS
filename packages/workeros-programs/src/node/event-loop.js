@@ -23,9 +23,24 @@ export function createEventLoop(native) {
   let nextId = 1;
   let refCount = 0;
   let notifyIdle = null;
+  let idleCheckScheduled = false;
+  // Notify idle on a *macrotask*, not the instant the count first touches 0, then
+  // re-check. A ref'd task ending and another beginning across async turns (e.g.
+  // `await exec(...)` then `spawn(...)` in node:child_process) dips the count to 0
+  // for one microtask flush before the next task re-refs; firing synchronously
+  // there would end the loop mid-flight. Deferring lets those continuations re-ref
+  // first, so we only resolve when the loop is *actually* drained.
+  const scheduleIdleCheck = () => {
+    if (idleCheckScheduled) return;
+    idleCheckScheduled = true;
+    nativeSet(() => {
+      idleCheckScheduled = false;
+      if (refCount <= 0 && notifyIdle) { const done = notifyIdle; notifyIdle = null; done(); }
+    }, 0);
+  };
   const bump = (n) => {
     refCount += n;
-    if (refCount <= 0 && notifyIdle) { const done = notifyIdle; notifyIdle = null; done(); }
+    if (refCount <= 0 && notifyIdle) scheduleIdleCheck();
   };
 
   class Timeout {

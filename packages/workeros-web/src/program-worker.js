@@ -48,6 +48,10 @@ let signalDispatch = null;
 // The guest's fs.watch event dispatcher (installed by node:fs). The kernel worker
 // delivers FS_EVENT messages; node:fs routes each to the right FSWatcher.
 let fsEventDispatch = null;
+// The guest's child_process event dispatcher (installed by node:child_process).
+// The kernel worker delivers CHILD_STDOUT/CHILD_STDERR/CHILD_EXIT for spawned
+// children; node:child_process routes each to the right ChildProcess by pid.
+let childDispatch = null;
 
 let exited = false;
 function reportExit(code) {
@@ -150,13 +154,17 @@ function makeSys(start, syncCall) {
     // routed to this process's streams. Resolves with the exit code. Used by `npm
     // run`. The kernel worker services it with the shell driver.
     exec: (line) => call("exec", { line }),
-    // node:child_process. `execCapture` runs a command with its stdout/stderr
-    // *captured* (not routed to this process's streams) and `input` fed as its
-    // stdin, resolving with { code, stdout, stderr }. `execCaptureSync` is the
-    // blocking form over the SAB channel — the guest parks while the kernel worker
-    // runs the child, then unpacks the framed result. (Output is capped at the
-    // sync channel's 1 MiB payload — the same bound as Node's default maxBuffer.)
-    execCapture: (line, input) => call("execCapture", { line, input }),
+    // node:child_process — streaming spawn. `spawnChild` launches `argv` as a real
+    // headless child (cwd/env/stdin from `opts`), resolving with its `{ pid }`; the
+    // child's stdout/stderr then arrive *incrementally* as CHILD_STDOUT/CHILD_STDERR
+    // messages and its exit as CHILD_EXIT, all routed to the dispatcher registered
+    // via `onChildEvent`. `childKill` signals it. The synchronous forms instead use
+    // `execCaptureSync`: a blocking capture over the SAB channel (the guest parks
+    // while the kernel worker runs the child, then unpacks the framed result;
+    // output is capped at the channel's 1 MiB — Node's default maxBuffer).
+    spawnChild: (opts) => call("spawnChild", opts),
+    childKill: (childPid, signal) => call("childKill", { pid: childPid, signal }),
+    onChildEvent: (cb) => { childDispatch = cb; },
     execCaptureSync: (line, input) => {
       const r = syncCall("execCapture", { line }, true, input || undefined);
       if (r.status < 0) {
@@ -303,6 +311,17 @@ self.onmessage = async (ev) => {
     // A watched path changed — hand it to node:fs's watch dispatcher (if any).
     try { fsEventDispatch?.(msg.watchId, msg.eventType, msg.filename); } catch (e) {
       writeBytes(2, new TextEncoder().encode("fs.watch handler error: " + (e?.message ?? e) + "\n"));
+    }
+    return;
+  }
+  if (msg.type === MSG.CHILD_STDOUT || msg.type === MSG.CHILD_STDERR || msg.type === MSG.CHILD_EXIT) {
+    // Live stdio/exit of a spawned child — hand it to node:child_process's
+    // dispatcher (if any), which fans it out to the owning ChildProcess by pid.
+    const kind =
+      msg.type === MSG.CHILD_STDOUT ? "stdout" : msg.type === MSG.CHILD_STDERR ? "stderr" : "exit";
+    const payload = kind === "exit" ? { code: msg.code, signal: msg.signal ?? null } : msg.data;
+    try { childDispatch?.(msg.pid, kind, payload); } catch (e) {
+      writeBytes(2, new TextEncoder().encode("child_process handler error: " + (e?.message ?? e) + "\n"));
     }
     return;
   }

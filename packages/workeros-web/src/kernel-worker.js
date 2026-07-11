@@ -271,6 +271,9 @@ function post(msg) {
   self.postMessage(msg);
 }
 
+// Monotonic id for node:child_process stdin temp files (see `spawnChild`).
+let childTmpSeq = 0;
+
 /** Concatenate a list of Uint8Array chunks into one. */
 function concatChunks(chunks) {
   let n = 0;
@@ -283,8 +286,8 @@ function concatChunks(chunks) {
 
 /** Run `line` through the shell driver with output *captured* (not routed to a
  *  process's streams), feeding `input` as its stdin. Resolves the child's exit
- *  code with the collected stdout/stderr — the primitive `child_process` builds
- *  on for both its async (`execCapture`) and sync (`execCaptureSync`) syscalls. */
+ *  code with the collected stdout/stderr — the primitive `child_process`'s
+ *  synchronous forms (`execCaptureSync`) build on. */
 function runCaptured(line, input) {
   const outChunks = [];
   const errChunks = [];
@@ -788,14 +791,58 @@ function handleSyscall(pid, msg) {
           .catch((e) => reply(pid, id, false, String(e && e.message ? e.message : e)));
         break; // reply happens asynchronously above
       }
-      case "execCapture": {
-        // node:child_process (async): run a command with its output *captured*
-        // and stdin fed from `args.input`, replying with { code, stdout, stderr }
-        // once it exits. Bytes ride the structured-clone reply directly.
-        runCaptured(args.line, args.input && args.input.length ? args.input : undefined)
-          .then((res) => reply(pid, id, true, res))
-          .catch((e) => reply(pid, id, false, String(e && e.message ? e.message : e)));
-        break; // reply happens asynchronously above
+      case "spawnChild": {
+        // node:child_process streaming spawn: launch `argv` as a real, headless
+        // child process (not in the terminal foreground) whose stdout/stderr are
+        // streamed *incrementally* back to this (parent) process's worker as
+        // CHILD_STDOUT/CHILD_STDERR, and whose exit posts CHILD_EXIT. stdin is a
+        // temp VFS file seeded from `args.input` — always written (empty if none)
+        // so a child that reads stdin sees a clean EOF instead of blocking on the
+        // shared terminal. cwd/env come straight from the caller (no shell).
+        const parentRec = programs.get(pid);
+        const parentWorker = parentRec && parentRec.worker;
+        const tmp = "/tmp/.cp-in-" + childTmpSeq++;
+        let stdin = { kind: "inherit" };
+        try {
+          kernel.fs_write(tmp, args.input && args.input.length ? args.input : new Uint8Array(0));
+          stdin = { kind: "file", path: tmp, mode: "read" };
+        } catch { /* /tmp missing → fall back to inherit */ }
+        const plan = { stdin, stdout: { kind: "inherit" }, stderr: { kind: "inherit" } };
+        const cleanup = () => { if (stdin.kind === "file") { try { kernel.sys_unlink(pid, tmp); } catch {} } };
+        let spawned;
+        try {
+          spawned = spawnKernel(args.argv, args.env || {}, args.cwd || session.cwd, plan);
+        } catch (e) {
+          cleanup();
+          reply(pid, id, false, String(e && e.message ? e.message : e));
+          break;
+        }
+        const childPid = spawned.pid;
+        const sink = {
+          stdout: (b) => parentWorker && parentWorker.postMessage({ type: MSG.CHILD_STDOUT, pid: childPid, data: b }),
+          stderr: (b) => parentWorker && parentWorker.postMessage({ type: MSG.CHILD_STDERR, pid: childPid, data: b }),
+        };
+        startWorker(spawned, {
+          argv: args.argv,
+          env: args.env || {},
+          cwd: args.cwd || session.cwd,
+          sink,
+          onExit: (code) => {
+            cleanup();
+            if (parentWorker) parentWorker.postMessage({ type: MSG.CHILD_EXIT, pid: childPid, code: code | 0 });
+          },
+        });
+        reply(pid, id, true, { pid: childPid });
+        break;
+      }
+      case "childKill": {
+        // node:child_process kill(): signal a spawned child. Mirrors the client
+        // MSG.KILL path — a delivered signal hard-exits the process (128+signal).
+        const sig = args.signal | 0;
+        const delivered = kernel.kill(args.pid, sig);
+        if (delivered) handleExit(args.pid, 128 + sig);
+        reply(pid, id, true, delivered);
+        break;
       }
       default:
         reply(pid, id, false, "unknown syscall: " + call);
