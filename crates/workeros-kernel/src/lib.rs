@@ -206,22 +206,10 @@ impl Kernel {
 
     // --- Persistence (ADR-022) ---------------------------------------------
 
-    /// The VFS mutation counter. The host persists a fresh snapshot whenever
-    /// this advances past the value it last stored.
+    /// The VFS mutation counter. The host re-persists whenever this advances
+    /// past the value it last stored (idle → no I/O).
     pub fn fs_generation(&self) -> u64 {
         self.vfs.generation()
-    }
-
-    /// Serialize the durable portion of the filesystem to a byte blob for the
-    /// host to store (ephemeral subtrees excluded per the mount policy).
-    pub fn snapshot(&self) -> Vec<u8> {
-        self.vfs.snapshot(&self.mounts)
-    }
-
-    /// Replay a stored snapshot blob into the filesystem at boot. Malformed
-    /// input returns `EINVAL` (the blob comes from browser storage).
-    pub fn hydrate(&mut self, bytes: &[u8]) -> SysResult<()> {
-        self.vfs.hydrate(bytes)
     }
 
     /// Mark a subtree ephemeral (discarded on close) or persistent. Lets an

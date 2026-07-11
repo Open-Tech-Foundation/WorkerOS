@@ -260,19 +260,6 @@ impl WebKernel {
         self.inner.fs_generation() as f64
     }
 
-    /// Serialize the durable portion of the filesystem to bytes for the host to
-    /// store (ephemeral subtrees — `/tmp`, OS trees — are excluded).
-    #[wasm_bindgen]
-    pub fn snapshot(&self) -> Vec<u8> {
-        self.inner.snapshot()
-    }
-
-    /// Replay a stored snapshot blob into the filesystem at boot.
-    #[wasm_bindgen]
-    pub fn hydrate(&mut self, bytes: &[u8]) -> Result<(), JsError> {
-        self.inner.hydrate(bytes).map_err(errno_to_js)
-    }
-
     /// Mark a subtree ephemeral (discarded on close) or persistent.
     #[wasm_bindgen]
     pub fn mount(&mut self, prefix: String, ephemeral: bool) {

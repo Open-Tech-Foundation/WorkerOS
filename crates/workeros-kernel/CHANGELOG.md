@@ -63,22 +63,20 @@ a release yet, so everything lives under **Unreleased**.
   carries the times + `nlink`. Native-tested (relative/`..` targets, dir
   traversal through a link, dangling links, cycles→`ELOOP`, unlink-removes-link,
   and mtime/ctime stamping from the host clock).
-- **Durable filesystem: snapshot / hydrate + path-based durability (ADR-022,
-  PLAN Phase 7).** The in-memory `MemVfs` stays authoritative; persistence is a
-  *projection* of it. `Kernel::snapshot` serializes the durable subtree to a
-  compact, dependency-free byte blob (`b"WOFS"` + length-prefixed path/data
-  records) and `Kernel::hydrate` replays one at boot (rejecting corrupt input
-  with `EINVAL`, never panicking). Durability is **path-based** — a new
-  `vfs::mount::MountTable` (longest-prefix match) whose default policy persists
-  root `/` and marks `/tmp` plus the boot-reinstalled OS trees (`/bin`, `/sbin`,
-  `/lib`) ephemeral; ephemeral subtrees with no persistent carve-out are pruned
-  without being walked (so a `/tmp/node_modules` is never serialized).
-  `Kernel::mount(prefix, ephemeral)` lets an embedder adjust the policy. A
-  `MemVfs::generation` counter bumps on every mutation so the host write-behind
-  re-snapshots only on change. The kernel never touches IndexedDB — it moves
-  bytes; the host supplies the async store (ADR-015/-020 discipline). All
-  native-tested (mount policy, round-trip, ephemeral exclusion, carve-outs,
-  generation, corrupt-blob rejection).
+- **Path-based durability + write-behind signal (ADR-022, PLAN Phase 7).** The
+  in-memory `MemVfs` stays authoritative; persistence is a *projection* of it.
+  Durability is **path-based** — a new `vfs::mount::MountTable` (longest-prefix
+  match) whose default policy persists root `/` and marks `/tmp` plus the
+  boot-reinstalled OS trees (`/bin`, `/sbin`, `/lib`) ephemeral; ephemeral
+  subtrees with no persistent carve-out are pruned without being walked (so a
+  `/tmp/node_modules` is never serialized). `Kernel::mount(prefix, ephemeral)`
+  lets an embedder adjust the policy. A `MemVfs::generation` counter bumps on
+  every mutation so the host write-behind re-persists only on change. The kernel
+  never touches IndexedDB — it moves bytes; the host supplies the async store
+  (ADR-015/-020 discipline). Native-tested (mount policy, ephemeral exclusion,
+  carve-outs, generation). *(The projection itself is the content-addressed
+  manifest+chunk store above; an initial whole-tree `WOFS` blob was retired
+  before release in favor of it.)*
 - **Command resolution is `$PATH`-driven (PLAN Phase 5·E).** `resolve_invocation`
   now resolves a bare command against the process env's `PATH` (a plain
   colon-separated dir list), falling back to the system default (`/bin:/sbin`)

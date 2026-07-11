@@ -577,142 +577,6 @@ impl MemVfs {
     }
 }
 
-// --- Persistence: snapshot / hydrate (ADR-022) ------------------------------
-//
-// The authoritative filesystem is this in-memory tree; persistence is a
-// *projection* of it. `snapshot` serializes only the durable paths (pruning
-// ephemeral subtrees via the mount policy) into a compact, dependency-free byte
-// blob the host stores in IndexedDB; `hydrate` replays such a blob into a fresh
-// tree at boot. The kernel never touches IndexedDB — it moves bytes, the host
-// supplies the async storage mechanism (the ADR-015/-020 discipline).
-//
-// Wire format: `b"WOFS"` + version byte, then a sequence of records:
-//   file: 0x01, u32 path_len (LE), path (UTF-8), u32 data_len (LE), data
-//   dir:  0x00, u32 path_len (LE), path (UTF-8)          (empty dirs only)
-// Non-empty directories are implied by their file entries' parents, which
-// `hydrate` creates on demand — only *empty* durable directories need a record.
-
-const SNAPSHOT_MAGIC: &[u8; 4] = b"WOFS";
-const SNAPSHOT_VERSION: u8 = 1;
-
-impl MemVfs {
-    /// Serialize the durable portion of the tree to a byte blob (ADR-022).
-    /// Ephemeral subtrees (per `mounts`) are excluded and, when they contain no
-    /// persistent carve-out, not even walked.
-    pub fn snapshot(&self, mounts: &MountTable) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(SNAPSHOT_MAGIC);
-        out.push(SNAPSHOT_VERSION);
-        self.snapshot_walk("/", ROOT_INO, mounts, &mut out);
-        out
-    }
-
-    fn snapshot_walk(&self, dir_path: &str, dir_ino: Ino, mounts: &MountTable, out: &mut Vec<u8>) {
-        let entries = match self.slots.get(dir_ino).and_then(|s| s.as_ref()) {
-            Some(Inode { kind: Kind::Dir { entries }, .. }) => entries,
-            _ => return,
-        };
-        for (name, &child) in entries {
-            let child_path = join_path(dir_path, name);
-            let inode = match self.slots.get(child).and_then(|s| s.as_ref()) {
-                Some(i) => i,
-                None => continue,
-            };
-            let ephemeral = mounts.is_ephemeral(&child_path);
-            match &inode.kind {
-                Kind::File { chunks, size } => {
-                    if !ephemeral {
-                        let data = self.materialize(chunks, *size);
-                        out.push(1);
-                        put_bytes(out, child_path.as_bytes());
-                        put_bytes(out, &data);
-                    }
-                }
-                Kind::Symlink { target } => {
-                    if !ephemeral {
-                        out.push(2);
-                        put_bytes(out, child_path.as_bytes());
-                        put_bytes(out, target.as_bytes());
-                    }
-                }
-                Kind::Dir { entries: sub } => {
-                    if !ephemeral && sub.is_empty() {
-                        out.push(0);
-                        put_bytes(out, child_path.as_bytes());
-                    }
-                    // Descend unless this ephemeral subtree can hold no carve-out.
-                    if !ephemeral || mounts.has_persistent_under(&child_path) {
-                        self.snapshot_walk(&child_path, child, mounts, out);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Replay a [`snapshot`](Self::snapshot) blob into this filesystem (ADR-022).
-    /// Intended to run once on a freshly booted tree, before serving syscalls.
-    /// Malformed input returns `EINVAL` rather than panicking (the blob comes
-    /// from browser storage and may be truncated/corrupt).
-    pub fn hydrate(&mut self, bytes: &[u8]) -> SysResult<()> {
-        if bytes.len() < 5 || &bytes[0..4] != SNAPSHOT_MAGIC || bytes[4] != SNAPSHOT_VERSION {
-            return Err(Errno::Inval);
-        }
-        let mut p = 5usize;
-        while p < bytes.len() {
-            let kind = bytes[p];
-            p += 1;
-            let path = std::str::from_utf8(take_bytes(bytes, &mut p)?)
-                .map_err(|_| Errno::Inval)?
-                .to_string();
-            match kind {
-                0 => {
-                    self.mkdir_p(&path)?;
-                }
-                1 => {
-                    let data = take_bytes(bytes, &mut p)?.to_vec();
-                    if let Some((parent, _)) = path::split(&path) {
-                        self.mkdir_p(parent)?;
-                    }
-                    let opts = OpenOptions {
-                        create: true,
-                        exclusive: false,
-                        truncate: true,
-                        directory: false,
-                    };
-                    let ino = self.open(&path, opts)?;
-                    self.write_at(ino, 0, &data)?;
-                    self.close(ino)?;
-                }
-                2 => {
-                    let target = std::str::from_utf8(take_bytes(bytes, &mut p)?)
-                        .map_err(|_| Errno::Inval)?
-                        .to_string();
-                    if let Some((parent, _)) = path::split(&path) {
-                        self.mkdir_p(parent)?;
-                    }
-                    self.symlink(&target, &path)?;
-                }
-                _ => return Err(Errno::Inval),
-            }
-        }
-        Ok(())
-    }
-
-    /// `mkdir -p`: create every missing component of an absolute path.
-    fn mkdir_p(&mut self, path: &str) -> SysResult<()> {
-        let mut cur = String::new();
-        for comp in path::components(path) {
-            cur.push('/');
-            cur.push_str(comp);
-            match self.mkdir(&cur) {
-                Ok(_) | Err(Errno::Exist) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
-    }
-}
-
 // --- Content-addressed persistence: manifest + chunk access (ADR-022) -------
 //
 // The durable filesystem persists as a *content-addressed store* (the ZFS/git
@@ -2172,28 +2036,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_round_trips_persistent_tree() {
-        let mounts = mount::MountTable::default();
-        let mut vfs = fs();
-        write_file(&mut vfs, "/project/main.js", b"console.log(1)");
-        write_file(&mut vfs, "/project/src/util.js", b"export const x = 2");
-        write_file(&mut vfs, "/notes.txt", b"hello");
-        vfs.mkdir("/emptydir").unwrap();
-
-        let blob = vfs.snapshot(&mounts);
-
-        // Replay into a fresh filesystem.
-        let mut restored = fs();
-        restored.hydrate(&blob).unwrap();
-        assert_eq!(read_file(&restored, "/project/main.js"), b"console.log(1)");
-        assert_eq!(read_file(&restored, "/project/src/util.js"), b"export const x = 2");
-        assert_eq!(read_file(&restored, "/notes.txt"), b"hello");
-        // Empty persistent dir is preserved.
-        assert_eq!(restored.stat("/emptydir").unwrap().file_type, FileType::Dir);
-    }
-
-    #[test]
-    fn snapshot_excludes_ephemeral_paths() {
+    fn persistence_excludes_ephemeral_paths() {
         let mounts = mount::MountTable::default();
         let mut vfs = fs();
         write_file(&mut vfs, "/keep.js", b"durable");
@@ -2202,8 +2045,7 @@ mod tests {
         write_file(&mut vfs, "/tmp/app/node_modules/dep/index.js", b"dep");
         write_file(&mut vfs, "/bin/mytool", b"binary");
 
-        let mut restored = fs();
-        restored.hydrate(&vfs.snapshot(&mounts)).unwrap();
+        let restored = persist_and_restore(&vfs, &mounts);
 
         assert_eq!(read_file(&restored, "/keep.js"), b"durable");
         assert_eq!(restored.resolve("/tmp/app/index.js").unwrap_err(), Errno::Noent);
@@ -2215,15 +2057,14 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_keeps_persistent_carveout_under_ephemeral() {
+    fn persistence_keeps_persistent_carveout_under_ephemeral() {
         let mut mounts = mount::MountTable::default();
         mounts.mount("/tmp/keep", mount::Durability::Persist);
         let mut vfs = fs();
         write_file(&mut vfs, "/tmp/scratch.js", b"gone");
         write_file(&mut vfs, "/tmp/keep/data.json", b"{\"a\":1}");
 
-        let mut restored = fs();
-        restored.hydrate(&vfs.snapshot(&mounts)).unwrap();
+        let restored = persist_and_restore(&vfs, &mounts);
 
         assert_eq!(read_file(&restored, "/tmp/keep/data.json"), b"{\"a\":1}");
         assert_eq!(restored.resolve("/tmp/scratch.js").unwrap_err(), Errno::Noent);
@@ -2375,17 +2216,5 @@ mod tests {
         vfs.set_time(200);
         vfs.mkdir("/d2").unwrap();
         assert_eq!(vfs.stat("/").unwrap().mtime, 200, "new entry bumps dir mtime");
-    }
-
-    #[test]
-    fn hydrate_rejects_corrupt_blob() {
-        let mut vfs = fs();
-        assert_eq!(vfs.hydrate(b"nope").unwrap_err(), Errno::Inval);
-        // Valid header, truncated record.
-        let mut bad = Vec::from(&b"WOFS"[..]);
-        bad.push(1); // version
-        bad.push(1); // file record
-        bad.extend_from_slice(&99u32.to_le_bytes()); // claims 99-byte path, absent
-        assert_eq!(vfs.hydrate(&bad).unwrap_err(), Errno::Inval);
     }
 }

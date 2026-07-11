@@ -159,7 +159,7 @@ The goal is that **real npm packages and their bins run on the host JS engine** 
 - **Exit:** a `ws` echo server round-trips; the HMR channel delivers a server→client message into the preview iframe.
 
 ### Phase 6d — Vite
-- Land the adjacent Node-compat gaps Vite needs (tracked here, not strictly "networking"): **`fs.watch`** (start with chokidar `usePolling`; a kernel watch/notify syscall is a follow-up), **`crypto`** (`createHash`/`randomBytes` — sync hash or the SAB path), **`worker_threads`** (single-threaded/`worker:false` fallback, as the esbuild spike used), optional **`zlib`** (Compression Streams). esbuild-wasm on the standard `npm`+`node` path (Phase 4/5 note) is Vite's transform/deps step.
+- Land the adjacent Node-compat gaps Vite needs (tracked here, not strictly "networking"): **`fs.watch`** (start with chokidar `usePolling`; a kernel watch/notify syscall is a follow-up), ✅ **`crypto`** (`src/node/crypto.js` — host `getRandomValues` for randomness, self-contained sync `createHash`/`createHmac`), **`worker_threads`** (single-threaded/`worker:false` fallback, as the esbuild spike used), optional **`zlib`** (Compression Streams). esbuild-wasm on the standard `npm`+`node` path (Phase 4/5 note) is Vite's transform/deps step.
 - **Exit (Phase 6 exit criterion):** a real Vite project runs `dev`, the preview URL serves the app through the Service Worker, and an edit triggers HMR live in the iframe.
 
 **Exit criteria:** a Vite (or equivalent) project runs `dev` and the preview URL serves the app through the Service Worker; HMR reload works via the tunneled transport (ADR-021).
@@ -171,22 +171,32 @@ The goal is that **real npm packages and their bins run on the host JS engine** 
 **Goal:** Durability and stronger sandboxing options.
 
 - **Durable filesystem ✅** (ADR-022) — reworked from ADR-011's "IndexedDB `Vfs`
-  behind the trait" into an **authoritative in-memory tree + write-behind
-  projection**: the kernel serializes its durable subtree to a byte blob
-  (`Kernel::snapshot`), the host stores it in IndexedDB (`src/persistence.js`)
-  and **rehydrates** at boot (`Kernel::hydrate`) before serving. Durability is
-  **path-based** — a `MountTable` (`vfs/mount.rs`, longest-prefix match) with the
-  default policy persisting root `/` and treating `/tmp` (scratch) + the
+  behind the trait" into an **authoritative in-memory tree + content-addressed
+  write-behind projection** (the ZFS/git shape). File data is split into 64 KiB
+  **chunks** keyed by SHA-256 (dedup + integrity), and a **manifest** (`WOM1`:
+  durable tree + inode times + symlink targets + per-file chunk lists) is the
+  root. The host (`src/persistence.js`) stores chunks by hash (deflate-raw
+  compressed) + the manifest in IndexedDB, writing only *new* chunks each flush
+  (delta) and integrity-checking each on boot before `hydrateManifest`. Durability
+  is **path-based** — a `MountTable` (`vfs/mount.rs`, longest-prefix match) with
+  the default policy persisting root `/` and treating `/tmp` (scratch) + the
   boot-reinstalled OS trees (`/bin`,`/sbin`,`/lib`) as ephemeral, so a project
   scaffolded in `/tmp` (`npm install` and all) is discarded on close while source
   files at `/` survive. A `generation` counter drives the write-behind (idle → no
   I/O); a `visibilitychange`/`pagehide` flush trims loss. Native-tested (mount
-  policy, snapshot/hydrate round-trip, ephemeral pruning, generation) + a
+  policy, manifest round-trip with dedup/delta/metadata/symlinks, chunk COW) + a
   headless-browser reload-survival test (`tools/persistence.test.js`). Honest
-  limit (INV-5): eventually-consistent (~2s window), whole-tree blob (per-file
-  keying/deltas deferred), no symlinks/perms/mtimes.
-- Snapshot / COW overlay for "reset project" (§9, ADR-011) — ⏳ layers on the
-  snapshot primitive above.
+  limit (INV-5): eventually-consistent (~2s window). Symlinks + mtimes persist.
+- **Snapshots + GC ✅** (ADR-022) — ZFS-style: `snapshotCreate` retains a
+  manifest and increfs its chunks (COW by sharing); named snapshots persist until
+  destroyed, and a rolling **auto-ring keeps the last 10** durable states (undo).
+  `snapshotRestore` replaces the persistent working tree from a snapshot (leaving
+  `/tmp` intact). Reclamation is **mark-sweep**: `liveChunks` = working tree ∪
+  retained snapshots, and the host deletes every stored chunk absent from it;
+  `snapshotExport`/`Import` carry the retained set across reloads. Native-tested
+  (retain-through-delete, restore, ring eviction, live-set, export/import) + a
+  browser GC-sweep test. ⏳ Remaining: surface snapshots to programs (a
+  `wos snapshot` tool / restore UI).
 - `Membrane` execution level: frozen intrinsics + proxied global / `ShadowRealm` (§7.1, ADR-009).
 - (Optional, later) `Wasm` execution level via a pure-Rust JS engine for strong capability isolation.
 - **Protected system paths** (ADR-018): a kernel-level protected-prefix / read-only-subtree check so `/sbin` (system binaries) and other protected paths reject mutating syscalls with `EPERM` — turning today's `/sbin` *convention* into real enforcement.
@@ -234,5 +244,5 @@ The goal is that **real npm packages and their bins run on the host JS engine** 
 | **M3 — Usable shell** | 3 | `wsh`, pipes, coreutils, `ps` |
 | **M4 — WASM apps** | 4 | Unmodified WASI binaries + WASM-library build step + PGlite as processes — 🚧 wasm32-wasip1 runs with stdio/exit + VFS reads + blocking stdin (sync-syscall channel done); esbuild-wasm build step proven as a spike but deferred to the `npm`+`node` path (Node compat); PGlite + off-the-shelf CLI pending |
 | **M5 — Ecosystem** | 5–6 | npm install + Vite dev preview — 🚧 `npm` registry install + `node` CommonJS `require` done; **Node compat: sync `fs`, core builtins (`fs`/`path`/`os`/`url`/`module`), ESM resolution (`node:` builtins + `node_modules` `exports`/subpaths), CJS-in-ESM interop, and npm bin-linking+PATH — done** (Phase 5·A–E); pending: preview + lockfiles |
-| **M6 — Durable & hardened** | 7 | Persistence + membrane isolation — 🚧 durable filesystem done (in-memory tree + IndexedDB write-behind, path-based durability per ADR-022); membrane isolation + protected paths pending |
+| **M6 — Durable & hardened** | 7 | Persistence + membrane isolation — 🚧 durable filesystem done (in-memory tree + content-addressed IndexedDB block store, path-based durability, snapshots + mark-sweep GC per ADR-022); membrane isolation + protected paths pending |
 | **M7 — Bounded & contained** | 8 | Resource limits + deterministic fault reaping — INV-6/ADR-020 (pull ahead of M4–M6 for untrusted-code deployments) — 🚧 kernel accounting caps done (proc 128 / fd 256 / VFS 256 MiB · 100k inodes, native-tested); host memory/CPU-time watchdog + fault-path reaping + host-override API pending |
