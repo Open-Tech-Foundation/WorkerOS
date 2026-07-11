@@ -144,3 +144,32 @@ test("ESM: an uninstalled bare package fails honestly (not a silent stub)", opts
   assert.notEqual(result.code, 0);
   assert.match(result.err, /does-not-exist/);
 });
+
+test("ESM: a true import cycle runs (oxc runner fallback), where blob-stitch can't", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const files = {
+        // a.js and b.js import each other — a cycle. Function exports are hoisted, so
+        // the mutual calls resolve (the canonical ESM cycle). The native blob path
+        // cannot link this; /bin/node falls back to the oxc runner.
+        "/proj/a.js": [
+          "import { fromB } from './b.js';",
+          "export function aName() { return 'A'; }",
+          "export function greet() { return 'a:' + fromB(); }",
+          "console.log(greet());",
+        ].join("\n"),
+        "/proj/b.js": [
+          "import { aName } from './a.js';",
+          "export function fromB() { return 'B-sees-' + aName(); }",
+        ].join("\n"),
+      };
+      for (const [p, src] of Object.entries(files)) await os.fs.write(p, src);
+      return await window.run(os, ["node", "a.js"], { cwd: "/proj" });
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.out.trim(), "a:B-sees-A");
+});

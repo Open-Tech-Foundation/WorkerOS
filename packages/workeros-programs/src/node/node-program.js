@@ -20,6 +20,8 @@ import { createNodeRuntime, detectFormat, makeBuiltins } from "/lib/workeros-nod
 import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 import { buildEsmGraph, transformModule } from "/lib/workeros-node/esm-graph.js";
 import { createResolver, isBuiltinSpec, builtinKey } from "/lib/workeros-node/resolve.js";
+import { createEsmRunner } from "/lib/workeros-node/esm-runner.js";
+import { getBundler } from "/lib/workeros-node/node-bundler.js";
 import { createTty } from "/lib/workeros-node/tty.js";
 import { createEventLoop } from "/lib/workeros-node/event-loop.js";
 import { createWorkerThreads } from "/lib/workeros-node/worker-threads.js";
@@ -142,6 +144,40 @@ const hrtime = (prev) => {
 };
 hrtime.bigint = () => BigInt(nowNs());
 
+// Build/runtime feature metadata used by Node packages and Node's own test/common
+// harness. These are truthful gates for the WorkerOS host: browser Intl is
+// available, while native shared libraries, OpenSSL, sanitizers, inspector, and
+// single-executable support are not.
+const processConfig = Object.freeze({
+  target_defaults: Object.freeze({}),
+  variables: Object.freeze({
+    asan: 0,
+    icu_gyp_path: "tools/icu/icu-system.gyp",
+    icu_small: false,
+    is_debug: 0,
+    node_shared: false,
+    node_shared_openssl: false,
+    node_use_openssl: false,
+    openssl_quic: false,
+    shlib_suffix: "",
+    single_executable_application: false,
+    ubsan: 0,
+    v8_enable_i18n_support: typeof Intl !== "undefined" ? 1 : 0,
+    want_separate_host_toolset: 0,
+  }),
+});
+let processUmask = 0o022;
+const umask = (mask) => {
+  const previous = processUmask;
+  if (mask === undefined) return previous;
+  const next = typeof mask === "string" && /^[0-7]+$/.test(mask) ? parseInt(mask, 8) : mask;
+  if (!Number.isInteger(next) || next < 0 || next > 0o777) {
+    throw new TypeError("mask must be an integer or octal string between 0 and 0o777");
+  }
+  processUmask = next;
+  return previous;
+};
+
 const process = emitter({
   // Node convention: argv[0] is the runtime, argv[1] the script.
   argv: ["node", ...sys.argv.slice(1)],
@@ -150,6 +186,8 @@ const process = emitter({
   env: { ...sys.env },
   platform: "workeros",
   arch: "wasm32",
+  config: processConfig,
+  features: Object.freeze({ debug: false, inspector: false }),
   // A truthful, non-Node-fidelity version tag (INV-5): we are not Node.
   version: "workeros-node/0.0.0",
   // `versions.node` is what packages feature-detect on; we report a recent value
@@ -160,6 +198,7 @@ const process = emitter({
   chdir: (d) => { cwd = resolveCwd(String(d)); },
   hrtime,
   nextTick: (cb, ...args) => queueMicrotask(() => cb(...args)),
+  umask,
   // A terminal fd gets a real tty stream (setRawMode / cursorTo / …); a redirected
   // one gets a plain reader/writer — the isTTY split Node makes. Both pump the fd
   // so `process.stdin` actually delivers input (flowing / paused / async-iter).
@@ -341,6 +380,11 @@ const cjsBlob = (abs) => {
 // Reused for the entry graph and for every lazily import()'d subgraph, sharing the
 // `pathToBlob` cache. Cyclic ESM can't be blob-stitched (a blob URL must exist
 // before it's referenced) — a true cycle is reported rather than silently wrong.
+// Thrown by stitchGraph when the graph has a true import cycle (no blob URL can be
+// created before it is referenced). Caught by `evalEsm`, which retries via the oxc
+// runner — the loader that *can* link cycles.
+const CYCLE = Symbol("cycle");
+
 const stitchGraph = (graph) => {
   for (const mod of graph.modules) {
     for (const imp of mod.imports) if (imp.builtin) builtinBlob(imp.resolved);
@@ -363,10 +407,43 @@ const stitchGraph = (graph) => {
       pathToBlob.set(mod.path, blobUrl(src));
       built.push(mod.path);
     }
-    if (built.length === 0) { err("node: unresolvable or cyclic module graph\n"); sys.exit(1); }
+    if (built.length === 0) throw CYCLE;
     remaining = remaining.filter((m) => !pathToBlob.has(m.path));
   }
   return pathToBlob.get(graph.entry);
+};
+
+// The oxc-backed ESM runner (built lazily, only if a cycle actually needs it): it
+// transforms each module (import/export → live-binding runner calls) and runs it as
+// an async function, seeding exports before the body — so it links import cycles the
+// blob stitch can't. Reuses this process's resolver, `import.meta`, CJS loader, and
+// builtins, so a module loaded either way behaves identically.
+let esmRunner = null;
+const getRunner = () =>
+  esmRunner ||
+  (esmRunner = createEsmRunner({
+    fs,
+    path,
+    resolver,
+    transform: (src) => getBundler().transform(src),
+    detectFormat,
+    makeMeta: (abs) => globalThis.__workerosMeta(abs),
+    loadCjs: (abs) => globalThis.__workerosLoadCjs(abs),
+    getBuiltin: (key) => builtins.get(key),
+  }));
+
+// Evaluate an ES module and return its namespace: the native blob stitch by default
+// (V8's own loader — the fast, spec-exact path); on a true cycle it retries through
+// the runner. `isFile` is false only for the synthetic `-e`/`-p` entry, which has no
+// VFS file for the runner to read (and no cycle to speak of).
+const evalEsm = async (abs, source, isFile = true) => {
+  try {
+    return await import(stitchGraph(buildEsmGraph({ fs, path, resolver }, abs, source)));
+  } catch (e) {
+    if (e !== CYCLE) throw e;
+    if (!isFile) { err("node: unresolvable or cyclic module graph\n"); sys.exit(1); }
+    return await getRunner().load(abs);
+  }
 };
 
 // `import.meta` for a module: a real `file://` URL plus fs-derived
@@ -400,7 +477,7 @@ globalThis.__workerosImport = async (base, spec) => {
     if (!abs) throw new Error(`Cannot find module '${spec}' imported from ${base}`);
     const source = fs.readFileSync(abs, "utf8");
     if (detectFormat(source, abs, { fs, path }) === "cjs") return await import(cjsBlob(abs));
-    return await import(stitchGraph(buildEsmGraph({ fs, path, resolver }, abs, source)));
+    return await evalEsm(abs, source);
   } finally {
     loop.unref();
   }
@@ -416,7 +493,7 @@ if (detectFormat(entrySource, entryAbs, evalSource != null ? undefined : { fs, p
   const run = createNodeRuntime(sys, nodeBuiltins);
   await run(entryAbs, entrySource);
 } else {
-  await import(stitchGraph(buildEsmGraph({ fs, path, resolver }, entryAbs, entrySource)));
+  await evalEsm(entryAbs, entrySource, evalSource == null);
 }
 
 // Node stays alive past top level while the event loop has ref'd work; do the

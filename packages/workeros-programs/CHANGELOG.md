@@ -8,6 +8,23 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **ESM import cycles via an oxc runner** (`crates/workeros-node-bundler`,
+  `src/node/node-bundler.js`, `src/node/esm-runner.js`, `src/node/node-program.js`).
+  The browser's native ESM loader (which `/bin/node` used to stitch blobs onto)
+  cannot link an import **cycle** — a blob URL must exist before it is referenced.
+  New path: a Rust→wasm crate (**oxc**) transforms a module's `import`/`export`/
+  `import.meta`/`import()` into live-binding *module-runner* calls (parse + scope
+  analysis + rewrite — `import { b } from 'x'` → `await __workeros_import__('x', …)`
+  with each use of `b` rewritten to a live property read; exports become getters).
+  The `esm-runner` executes each transformed module as an async function, seeding
+  its exports object **before** the body runs — the same mechanism the CJS runtime
+  uses for `require` cycles — so cyclic imports and live bindings resolve correctly.
+  The wasm is instantiated synchronously (codec-style pointer/length ABI). `/bin/node`
+  keeps the fast native blob path as the default and **falls back to the runner only
+  when a graph has a true cycle**, so nothing that worked before changes. Proven with
+  the real wasm: a two-module cycle and later-exported live bindings execute correctly
+  (`tools/esm-runner.test.js`), and `node a.js` with `a.js ⇄ b.js` runs in a booted
+  kernel (`workeros-web`'s `tools/esm-resolve.test.js`).
 - **`node:worker_threads`** (`src/node/worker-threads.js`). Real background
   threads: `Worker`, `parentPort`, `isMainThread`, `threadId`, `workerData`,
   `MessageChannel`/`MessagePort`, `terminate()`, and the `getEnvironmentData`/
