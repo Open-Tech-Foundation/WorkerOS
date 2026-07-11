@@ -40,7 +40,7 @@ import { zlib as zlibModule } from "./zlib.js";
 // both `require('process')`/`require('tty')` (CJS) and `import 'node:process'`
 // (ESM) resolve to the same objects, not just one path.
 export function makeBuiltins(sys, extras) {
-  const fs = createFs(sys.syncFs);
+  const fs = createFs(sys.syncFs, sys.onFsEvent);
   const path = createPath();
   const os = createOs();
   const url = createUrl();

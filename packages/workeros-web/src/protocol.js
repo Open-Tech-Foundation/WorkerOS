@@ -49,6 +49,9 @@ export const MSG = Object.freeze({
   // kernel worker → program worker: deliver a cooperative signal (SIGINT/SIGWINCH/
   // SIGTSTP) to a JS guest that registered a handler.
   SIGNAL: "signal",
+  // kernel worker → program worker: a filesystem change matched one of this
+  // process's `fs.watch` registrations. Carries { watchId, eventType, filename }.
+  FS_EVENT: "fs_event",
   // program worker → kernel worker
   SYSCALL: "syscall",
   // program worker → kernel worker: the guest installed/removed a handler for a

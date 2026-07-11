@@ -6,13 +6,16 @@
 // Real tools do runtime file I/O that can't be prefetched the way the CJS
 // `require` graph is — this is the keystone that unblocks them (PLAN Phase 5·A).
 //
-// `createFs(syncFs)` takes the low-level primitive object
+// `createFs(syncFs, onFsEvent?)` takes the low-level primitive object
 //   { open(path,opts)->fd, read(fd,max)->Uint8Array, write(fd,bytes)->n,
-//     close(fd), seek(fd,offset,whence)->offset, stat(path)->{kind,size},
+//     close(fd), seek(fd,offset,whence)->offset, stat/lstat(path)->meta,
+//     symlink(target,path), readlink(path)->target,
 //     readdir(path)->[{name,is_dir}], mkdir(path), unlink(path), rmdir(path),
-//     rename(from,to) }
-// — each throwing a plain Error carrying the kernel errno name — and returns the
-// Node `fs` module (sync ops + a thin `fs.promises`). Dependency-injected so the
+//     rename(from,to), watchAdd(path,recursive)->id, watchRemove(id) }
+// — each throwing a plain Error carrying the kernel errno name — plus an optional
+// `onFsEvent(cb)` that registers the process's single fs.watch dispatcher (the
+// kernel pushes change events to it). Returns the Node `fs` module (sync ops, a
+// thin `fs.promises`, and `fs.watch`/`watchFile`). Dependency-injected so the
 // whole surface is unit-testable in plain Node against a fake `syncFs`.
 //
 // Honest-surface notes (INV-5): reads return a `Uint8Array` (not a Node `Buffer`)
@@ -154,9 +157,21 @@ function flagsToOpts(flags) {
   return { opts, append };
 }
 
-export function createFs(syncFs) {
+export function createFs(syncFs, onFsEvent) {
   // fd → path, so fstat/read/write-by-fd have something to report against.
   const openPaths = new Map();
+
+  // --- fs.watch plumbing (ADR-022) --------------------------------------
+  // The kernel emits change events to the worker; `onFsEvent` (when provided) is
+  // the single dispatcher we register, fanning each event out to the FSWatcher
+  // whose watch id it carries.
+  const watchers = new Map(); // watchId → FSWatcher
+  if (typeof onFsEvent === "function") {
+    onFsEvent((watchId, eventType, filename) => {
+      const w = watchers.get(watchId);
+      if (w) w.emit("change", eventType, filename);
+    });
+  }
 
   const guard = (fn, syscall, path) => {
     try {
@@ -390,6 +405,84 @@ export function createFs(syncFs) {
     return a.endsWith("/") ? a + b : a + "/" + b;
   }
 
+  // A minimal FSWatcher (Node returns an EventEmitter). Emits `change`
+  // (eventType, filename), `error`, and `close`; `.close()` unregisters.
+  function makeWatcher(id) {
+    const listeners = { change: [], error: [], close: [] };
+    const watcher = {
+      on(ev, cb) { (listeners[ev] ||= []).push(cb); return watcher; },
+      addListener(ev, cb) { return watcher.on(ev, cb); },
+      once(ev, cb) {
+        const wrap = (...a) => { watcher.off(ev, wrap); cb(...a); };
+        return watcher.on(ev, wrap);
+      },
+      off(ev, cb) {
+        const l = listeners[ev];
+        if (l) { const i = l.indexOf(cb); if (i >= 0) l.splice(i, 1); }
+        return watcher;
+      },
+      removeListener(ev, cb) { return watcher.off(ev, cb); },
+      emit(ev, ...a) {
+        (listeners[ev] || []).slice().forEach((cb) => cb(...a));
+        return (listeners[ev] || []).length > 0;
+      },
+      ref() { return watcher; },
+      unref() { return watcher; },
+      close() {
+        if (!watchers.has(id)) return;
+        watchers.delete(id);
+        try { syncFs.watchRemove(id); } catch { /* already gone */ }
+        watcher.emit("close");
+      },
+    };
+    return watcher;
+  }
+
+  // `fs.watch(filename[, options][, listener])` → an FSWatcher. `options` may be
+  // an encoding string or `{ recursive, persistent, encoding }`; `listener` is
+  // added as a `change` handler `(eventType, filename)`.
+  function watch(path, options, listener) {
+    if (typeof options === "function") { listener = options; options = undefined; }
+    if (typeof options === "string") options = { encoding: options };
+    options = options || {};
+    if (typeof syncFs.watchAdd !== "function" || typeof onFsEvent !== "function") {
+      throw fsError(new Error("Notsup"), "watch", path);
+    }
+    const id = guard(() => syncFs.watchAdd(path, !!options.recursive), "watch", path);
+    const watcher = makeWatcher(id);
+    watchers.set(id, watcher);
+    if (typeof listener === "function") watcher.on("change", listener);
+    return watcher;
+  }
+
+  // `fs.watchFile`/`unwatchFile`: a thin StatWatcher over the same mechanism.
+  // Node polls and hands `(curr, prev)` Stats; we translate each change event.
+  const fileWatchers = new Map(); // path → { watcher, prev, listeners:Set }
+  function watchFile(path, options, listener) {
+    if (typeof options === "function") { listener = options; options = undefined; }
+    let entry = fileWatchers.get(path);
+    if (!entry) {
+      const zero = () => statSync(path, { throwIfNoEntry: false }) || makeStats({ kind: "file", size: 0 });
+      const watcher = watch(path, {}, () => {
+        const curr = zero();
+        const prev = entry.prev;
+        entry.prev = curr;
+        for (const cb of entry.listeners) cb(curr, prev);
+      });
+      entry = { watcher, prev: zero(), listeners: new Set() };
+      fileWatchers.set(path, entry);
+    }
+    if (typeof listener === "function") entry.listeners.add(listener);
+    return entry.watcher;
+  }
+  function unwatchFile(path, listener) {
+    const entry = fileWatchers.get(path);
+    if (!entry) return;
+    if (listener) entry.listeners.delete(listener);
+    else entry.listeners.clear();
+    if (entry.listeners.size === 0) { entry.watcher.close(); fileWatchers.delete(path); }
+  }
+
   const constants = {
     F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
     O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2,
@@ -405,6 +498,7 @@ export function createFs(syncFs) {
     existsSync, accessSync,
     readdirSync, mkdirSync, rmdirSync, unlinkSync, rmSync, renameSync,
     copyFileSync, realpathSync,
+    watch, watchFile, unwatchFile,
     constants,
   };
 

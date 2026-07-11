@@ -8,6 +8,14 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:fs` file watching: `fs.watch` + `watchFile`** (`src/node/fs.js`). A real
+  `FSWatcher` (an event emitter with `on`/`once`/`off`/`close`) that emits
+  `change` `(eventType, filename)` — the kernel pushes change events to the
+  process's single dispatcher (`sys.onFsEvent`), which fans each out by watch id.
+  Supports `{ recursive }` and the encoding/listener argument shapes; watching a
+  missing path throws `ENOENT`, and with no watch backing (unit tests) it throws
+  `ENOTSUP`. `watchFile`/`unwatchFile` layer a `(curr, prev)` Stats StatWatcher on
+  top. Unit-tested (fan-out + close teardown); driven end-to-end in a booted kernel.
 - **Archive CLIs: `tar`, `gzip`/`gunzip`/`zcat`, `zip`/`unzip`** (`src/tar`,
   `src/gzip`, `src/zip`, `src/unzip`, `src/archive/{tar,zip}.js`). Day-to-day
   compression tools as real `/bin` guest programs (INV-1). The container framing

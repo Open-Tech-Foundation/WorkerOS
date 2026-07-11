@@ -79,6 +79,15 @@ struct StatDto {
     nlink: u32,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchDto {
+    pid: u32,
+    watch_id: u32,
+    event_type: &'static str,
+    filename: String,
+}
+
 fn stat_dto(m: &workeros_kernel::vfs::Metadata) -> StatDto {
     StatDto {
         kind: match m.file_type {
@@ -672,6 +681,44 @@ impl WebKernel {
     #[wasm_bindgen(js_name = setTime)]
     pub fn set_time(&mut self, now_ms: f64) {
         self.inner.set_time(now_ms);
+    }
+
+    // --- fs.watch ---------------------------------------------------------
+
+    /// Register a `fs.watch` for `pid` on `path` (recursively or not); returns a
+    /// watch id. `ENOENT` if the path is missing or outside the process root.
+    #[wasm_bindgen(js_name = watchAdd)]
+    pub fn watch_add(&mut self, pid: Pid, path: String, recursive: bool) -> Result<u32, JsError> {
+        self.inner.watch_add(pid, &path, recursive).map_err(errno_to_js)
+    }
+
+    /// Stop a watch (its `FSWatcher.close()`).
+    #[wasm_bindgen(js_name = watchRemove)]
+    pub fn watch_remove(&mut self, pid: Pid, id: u32) {
+        self.inner.watch_remove(pid, id);
+    }
+
+    /// Drop every watch a process held (called when it exits).
+    #[wasm_bindgen(js_name = watchClosePid)]
+    pub fn watch_close_pid(&mut self, pid: Pid) {
+        self.inner.watch_close_pid(pid);
+    }
+
+    /// Drain pending watch deliveries as `[{ pid, watchId, eventType, filename }]`.
+    #[wasm_bindgen(js_name = drainWatchEvents)]
+    pub fn drain_watch_events(&mut self) -> Result<JsValue, JsError> {
+        let dtos: Vec<WatchDto> = self
+            .inner
+            .drain_watch_events()
+            .into_iter()
+            .map(|d| WatchDto {
+                pid: d.pid,
+                watch_id: d.watch_id,
+                event_type: d.event_type,
+                filename: d.filename,
+            })
+            .collect();
+        to_js(&dtos)
     }
 
     #[wasm_bindgen]

@@ -171,8 +171,58 @@ pub struct Kernel {
     /// [`ResourceLimits::default`] in v1; a host-override API is post-v1.
     limits: ResourceLimits,
     /// Path-based durability policy (ADR-022): which subtrees the host persists
-    /// vs. discards on close. Drives [`Kernel::snapshot`].
+    /// vs. discards on close. Drives [`Kernel::manifest`].
     mounts: vfs::mount::MountTable,
+    /// Active `fs.watch` registrations (per-process). The kernel matches VFS
+    /// change events against these and hands the host per-watch deliveries.
+    watches: Vec<Watch>,
+    /// Monotonic id for the next watch registration.
+    next_watch_id: u32,
+}
+
+/// One `fs.watch` registration: a process watching a path (recursively or not).
+#[derive(Debug)]
+struct Watch {
+    id: u32,
+    pid: Pid,
+    /// Absolute, confined path being watched (a file or directory).
+    path: String,
+    recursive: bool,
+}
+
+/// A change event routed to a specific watcher (what the host delivers to the
+/// owning process worker so its `fs.watch` listener fires).
+pub struct WatchDelivery {
+    pub pid: Pid,
+    pub watch_id: u32,
+    /// `"rename"` (create/delete/move) or `"change"` (content) — Node's two types.
+    pub event_type: &'static str,
+    /// The affected entry's name relative to the watched path (Node's `filename`).
+    pub filename: String,
+}
+
+/// Does a change at `changed` fall under a watch on `watched`? Returns the
+/// `filename` the watcher should see (relative to the watched path), or `None`.
+fn watch_match(watched: &str, recursive: bool, changed: &str) -> Option<String> {
+    if changed == watched {
+        // The watched path itself changed → Node reports its basename.
+        return Some(basename(watched));
+    }
+    let prefix = if watched == "/" { "/".to_string() } else { format!("{watched}/") };
+    let rel = changed.strip_prefix(&prefix)?;
+    // A non-recursive watch only sees direct children (no further separator).
+    if recursive || !rel.contains('/') {
+        Some(rel.to_string())
+    } else {
+        None
+    }
+}
+
+fn basename(p: &str) -> String {
+    match p.rsplit_once('/') {
+        Some((_, name)) if !name.is_empty() => name.to_string(),
+        _ => p.to_string(),
+    }
 }
 
 impl Kernel {
@@ -196,6 +246,8 @@ impl Kernel {
                 tty: Tty::new(),
                 limits,
                 mounts: vfs::mount::MountTable::default(),
+                watches: Vec::new(),
+                next_watch_id: 1,
             },
             Handshake {
                 version: VERSION,
@@ -702,6 +754,64 @@ impl Kernel {
         self.vfs.set_time(now_ms as u64);
     }
 
+    // ---- fs.watch (filesystem change notification) ----
+
+    /// Register a `fs.watch` on `path` for `pid` (recursively or not). Returns a
+    /// watch id. `ENOENT` if the path doesn't exist / is outside the process root.
+    /// The first live watch turns on change-event recording in the VFS.
+    pub fn watch_add(&mut self, pid: Pid, path: &str, recursive: bool) -> SysResult<u32> {
+        let ctx = self.contexts.get(&pid).ok_or(Errno::Badf)?;
+        let abs = ctx.resolve_confined(path)?;
+        // Must exist to watch (Node throws ENOENT otherwise).
+        self.vfs.stat(&abs)?;
+        let id = self.next_watch_id;
+        self.next_watch_id += 1;
+        self.watches.push(Watch { id, pid, path: abs, recursive });
+        self.vfs.set_watching(true);
+        Ok(id)
+    }
+
+    /// Stop a watch (its `FSWatcher.close()`). Turns recording off when the last
+    /// watch goes away.
+    pub fn watch_remove(&mut self, pid: Pid, id: u32) {
+        self.watches.retain(|w| !(w.pid == pid && w.id == id));
+        if self.watches.is_empty() {
+            self.vfs.set_watching(false);
+        }
+    }
+
+    /// Drop every watch a process held (called when it exits).
+    pub fn watch_close_pid(&mut self, pid: Pid) {
+        self.watches.retain(|w| w.pid != pid);
+        if self.watches.is_empty() {
+            self.vfs.set_watching(false);
+        }
+    }
+
+    /// Drain pending VFS change events and match them against active watches,
+    /// producing the per-watcher deliveries the host routes to program workers.
+    pub fn drain_watch_events(&mut self) -> Vec<WatchDelivery> {
+        let events = self.vfs.drain_events();
+        let mut out = Vec::new();
+        for (path, kind) in events {
+            let event_type = match kind {
+                vfs::FsEventKind::Rename => "rename",
+                vfs::FsEventKind::Change => "change",
+            };
+            for w in &self.watches {
+                if let Some(filename) = watch_match(&w.path, w.recursive, &path) {
+                    out.push(WatchDelivery {
+                        pid: w.pid,
+                        watch_id: w.id,
+                        event_type,
+                        filename,
+                    });
+                }
+            }
+        }
+        out
+    }
+
     /// `mkdir` a single directory.
     pub fn sys_mkdir(&mut self, pid: Pid, path: &str) -> SysResult<()> {
         let ctx = self.contexts.get_mut(&pid).ok_or(Errno::Badf)?;
@@ -1106,5 +1216,58 @@ mod tests {
         k.sys_unlink(pid, "/work/g").unwrap();
         k.sys_rmdir(pid, "/work").unwrap();
         assert_eq!(k.sys_stat(pid, "/work").unwrap_err(), Errno::Noent);
+    }
+
+    #[test]
+    fn fs_watch_reports_rename_then_change() {
+        let mut k = boot();
+        let pid = spawn_main(&mut k, "");
+        k.sys_mkdir(pid, "/w").unwrap(); // before the watch → no event recorded
+        let id = k.watch_add(pid, "/w", false).unwrap();
+
+        // Create + write a file: a "rename" (appeared) then a "change" (content).
+        let fd = k.sys_open(pid, "/w/a.txt", OpenOptions { create: true, ..Default::default() }).unwrap();
+        k.sys_write(pid, fd, b"hi").unwrap();
+        k.sys_close(pid, fd).unwrap();
+
+        let evs = k.drain_watch_events();
+        assert!(evs.iter().any(|e| e.watch_id == id && e.event_type == "rename" && e.filename == "a.txt"));
+        assert!(evs.iter().any(|e| e.watch_id == id && e.event_type == "change" && e.filename == "a.txt"));
+        // Draining consumed the queue; a fresh mutation yields exactly one event.
+        k.sys_mkdir(pid, "/w/sub").unwrap();
+        let evs2 = k.drain_watch_events();
+        assert_eq!(evs2.len(), 1);
+        assert_eq!((evs2[0].event_type, evs2[0].filename.as_str()), ("rename", "sub"));
+    }
+
+    #[test]
+    fn fs_watch_recursive_vs_flat_scope() {
+        let mut k = boot();
+        let pid = spawn_main(&mut k, "");
+        k.sys_mkdir(pid, "/r").unwrap();
+        k.sys_mkdir(pid, "/r/sub").unwrap();
+        let flat = k.watch_add(pid, "/r", false).unwrap();
+        let deep = k.watch_add(pid, "/r", true).unwrap();
+
+        let fd = k.sys_open(pid, "/r/sub/f", OpenOptions { create: true, ..Default::default() }).unwrap();
+        k.sys_close(pid, fd).unwrap();
+
+        let evs = k.drain_watch_events();
+        // The recursive watch sees the grandchild (relative "sub/f"); the flat one doesn't.
+        assert!(evs.iter().any(|e| e.watch_id == deep && e.filename == "sub/f"));
+        assert!(!evs.iter().any(|e| e.watch_id == flat));
+    }
+
+    #[test]
+    fn fs_watch_close_stops_events_and_missing_path_is_enoent() {
+        let mut k = boot();
+        let pid = spawn_main(&mut k, "");
+        let id = k.watch_add(pid, "/", false).unwrap();
+        k.watch_remove(pid, id);
+        // No live watchers → mutations record nothing.
+        k.sys_mkdir(pid, "/x").unwrap();
+        assert!(k.drain_watch_events().is_empty());
+        // Watching a nonexistent path is ENOENT (Node's contract).
+        assert_eq!(k.watch_add(pid, "/nope", false).unwrap_err(), Errno::Noent);
     }
 }

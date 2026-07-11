@@ -146,6 +146,42 @@ test("statSync reports real mtime after a write (host clock)", () => {
   assert.equal(st.atimeMs, st.mtimeMs, "atime reported as mtime (untracked)");
 });
 
+test("fs.watch fans events to the listener and close() unregisters", () => {
+  const syncFs = createFakeSyncFs();
+  // Capture the single dispatcher node:fs registers, so we can simulate the
+  // kernel pushing change events.
+  let dispatch = null;
+  const fs = createFs(syncFs, (cb) => { dispatch = cb; });
+  fs.mkdirSync("/w");
+  fs.writeFileSync("/w/a.txt", "x");
+
+  const seen = [];
+  const watcher = fs.watch("/w", (eventType, filename) => seen.push([eventType, filename]));
+  assert.equal(typeof watcher.close, "function");
+
+  // Simulate the kernel delivering events for this watch (id 1 is the first).
+  dispatch(1, "rename", "a.txt");
+  dispatch(1, "change", "a.txt");
+  assert.deepEqual(seen, [["rename", "a.txt"], ["change", "a.txt"]]);
+
+  // After close, further events are dropped and 'close' fires.
+  let closed = false;
+  watcher.on("close", () => { closed = true; });
+  watcher.close();
+  assert.equal(closed, true);
+  dispatch(1, "change", "a.txt");
+  assert.equal(seen.length, 2, "no events after close");
+});
+
+test("fs.watch on a missing path throws ENOENT; no watch API → ENOTSUP", () => {
+  const fs = createFs(createFakeSyncFs(), (cb) => cb);
+  assert.throws(() => fs.watch("/missing", () => {}), (e) => e.code === "ENOENT");
+  // Without an onFsEvent dispatcher, watch is unsupported.
+  const bare = createFs(createFakeSyncFs());
+  bare.mkdirSync("/d");
+  assert.throws(() => bare.watch("/d", () => {}), (e) => e.code === "ENOTSUP");
+});
+
 test("readlinkSync on a non-link throws EINVAL; buffer encoding", () => {
   const fs = createFs(createFakeSyncFs());
   fs.writeFileSync("/reg", "x");

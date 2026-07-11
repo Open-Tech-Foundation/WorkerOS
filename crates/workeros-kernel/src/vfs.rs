@@ -226,6 +226,15 @@ pub enum FileType {
     Symlink,
 }
 
+/// A filesystem change, in the two flavors Node's `fs.watch` distinguishes:
+/// `Rename` for a path appearing/disappearing/moving (create/unlink/mkdir/rmdir/
+/// rename/symlink) and `Change` for content mutation of an existing file (write).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsEventKind {
+    Rename,
+    Change,
+}
+
 /// Metadata for an inode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Metadata {
@@ -247,6 +256,17 @@ pub trait Vfs {
     /// Set the wall clock (ms since epoch) the VFS stamps into inode times. The
     /// kernel is clock-less (ADR-020); the host supplies time before mutations.
     fn set_time(&mut self, now_ms: u64);
+    /// Whether any watcher is registered — mutation sites only record change
+    /// events when this is true, so an unwatched OS pays nothing (`fs.watch`).
+    fn watching(&self) -> bool;
+    /// Enable/disable change-event recording (the kernel flips this with the
+    /// live watch count).
+    fn set_watching(&mut self, on: bool);
+    /// Record a filesystem change at `path` (no-op unless [`watching`](Self::watching)).
+    /// Consecutive duplicate events are coalesced.
+    fn note_event(&mut self, path: &str, kind: FsEventKind);
+    /// Drain the pending change events (the kernel matches them to watchers).
+    fn drain_events(&mut self) -> Vec<(String, FsEventKind)>;
     /// Look up the inode at an absolute normalized path, following symlinks.
     fn resolve(&self, path: &str) -> SysResult<Ino>;
     /// Metadata for an existing path, following a final symlink (`stat`).
@@ -326,6 +346,11 @@ pub struct MemVfs {
     auto: VecDeque<(u64, Snapshot)>,
     /// Monotonic id stamped onto each auto-snapshot (its `auto:<seq>` name).
     snap_seq: u64,
+    /// Pending filesystem change events (drained by the kernel's watch layer).
+    /// Only populated while `watching` (a live `fs.watch` exists).
+    events: Vec<(String, FsEventKind)>,
+    /// Whether any watcher is registered — gates change-event recording.
+    watching: bool,
 }
 
 impl Default for MemVfs {
@@ -359,6 +384,8 @@ impl MemVfs {
             snapshots: BTreeMap::new(),
             auto: VecDeque::new(),
             snap_seq: 0,
+            events: Vec::new(),
+            watching: false,
         }
     }
 
@@ -1169,6 +1196,39 @@ fn parse_manifest_chunks(bytes: &[u8]) -> SysResult<Vec<Hash>> {
 }
 
 impl Vfs for MemVfs {
+    fn watching(&self) -> bool {
+        self.watching
+    }
+
+    fn set_watching(&mut self, on: bool) {
+        self.watching = on;
+        if !on {
+            self.events.clear();
+        }
+    }
+
+    fn note_event(&mut self, path: &str, kind: FsEventKind) {
+        if !self.watching {
+            return;
+        }
+        // Coalesce an immediately-repeated identical event (e.g. a truncating
+        // open followed by the write it implies both report a change).
+        if let Some((last_path, last_kind)) = self.events.last() {
+            if last_path == path && *last_kind == kind {
+                return;
+            }
+        }
+        // Bound the buffer defensively; a watcher that never drains can't OOM us.
+        if self.events.len() >= 8192 {
+            self.events.remove(0);
+        }
+        self.events.push((path.to_string(), kind));
+    }
+
+    fn drain_events(&mut self) -> Vec<(String, FsEventKind)> {
+        std::mem::take(&mut self.events)
+    }
+
     fn set_time(&mut self, now_ms: u64) {
         self.now = now_ms;
     }

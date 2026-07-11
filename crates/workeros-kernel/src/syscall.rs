@@ -167,7 +167,7 @@ enum Handle {
     Stdin,
     Stdout,
     Stderr,
-    File { ino: usize, cursor: u64 },
+    File { ino: usize, cursor: u64, path: String },
     Dir { ino: usize },
     Pipe { id: PipeId, end: PipeEnd },
 }
@@ -239,6 +239,13 @@ impl ProcessCtx {
     }
 
     /// Resolve a guest path against cwd, normalize, and confine to `fs_root`.
+    /// Resolve a path argument to its confined absolute form (the same rule the
+    /// filesystem syscalls apply). Exposed so the kernel's `fs.watch` layer can
+    /// register a watch against a confined path.
+    pub fn resolve_confined(&self, path_arg: &str) -> SysResult<String> {
+        self.resolve_path(path_arg)
+    }
+
     fn resolve_path(&self, path_arg: &str) -> SysResult<String> {
         let abs = path::normalize(&self.cwd, path_arg);
         let root = &self.caps.fs_root;
@@ -273,7 +280,10 @@ impl ProcessCtx {
         } else {
             0
         };
-        self.fds.insert(fd, Handle::File { ino, cursor });
+        if matches!(mode, RedirectMode::Write | RedirectMode::Append) {
+            vfs.note_event(&abs, crate::vfs::FsEventKind::Change);
+        }
+        self.fds.insert(fd, Handle::File { ino, cursor, path: abs });
         Ok(())
     }
 
@@ -314,32 +324,48 @@ impl ProcessCtx {
 
     pub fn path_open(&mut self, vfs: &mut dyn Vfs, path_arg: &str, opts: OpenOptions) -> SysResult<Fd> {
         let abs = self.resolve_path(path_arg)?;
+        // For `fs.watch`: note whether this open creates a new path (rename) or
+        // truncates an existing file (change). Only probed when a watcher exists.
+        let existed = if vfs.watching() { vfs.resolve(&abs).is_ok() } else { true };
         let ino = vfs.open(&abs, opts)?;
+        if vfs.watching() {
+            if !existed && opts.create {
+                vfs.note_event(&abs, crate::vfs::FsEventKind::Rename);
+            } else if existed && opts.truncate {
+                vfs.note_event(&abs, crate::vfs::FsEventKind::Change);
+            }
+        }
         let meta = vfs.stat(&abs)?;
         let handle = match meta.file_type {
             FileType::Dir => Handle::Dir { ino },
             // `open`/`stat` follow symlinks, so a resolved target is a file or
             // dir; a symlink type here would mean a dangling link (already an
             // error above). Treat as a file handle defensively.
-            FileType::File | FileType::Symlink => Handle::File { ino, cursor: 0 },
+            FileType::File | FileType::Symlink => Handle::File { ino, cursor: 0, path: abs },
         };
         self.alloc_fd(handle)
     }
 
     pub fn path_create_directory(&mut self, vfs: &mut dyn Vfs, path_arg: &str) -> SysResult<()> {
         let abs = self.resolve_path(path_arg)?;
-        vfs.mkdir(&abs).map(|_| ())
+        vfs.mkdir(&abs)?;
+        vfs.note_event(&abs, crate::vfs::FsEventKind::Rename);
+        Ok(())
     }
 
     pub fn path_unlink_file(&mut self, vfs: &mut dyn Vfs, path_arg: &str) -> SysResult<()> {
         let abs = self.resolve_path(path_arg)?;
-        vfs.unlink(&abs)
+        vfs.unlink(&abs)?;
+        vfs.note_event(&abs, crate::vfs::FsEventKind::Rename);
+        Ok(())
     }
 
     /// `path_remove_directory`.
     pub fn path_remove_directory(&mut self, vfs: &mut dyn Vfs, path_arg: &str) -> SysResult<()> {
         let abs = self.resolve_path(path_arg)?;
-        vfs.rmdir(&abs)
+        vfs.rmdir(&abs)?;
+        vfs.note_event(&abs, crate::vfs::FsEventKind::Rename);
+        Ok(())
     }
 
     /// Stat a path (for coreutils / `ls`). Follows a final symlink.
@@ -359,7 +385,9 @@ impl ProcessCtx {
     /// path is confined to the process root; the target is opaque bytes.
     pub fn path_symlink(&mut self, vfs: &mut dyn Vfs, target: &str, link_arg: &str) -> SysResult<()> {
         let abs = self.resolve_path(link_arg)?;
-        vfs.symlink(target, &abs).map(|_| ())
+        vfs.symlink(target, &abs)?;
+        vfs.note_event(&abs, crate::vfs::FsEventKind::Rename);
+        Ok(())
     }
 
     /// Read a symlink's target (Node `fs.readlink`).
@@ -378,7 +406,11 @@ impl ProcessCtx {
     pub fn rename(&mut self, vfs: &mut dyn Vfs, from: &str, to: &str) -> SysResult<()> {
         let from_abs = self.resolve_path(from)?;
         let to_abs = self.resolve_path(to)?;
-        vfs.rename(&from_abs, &to_abs)
+        vfs.rename(&from_abs, &to_abs)?;
+        // A move is a "rename" event on both the source and the destination.
+        vfs.note_event(&from_abs, crate::vfs::FsEventKind::Rename);
+        vfs.note_event(&to_abs, crate::vfs::FsEventKind::Rename);
+        Ok(())
     }
 
     pub fn fd_readdir(&self, vfs: &dyn Vfs, fd: Fd) -> SysResult<Vec<DirEntry>> {
@@ -412,9 +444,12 @@ impl ProcessCtx {
                 self.stderr.extend_from_slice(data);
                 Ok(data.len())
             }
-            Some(Handle::File { ino, cursor }) => {
+            Some(Handle::File { ino, cursor, path }) => {
                 let n = vfs.write_at(*ino, *cursor, data)?;
                 *cursor += n as u64;
+                if n > 0 {
+                    vfs.note_event(path, crate::vfs::FsEventKind::Change);
+                }
                 Ok(n)
             }
             Some(Handle::Pipe { id, end: PipeEnd::Write }) => pipes.write(*id, data),
@@ -471,7 +506,7 @@ impl ProcessCtx {
                 }
                 Ok(ReadOutcome::Data(n))
             }
-            Some(Handle::File { ino, cursor }) => {
+            Some(Handle::File { ino, cursor, .. }) => {
                 let n = vfs.read_at(*ino, *cursor, buf)?;
                 *cursor += n as u64;
                 Ok(ReadOutcome::Data(n))
@@ -487,7 +522,7 @@ impl ProcessCtx {
 
     pub fn fd_seek(&mut self, vfs: &dyn Vfs, fd: Fd, offset: i64, whence: Whence) -> SysResult<u64> {
         match self.fds.get_mut(&fd) {
-            Some(Handle::File { ino, cursor }) => {
+            Some(Handle::File { ino, cursor, .. }) => {
                 let base = match whence {
                     Whence::Set => 0i64,
                     Whence::Cur => *cursor as i64,

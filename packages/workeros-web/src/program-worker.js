@@ -44,6 +44,9 @@ function writeBytes(fd, bytes) {
 // kernel worker delivers SIGINT/SIGWINCH/SIGTSTP as async messages; a JS guest
 // processes them at event-loop boundaries (cooperative — there is no preemption).
 let signalDispatch = null;
+// The guest's fs.watch event dispatcher (installed by node:fs). The kernel worker
+// delivers FS_EVENT messages; node:fs routes each to the right FSWatcher.
+let fsEventDispatch = null;
 
 let exited = false;
 function reportExit(code) {
@@ -90,6 +93,9 @@ function makeSyncFs(syncCall) {
     unlink: (path) => { json("unlink", { path }); },
     rmdir: (path) => { json("rmdir", { path }); },
     rename: (from, to) => { json("rename", { from, to }); },
+    // fs.watch: register/unregister synchronously (events arrive async via FS_EVENT).
+    watchAdd: (path, recursive) => json("watchAdd", { path, recursive }).id,
+    watchRemove: (id) => { json("watchRemove", { id }); },
   };
 }
 
@@ -126,6 +132,9 @@ function makeSys(start, syncCall) {
     // kernel worker whether the guest catches a signal (so a caught SIGINT is
     // delivered cooperatively rather than the process being hard-killed).
     onSignal: (cb) => { signalDispatch = cb; },
+    // fs.watch dispatcher: node:fs registers one callback; the kernel worker's
+    // FS_EVENT messages are routed here as (watchId, eventType, filename).
+    onFsEvent: (cb) => { fsEventDispatch = cb; },
     sighandle: (signal, on) =>
       kernel.postMessage({ type: MSG.SIGACTION, signal, on: !!on }),
     readdir: (path) => call("readdir", { path }),
@@ -268,6 +277,13 @@ self.onmessage = async (ev) => {
     // Cooperative delivery: hand the signal to the guest's dispatcher (if any).
     try { signalDispatch?.(msg.signal); } catch (e) {
       writeBytes(2, new TextEncoder().encode("signal handler error: " + (e?.message ?? e) + "\n"));
+    }
+    return;
+  }
+  if (msg.type === MSG.FS_EVENT) {
+    // A watched path changed — hand it to node:fs's watch dispatcher (if any).
+    try { fsEventDispatch?.(msg.watchId, msg.eventType, msg.filename); } catch (e) {
+      writeBytes(2, new TextEncoder().encode("fs.watch handler error: " + (e?.message ?? e) + "\n"));
     }
     return;
   }

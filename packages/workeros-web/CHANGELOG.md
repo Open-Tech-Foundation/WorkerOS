@@ -8,6 +8,16 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`fs.watch` delivery across the worker boundary.** The sync channel gains
+  `watchAdd`/`watchRemove` (register/unregister a watch synchronously, returning a
+  watch id); after every mutating syscall the kernel worker drains the kernel's
+  pending watch deliveries and posts each as a new `MSG.FS_EVENT` to the *owning*
+  process worker, where `node:fs` fans it out to the right `FSWatcher`. A process's
+  watches are torn down on exit (`watchClosePid`). New wasm bindings:
+  `watchAdd`/`watchRemove`/`watchClosePid`/`drainWatchEvents`; the program worker
+  exposes `sys.onFsEvent`. Proven end-to-end by a headless-browser test where a
+  running `node` process `fs.watch`es a directory and receives the change event
+  from a later write (`tools/sync-fs.test.js`).
 - **`node:fs` symlink + mtime syscalls wired through the stack.** The sync-syscall
   channel + async ABI gain `lstat`/`symlink`/`readlink` (routed to the new kernel
   ops), `stat` now returns real timestamps, and the kernel worker **stamps the

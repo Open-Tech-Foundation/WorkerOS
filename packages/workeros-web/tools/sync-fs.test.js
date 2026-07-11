@@ -116,6 +116,36 @@ test("symlinkSync/readlinkSync/lstatSync + real mtime through node:fs", opts, as
   ]);
 });
 
+test("fs.watch delivers a change event to a running node process", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      await os.fs.write(
+        "/proj/watch.js",
+        [
+          "const fs = require('fs');",
+          "fs.mkdirSync('/w', { recursive: true });",
+          "const w = fs.watch('/w', (type, file) => {",
+          "  console.log('EVENT', type, file);",
+          "  w.close();",
+          "  process.exit(0);",
+          "});",
+          // Mutate on a turn of the loop, after the watcher is registered; the
+          // event is delivered asynchronously (kernel → worker → listener).
+          "setTimeout(() => fs.writeFileSync('/w/a.txt', 'hi'), 50);",
+          "setTimeout(() => { console.log('TIMEOUT'); process.exit(1); }, 4000);",
+        ].join("\n"),
+      );
+      return await window.run(os, ["node", "watch.js"], { cwd: "/proj" });
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  const line = result.out.trim();
+  assert.match(line, /^EVENT (rename|change) a\.txt$/, line);
+});
+
 test("readFileSync on a missing file throws ENOENT with a Node-shaped error", opts, async () => {
   const { result, pageErrors } = await withPage((page) =>
     page.evaluate(async () => {

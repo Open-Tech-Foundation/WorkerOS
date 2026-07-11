@@ -319,6 +319,7 @@ function handleExit(pid, code) {
   if (!rec || rec.done) return;
   rec.done = true;
   kernel.mark_exited(pid, code); // idempotent; closes its pipe/file fds → EOF downstream
+  kernel.watchClosePid(pid); // drop this process's fs.watch registrations
   retryPendingReads(); // downstream pipe readers may now see EOF
   retrySyncPending();
   retryInjectReads(); // an injected preview connection may now see EOF/data
@@ -535,6 +536,15 @@ function serviceSync(pid) {
       case "readlink":
         writeResponse(rec.syncSab, 0, { target: kernel.sys_readlink(pid, req.path) });
         break;
+      case "watchAdd":
+        writeResponse(rec.syncSab, 0, {
+          id: kernel.watchAdd(pid, req.path, !!req.recursive),
+        });
+        break;
+      case "watchRemove":
+        kernel.watchRemove(pid, req.id);
+        writeResponse(rec.syncSab, 0, {});
+        break;
       case "readdir":
         writeResponse(rec.syncSab, 0, { entries: kernel.sys_readdir(pid, req.path) });
         break;
@@ -557,9 +567,27 @@ function serviceSync(pid) {
       default:
         writeResponse(rec.syncSab, -1, { error: "unknown sync call: " + req.call });
     }
+    if (MUTATING_CALLS.has(req.call)) deliverWatchEvents();
   } catch (e) {
     // A kernel errno (e.g. Noent). The WASI host maps a negative status to an errno.
     writeResponse(rec.syncSab, -1, { error: String(e && e.message ? e.message : e) });
+  }
+}
+
+// Drain the kernel's pending fs.watch deliveries after a mutation and route each
+// to the owning process worker, where its `fs.watch` listener fires (ADR-022).
+function deliverWatchEvents() {
+  const evs = kernel.drainWatchEvents();
+  for (const ev of evs) {
+    const rec = programs.get(ev.pid);
+    if (rec && rec.worker && !rec.done) {
+      rec.worker.postMessage({
+        type: MSG.FS_EVENT,
+        watchId: ev.watchId,
+        eventType: ev.eventType,
+        filename: ev.filename,
+      });
+    }
   }
 }
 
@@ -711,6 +739,7 @@ function handleSyscall(pid, msg) {
       default:
         reply(pid, id, false, "unknown syscall: " + call);
     }
+    if (MUTATING_CALLS.has(call)) deliverWatchEvents();
   } catch (e) {
     if (id !== undefined) reply(pid, id, false, String(e.message || e));
   }

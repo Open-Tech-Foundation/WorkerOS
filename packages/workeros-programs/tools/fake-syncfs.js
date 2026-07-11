@@ -23,7 +23,9 @@ export function createFakeSyncFs(opts = {}) {
   const links = new Map(); // path → symlink target (uninterpreted)
   const mtimes = new Map(); // path → mtime (ms); a monotonic fake clock
   const fds = new Map(); // fd → { path, offset }
+  const watchIds = new Set(); // live fs.watch ids
   let nextFd = 3;
+  let nextWatchId = 1;
   let clock = 1000; // fake wall clock; bumps on each mutation so mtimes are real
   const touch = (path) => mtimes.set(path, (clock += 1000));
 
@@ -173,6 +175,19 @@ export function createFakeSyncFs(opts = {}) {
         dirs.delete(from);
         dirs.add(to);
       } else fail("Noent");
+    },
+
+    // fs.watch: register a watch (existence-checked, like the kernel) and return
+    // an id. Event *delivery* is the kernel's job in production; unit tests drive
+    // the createFs dispatcher directly, so these just gate + hand back an id.
+    watchAdd(path, _recursive) {
+      if (!exists(path)) fail("Noent");
+      const id = nextWatchId++;
+      watchIds.add(id);
+      return id;
+    },
+    watchRemove(id) {
+      watchIds.delete(id);
     },
 
     // test helper: seed a file

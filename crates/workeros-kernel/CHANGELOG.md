@@ -7,6 +7,18 @@ a release yet, so everything lives under **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **`fs.watch` change notification (kernel core).** A new filesystem
+  change-event stream plus a per-process watch registry. Mutating syscalls record
+  events at the confined-path layer — create/unlink/mkdir/rmdir/rename/symlink →
+  `Rename`, content writes → `Change` (`FsEventKind`) — but only while a watcher
+  is live (`MemVfs::set_watching`/`note_event`/`drain_events`, so an unwatched OS
+  pays nothing; consecutive duplicates coalesce). `Kernel::watch_add`/`watch_remove`/
+  `watch_close_pid` manage registrations (a watch on a missing path is `ENOENT`),
+  and `drain_watch_events` matches pending events against them — honoring recursive
+  vs. direct-child scope and reporting Node's `filename` relative to the watched
+  path — yielding the per-watcher deliveries the host routes to program workers.
+  Native-tested (rename-then-change ordering, recursive vs. flat scope, drain
+  semantics, close/exit teardown, ENOENT).
 - **Syscall surface for symlinks + host clock (`node:fs` wiring).** New
   `Kernel::sys_lstat` (stat without following a final symlink), `sys_symlink`,
   and `sys_readlink` expose the Stage-1 VFS symlink ops to guests through the
