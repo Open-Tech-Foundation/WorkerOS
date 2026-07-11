@@ -8,6 +8,11 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:querystring`** (`src/node/querystring.js`). Implements the legacy
+  `parse`/`decode`, `stringify`/`encode`, `escape`, `unescape`, and
+  `unescapeBuffer` API, including repeated keys, custom separators/codecs,
+  `maxKeys`, malformed percent escapes, and null-prototype parse results. It is
+  registered for both CommonJS and ESM `node:` resolution.
 - **Interactive `process.stdin`** (`src/node/tty.js`, `src/node/node-program.js`).
   `process.stdin` now actually reads fd 0. `tty.ReadStream` became a real readable:
   a pump loop drains the fd (blocking in the kernel until keystrokes/EOF) and drives

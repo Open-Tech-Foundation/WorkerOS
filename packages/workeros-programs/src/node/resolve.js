@@ -33,6 +33,7 @@ export const NODE_BUILTINS = new Set([
   "crypto",
   "zlib",
   "child_process",
+  "querystring",
 ]);
 
 export const isBuiltinSpec = (spec) => spec.startsWith("node:") || NODE_BUILTINS.has(spec);

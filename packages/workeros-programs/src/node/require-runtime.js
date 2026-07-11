@@ -27,6 +27,7 @@ import { createTimersPromises } from "./timers-promises.js";
 import { createReadline } from "./readline.js";
 import { zlib as zlibModule } from "./zlib.js";
 import { createChildProcess } from "./child-process.js";
+import querystringModule from "./querystring.js";
 
 // ---- core builtins --------------------------------------------------------
 // `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
@@ -77,6 +78,7 @@ export function makeBuiltins(sys, extras) {
     ["crypto", cryptoModule],
     ["zlib", zlibModule],
     ["child_process", childProcess],
+    ["querystring", querystringModule],
   ]);
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.
