@@ -747,6 +747,17 @@ impl Kernel {
         self.contexts.get(&pid).ok_or(Errno::Badf)?.path_readlink(&self.vfs, path)
     }
 
+    /// Create a hard link `newpath` → the file `existing` (Node `fs.link`).
+    pub fn sys_link(&mut self, pid: Pid, existing: &str, newpath: &str) -> SysResult<()> {
+        let ctx = self.contexts.get_mut(&pid).ok_or(Errno::Badf)?;
+        ctx.path_link(&mut self.vfs, existing, newpath)
+    }
+
+    /// Canonicalize a path, resolving symlinks (Node `fs.realpath`).
+    pub fn sys_realpath(&self, pid: Pid, path: &str) -> SysResult<String> {
+        self.contexts.get(&pid).ok_or(Errno::Badf)?.path_realpath(&self.vfs, path)
+    }
+
     /// Set the kernel's wall clock (ms since epoch). The kernel is clock-less
     /// (ADR-020); the host stamps this before a mutation so inode mtimes/ctimes
     /// reflect real time rather than 0.

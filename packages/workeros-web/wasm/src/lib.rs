@@ -677,6 +677,16 @@ impl WebKernel {
         self.inner.sys_readlink(pid, &path).map_err(errno_to_js)
     }
 
+    #[wasm_bindgen]
+    pub fn sys_link(&mut self, pid: Pid, existing: String, newpath: String) -> Result<(), JsError> {
+        self.inner.sys_link(pid, &existing, &newpath).map_err(errno_to_js)
+    }
+
+    #[wasm_bindgen]
+    pub fn sys_realpath(&self, pid: Pid, path: String) -> Result<String, JsError> {
+        self.inner.sys_realpath(pid, &path).map_err(errno_to_js)
+    }
+
     /// Stamp the kernel wall clock (ms) before a mutation so mtimes are real.
     #[wasm_bindgen(js_name = setTime)]
     pub fn set_time(&mut self, now_ms: f64) {

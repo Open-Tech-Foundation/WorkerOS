@@ -277,6 +277,13 @@ pub trait Vfs {
     fn symlink(&mut self, target: &str, linkpath: &str) -> SysResult<Ino>;
     /// Read a symbolic link's target. Errors with `EINVAL` if not a symlink.
     fn readlink(&self, path: &str) -> SysResult<String>;
+    /// Create a hard link at `newpath` naming the same inode `existing` resolves
+    /// to (a second directory entry, shared content). Directories can't be
+    /// hard-linked (`EISDIR`); `newpath` must not already exist (`EEXIST`).
+    fn link(&mut self, existing: &str, newpath: &str) -> SysResult<()>;
+    /// Canonicalize `path`, resolving every symlink component to its real target
+    /// and returning the resulting absolute path (`realpath(3)` / `fs.realpath`).
+    fn realpath(&self, path: &str) -> SysResult<String>;
     /// Create a directory. Parent must exist; errors if the path exists.
     fn mkdir(&mut self, path: &str) -> SysResult<Ino>;
     /// List a directory's entries by path (excludes `.`/`..`).
@@ -513,6 +520,47 @@ impl MemVfs {
             }
         }
         Ok(cur)
+    }
+
+    /// Like [`walk_path`](Self::walk_path) but returns the **canonical** absolute
+    /// path (every symlink, including a final one, resolved) alongside its inode —
+    /// the basis for `realpath`. Differs from `walk_path` in that a symlink's
+    /// target is itself canonicalized (so chained links collapse fully).
+    fn realpath_walk(&self, path: &str, depth: &mut u32) -> SysResult<(String, Ino)> {
+        let mut cur = ROOT_INO;
+        let mut cur_dir = String::from("/");
+        for comp in path::components(path) {
+            let child = match &self.get(cur)?.kind {
+                Kind::Dir { entries } => *entries.get(comp).ok_or(Errno::Noent)?,
+                _ => return Err(Errno::Notdir),
+            };
+            if self.get(child)?.is_symlink() {
+                *depth += 1;
+                if *depth > MAX_SYMLINK_DEPTH {
+                    return Err(Errno::Loop);
+                }
+                let target = match &self.get(child)?.kind {
+                    Kind::Symlink { target } => target.clone(),
+                    _ => unreachable!("checked is_symlink"),
+                };
+                let abs = if target.starts_with('/') {
+                    path::normalize("/", &target)
+                } else {
+                    path::normalize(&cur_dir, &target)
+                };
+                let (canon, cino) = self.realpath_walk(&abs, depth)?;
+                cur_dir = canon;
+                cur = cino;
+            } else {
+                cur = child;
+                cur_dir = if cur_dir == "/" {
+                    format!("/{comp}")
+                } else {
+                    format!("{cur_dir}/{comp}")
+                };
+            }
+        }
+        Ok((cur_dir, cur))
     }
 
     /// Resolve the parent directory of `path` (following symlinks in the parent
@@ -1269,6 +1317,38 @@ impl Vfs for MemVfs {
             Kind::Symlink { target } => Ok(target.clone()),
             _ => Err(Errno::Inval),
         }
+    }
+
+    fn link(&mut self, existing: &str, newpath: &str) -> SysResult<()> {
+        // Resolve the existing name to its inode (following symlinks to the real
+        // file). Directories can't gain a second hard link.
+        let ino = self.resolve_ino(existing)?;
+        if self.get(ino)?.is_dir() {
+            return Err(Errno::Isdir);
+        }
+        let (parent_ino, name) = self.resolve_parent(newpath)?;
+        path::validate_component(name)?;
+        if self.dir_entries(parent_ino)?.contains_key(name) {
+            return Err(Errno::Exist);
+        }
+        // A second directory entry for the same inode; bump its link count. The
+        // inode (and its chunks) now survives until *both* names are unlinked —
+        // the existing `nlink`/reap accounting already handles that.
+        if let Kind::Dir { entries } = &mut self.get_mut(parent_ino)?.kind {
+            entries.insert(name.to_string(), ino);
+        }
+        let now = self.now;
+        let inode = self.get_mut(ino)?;
+        inode.nlink += 1;
+        inode.ctime = now; // link count is a metadata change
+        self.touch_mtime(parent_ino);
+        self.bump();
+        Ok(())
+    }
+
+    fn realpath(&self, path: &str) -> SysResult<String> {
+        let (canon, _) = self.realpath_walk(path, &mut 0)?;
+        Ok(canon)
     }
 
     fn mkdir(&mut self, path: &str) -> SysResult<Ino> {
@@ -2232,6 +2312,64 @@ mod tests {
         let mut vfs = fs();
         write_file(&mut vfs, "/f", b"x");
         assert_eq!(vfs.readlink("/f").unwrap_err(), Errno::Inval);
+    }
+
+    #[test]
+    fn hard_link_shares_inode_content_and_refcounts() {
+        let mut vfs = fs();
+        write_file(&mut vfs, "/a", b"shared");
+        vfs.link("/a", "/b").unwrap();
+        // Same bytes, one physical chunk (a hard link shares the inode + chunks).
+        assert_eq!(read_file(&vfs, "/b"), b"shared");
+        assert_eq!(vfs.chunk_count(), 1);
+        assert_eq!(vfs.stat("/a").unwrap().nlink, 2);
+        assert_eq!(vfs.lstat("/b").unwrap().nlink, 2);
+        assert_eq!(vfs.stat("/a").unwrap().ino, vfs.stat("/b").unwrap().ino);
+        // Unlinking one name keeps the other name + the content.
+        vfs.unlink("/a").unwrap();
+        assert_eq!(read_file(&vfs, "/b"), b"shared");
+        assert_eq!(vfs.stat("/b").unwrap().nlink, 1);
+        assert_eq!(vfs.chunk_count(), 1);
+        // Unlinking the last name frees the inode + its chunks.
+        vfs.unlink("/b").unwrap();
+        assert_eq!(vfs.chunk_count(), 0);
+    }
+
+    #[test]
+    fn hard_link_rejects_dir_existing_and_missing() {
+        let mut vfs = fs();
+        vfs.mkdir("/d").unwrap();
+        assert_eq!(vfs.link("/d", "/e").unwrap_err(), Errno::Isdir);
+        write_file(&mut vfs, "/a", b"x");
+        write_file(&mut vfs, "/b", b"y");
+        assert_eq!(vfs.link("/a", "/b").unwrap_err(), Errno::Exist);
+        assert_eq!(vfs.link("/missing", "/c").unwrap_err(), Errno::Noent);
+    }
+
+    #[test]
+    fn realpath_collapses_chained_symlinks() {
+        let mut vfs = fs();
+        vfs.mkdir("/real").unwrap();
+        write_file(&mut vfs, "/real/file", b"x");
+        vfs.symlink("/real", "/link1").unwrap(); // /link1 -> /real
+        vfs.symlink("/link1", "/link2").unwrap(); // /link2 -> /link1 (chain)
+        assert_eq!(vfs.realpath("/link2/file").unwrap(), "/real/file");
+        assert_eq!(vfs.realpath("/link1").unwrap(), "/real");
+        assert_eq!(vfs.realpath("/real/file").unwrap(), "/real/file");
+        assert_eq!(vfs.realpath("/").unwrap(), "/");
+        // A dangling link canonicalizes to ENOENT.
+        vfs.symlink("/nope", "/dangling").unwrap();
+        assert_eq!(vfs.realpath("/dangling").unwrap_err(), Errno::Noent);
+    }
+
+    #[test]
+    fn realpath_resolves_relative_symlink_against_link_dir() {
+        let mut vfs = fs();
+        vfs.mkdir("/a").unwrap();
+        vfs.mkdir("/a/b").unwrap();
+        write_file(&mut vfs, "/a/b/f", b"x");
+        vfs.symlink("b", "/a/link").unwrap(); // relative target → /a/b
+        assert_eq!(vfs.realpath("/a/link/f").unwrap(), "/a/b/f");
     }
 
     // --- Timestamps ---------------------------------------------------------

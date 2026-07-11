@@ -134,6 +134,26 @@ export function createFakeSyncFs(opts = {}) {
       if (links.has(path)) return links.get(path);
       return fail(exists(path) ? "Inval" : "Noent");
     },
+    link(existing, path) {
+      // Follow a symlink to the real file (the fake has no inodes, so a hard
+      // link is modeled as shared content bytes — enough for the fs.js surface).
+      let src = existing;
+      let g = 0;
+      while (links.has(src)) { src = linkTarget(src); if (++g > 40) fail("Loop"); }
+      if (dirs.has(src)) fail("Isdir");
+      if (!files.has(src)) fail("Noent");
+      if (exists(path)) fail("Exist");
+      if (!dirs.has(dirOf(path))) fail("Noent");
+      files.set(path, files.get(src));
+      touch(path);
+    },
+    realpath(path) {
+      let p = path;
+      let g = 0;
+      while (links.has(p)) { p = linkTarget(p); if (++g > 40) fail("Loop"); }
+      if (!exists(p)) fail("Noent");
+      return p;
+    },
     readdir(path) {
       if (files.has(path)) fail("Notdir");
       if (!dirs.has(path)) fail("Noent");

@@ -8,6 +8,12 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:fs` hard links + real `realpath`** (`src/node/fs.js`). `linkSync`
+  (a hard link — a second name for the same file, the store→project primitive
+  pnpm relies on) and a `realpathSync` that actually **resolves symlinks** through
+  the kernel (with `'buffer'` encoding) instead of just normalizing, plus the
+  `promises` forms. Unit-tested against the fake `syncFs`; driven end-to-end in a
+  booted kernel over a pnpm-style symlinked store layout.
 - **Shared guest argv parser** (`src/cli/args.js`). A common POSIX/GNU-style
   tokenizer for WorkerOS guest programs: grouped short flags, long flags,
   option values, `--`, tar-style bare short clusters, and stop-at-first-operand

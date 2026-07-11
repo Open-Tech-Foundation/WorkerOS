@@ -38,7 +38,7 @@ let lastAutoSnap = 0;
 // Syscalls that mutate the filesystem — before servicing one we stamp the kernel
 // clock (ADR-020) so the resulting inode mtimes/ctimes are real wall-clock times.
 const MUTATING_CALLS = new Set([
-  "write", "open", "mkdir", "unlink", "rmdir", "rename", "symlink",
+  "write", "open", "mkdir", "unlink", "rmdir", "rename", "symlink", "link",
 ]);
 
 // Persist the durable tree to the content-addressed block store if it changed
@@ -536,6 +536,13 @@ function serviceSync(pid) {
       case "readlink":
         writeResponse(rec.syncSab, 0, { target: kernel.sys_readlink(pid, req.path) });
         break;
+      case "link":
+        kernel.sys_link(pid, req.existing, req.path);
+        writeResponse(rec.syncSab, 0, {});
+        break;
+      case "realpath":
+        writeResponse(rec.syncSab, 0, { path: kernel.sys_realpath(pid, req.path) });
+        break;
       case "watchAdd":
         writeResponse(rec.syncSab, 0, {
           id: kernel.watchAdd(pid, req.path, !!req.recursive),
@@ -682,6 +689,13 @@ function handleSyscall(pid, msg) {
         break;
       case "readlink":
         reply(pid, id, true, kernel.sys_readlink(pid, args.path));
+        break;
+      case "link":
+        kernel.sys_link(pid, args.existing, args.path);
+        reply(pid, id, true, null);
+        break;
+      case "realpath":
+        reply(pid, id, true, kernel.sys_realpath(pid, args.path));
         break;
       case "mkdir":
         kernel.sys_mkdir(pid, args.path);

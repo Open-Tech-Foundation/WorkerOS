@@ -116,6 +116,42 @@ test("symlinkSync/readlinkSync/lstatSync + real mtime through node:fs", opts, as
   ]);
 });
 
+test("hard links + realpath through node:fs (pnpm-style store layout)", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      await os.fs.write(
+        "/proj/link.js",
+        [
+          "const fs = require('fs');",
+          // Hard link: a second name for the same file (pnpm store → project).
+          "fs.writeFileSync('/store', 'payload');",
+          "fs.linkSync('/store', '/project-copy');",
+          "console.log('hardlink:', fs.readFileSync('/project-copy','utf8'), fs.statSync('/store').nlink);",
+          // Unlink one name; content survives via the other.
+          "fs.unlinkSync('/store');",
+          "console.log('survives:', fs.readFileSync('/project-copy','utf8'));",
+          // realpath: resolve a symlinked package dir (pnpm .pnpm layout).
+          "fs.mkdirSync('/.pnpm/foo@1/node_modules/foo', { recursive: true });",
+          "fs.writeFileSync('/.pnpm/foo@1/node_modules/foo/index.js', 'module.exports=1');",
+          "fs.mkdirSync('/node_modules', { recursive: true });",
+          "fs.symlinkSync('/.pnpm/foo@1/node_modules/foo', '/node_modules/foo');",
+          "console.log('realpath:', fs.realpathSync('/node_modules/foo/index.js'));",
+        ].join("\n"),
+      );
+      return await window.run(os, ["node", "link.js"], { cwd: "/proj" });
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.out.trim().split("\n"), [
+    "hardlink: payload 2",
+    "survives: payload",
+    "realpath: /.pnpm/foo@1/node_modules/foo/index.js",
+  ]);
+});
+
 test("fs.watch delivers a change event to a running node process", opts, async () => {
   const { result, pageErrors } = await withPage((page) =>
     page.evaluate(async () => {

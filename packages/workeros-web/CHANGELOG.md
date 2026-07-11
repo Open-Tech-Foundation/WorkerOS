@@ -8,6 +8,13 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`fs.link`/`fs.realpath` syscalls wired.** The sync channel + async ABI gain
+  `link` (mutating — stamps the clock + emits a watch event) and `realpath`,
+  routed to the new kernel `sys_link`/`sys_realpath`; new wasm bindings expose
+  both. Closes the last filesystem-level gaps for a pnpm-style store (hard links
+  + symlink canonicalization). Proven end-to-end by a headless-browser `node`
+  script that hard-links a store file into a project (nlink 2, survives unlinking
+  the original) and `realpath`s a symlinked `.pnpm` package dir.
 - **`fs.watch` delivery across the worker boundary.** The sync channel gains
   `watchAdd`/`watchRemove` (register/unregister a watch synchronously, returning a
   watch id); after every mutating syscall the kernel worker drains the kernel's

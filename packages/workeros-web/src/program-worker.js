@@ -88,6 +88,8 @@ function makeSyncFs(syncCall) {
     lstat: (path) => json("lstat", { path }),
     symlink: (target, path) => { json("symlink", { target, path }); },
     readlink: (path) => json("readlink", { path }).target,
+    link: (existing, path) => { json("link", { existing, path }); },
+    realpath: (path) => json("realpath", { path }).path,
     readdir: (path) => json("readdir", { path }).entries,
     mkdir: (path) => { json("mkdir", { path }); },
     unlink: (path) => { json("unlink", { path }); },

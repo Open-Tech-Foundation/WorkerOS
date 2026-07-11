@@ -380,14 +380,25 @@ export function createFs(syncFs, onFsEvent) {
     writeFileSync(dest, readFileSync(src));
   }
 
-  function realpathSync(path) {
-    // No symlinks: verify existence (ENOENT like Node) and return the normalized
-    // path. Relative paths can't be cwd-resolved here — the kernel owns cwd — so
-    // an absolute path is returned normalized; a relative one is normalized as-is.
-    guard(() => syncFs.stat(path), "lstat", path);
-    return normalize(path);
+  function realpathSync(path, options) {
+    // Canonicalize through symlinks in the kernel (which owns cwd + the link
+    // graph). Older kernels without the op fall back to existence + normalize.
+    let real;
+    if (typeof syncFs.realpath === "function") {
+      real = guard(() => syncFs.realpath(path), "realpath", path);
+    } else {
+      guard(() => syncFs.stat(path), "lstat", path);
+      real = normalize(path);
+    }
+    const encoding = pickEncoding(options);
+    return encoding === "buffer" ? enc.encode(real) : real;
   }
   realpathSync.native = realpathSync;
+
+  // `fs.linkSync(existingPath, newPath)` — a hard link (second name, shared inode).
+  function linkSync(existingPath, newPath) {
+    guard(() => syncFs.link(existingPath, newPath), "link", newPath);
+  }
 
   function accessSync(path, _mode) {
     guard(() => syncFs.stat(path), "access", path);
@@ -497,7 +508,7 @@ export function createFs(syncFs, onFsEvent) {
     symlinkSync, readlinkSync,
     existsSync, accessSync,
     readdirSync, mkdirSync, rmdirSync, unlinkSync, rmSync, renameSync,
-    copyFileSync, realpathSync,
+    copyFileSync, realpathSync, linkSync,
     watch, watchFile, unwatchFile,
     constants,
   };
@@ -515,6 +526,8 @@ export function createFs(syncFs, onFsEvent) {
     lstat: wrapP(lstatSync),
     symlink: wrapP(symlinkSync),
     readlink: wrapP(readlinkSync),
+    link: wrapP(linkSync),
+    realpath: wrapP(realpathSync),
     readdir: wrapP(readdirSync),
     mkdir: wrapP(mkdirSync),
     rmdir: wrapP(rmdirSync),

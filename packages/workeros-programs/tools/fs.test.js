@@ -137,6 +137,23 @@ test("symlinkSync + readlinkSync + lstat vs stat (follow)", () => {
   assert.equal(fs.readFileSync("/link", "utf8"), "payload");
 });
 
+test("linkSync creates a second name; realpathSync resolves symlinks", () => {
+  const fs = createFs(createFakeSyncFs());
+  fs.writeFileSync("/a.txt", "content");
+  fs.linkSync("/a.txt", "/b.txt");
+  assert.equal(fs.readFileSync("/b.txt", "utf8"), "content");
+  assert.throws(() => fs.linkSync("/a.txt", "/b.txt"), (e) => e.code === "EEXIST");
+
+  fs.mkdirSync("/real");
+  fs.writeFileSync("/real/f", "x");
+  fs.symlinkSync("/real", "/link");
+  assert.equal(fs.realpathSync("/link"), "/real");
+  const buf = fs.realpathSync("/link", "buffer");
+  assert.ok(buf instanceof Uint8Array);
+  assert.equal(dec.decode(buf), "/real");
+  assert.throws(() => fs.realpathSync("/nope"), (e) => e.code === "ENOENT");
+});
+
 test("statSync reports real mtime after a write (host clock)", () => {
   const fs = createFs(createFakeSyncFs());
   fs.writeFileSync("/f", "x");

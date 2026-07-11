@@ -7,6 +7,17 @@ a release yet, so everything lives under **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **Hard links + `realpath` (kernel FS).** `Vfs::link` gives an inode a second
+  directory entry (shared content + chunks) — directories are refused (`EISDIR`),
+  an existing target is `EEXIST` — with the existing `nlink`/reap accounting
+  freeing the inode only when the *last* name is unlinked (so a hard link is real,
+  not a copy). `Vfs::realpath` canonicalizes a path by resolving every symlink
+  component (chains collapse fully, relative targets resolve against the link's
+  dir, `ELOOP`-capped) and returns the real absolute path. Exposed as
+  `Kernel::sys_link`/`sys_realpath` through the confined path layer. These are the
+  two filesystem primitives a pnpm-style symlinked store needs. Native-tested
+  (shared-inode content + nlink + last-unlink frees, dir/exist/missing errors,
+  chained + relative symlink canonicalization, dangling → `ENOENT`).
 - **`fs.watch` change notification (kernel core).** A new filesystem
   change-event stream plus a per-process watch registry. Mutating syscalls record
   events at the confined-path layer — create/unlink/mkdir/rmdir/rename/symlink →

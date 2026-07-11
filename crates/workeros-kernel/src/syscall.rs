@@ -396,6 +396,21 @@ impl ProcessCtx {
         vfs.readlink(&abs)
     }
 
+    /// Create a hard link `new_arg` → the file `existing_arg` names (Node `fs.link`).
+    pub fn path_link(&mut self, vfs: &mut dyn Vfs, existing_arg: &str, new_arg: &str) -> SysResult<()> {
+        let existing = self.resolve_path(existing_arg)?;
+        let newpath = self.resolve_path(new_arg)?;
+        vfs.link(&existing, &newpath)?;
+        vfs.note_event(&newpath, crate::vfs::FsEventKind::Rename);
+        Ok(())
+    }
+
+    /// Canonicalize a path, resolving symlinks (Node `fs.realpath`).
+    pub fn path_realpath(&self, vfs: &dyn Vfs, path_arg: &str) -> SysResult<String> {
+        let abs = self.resolve_path(path_arg)?;
+        vfs.realpath(&abs)
+    }
+
     /// List a directory by path.
     pub fn path_readdir(&self, vfs: &dyn Vfs, path_arg: &str) -> SysResult<Vec<DirEntry>> {
         let abs = self.resolve_path(path_arg)?;
