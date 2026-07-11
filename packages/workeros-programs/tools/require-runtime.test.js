@@ -49,6 +49,27 @@ test("require('node:fs') is the same builtin as require('fs')", async () => {
   assert.equal(createFs(sys.syncFs).readFileSync("/ok", "utf8"), "true");
 });
 
+test("CJS entry resolution reuses package imports from the shared resolver", async () => {
+  const sys = fakeSys();
+  sys.syncFs._put(
+    "/app/package.json",
+    JSON.stringify({
+      imports: {
+        "#helper": "./helper.js",
+      },
+    }),
+  );
+  sys.syncFs._put("/app/helper.js", "module.exports = 'resolved-by-imports';");
+  const main = [
+    "const fs = require('fs');",
+    "const helper = require('#helper');",
+    "fs.writeFileSync('/imports-ok', helper);",
+  ].join("\n");
+
+  await createNodeRuntime(sys)("/app/main.js", main);
+  assert.equal(createFs(sys.syncFs).readFileSync("/imports-ok", "utf8"), "resolved-by-imports");
+});
+
 test("an unknown module still throws Cannot find module", async () => {
   const sys = fakeSys();
   const main = "require('totally-not-installed');";

@@ -218,6 +218,15 @@ guest runtime. Format:
 - **`node:path` (posix)** (`src/node/path.js`) — a real `path` builtin
   (join/resolve/dirname/basename/extname/normalize/relative/parse/format),
   replacing the ad-hoc helper.
+
+### Changed
+- **CommonJS loading now reuses the shared Node resolver** (`src/node/module.js`,
+  `src/node/require-runtime.js`). The sync `node:module` loader and `/bin/node`'s
+  CJS entry path both resolve through `src/node/resolve.js`, removing the older
+  duplicated prefetch-era resolver. This brings CJS entry loading onto the same
+  package policy as ESM and `createRequire` — including package `imports`
+  (`#...`) support — while keeping CJS execution synchronous over the sync-fs
+  channel. Covered by `tools/{module,require-runtime,resolve}.test.js`.
 - **CommonJS `node:` builtin registry** (`require-runtime.js`) — `require('fs')`,
   `require('node:fs')`, `require('fs/promises')`, and `require('path')`/
   `require('node:path')` resolve to the guest builtins. `/bin/node` now runs a

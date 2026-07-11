@@ -11,8 +11,7 @@
 // walk, `.js`/`.cjs`/`.json` + `index`, package.json `exports`(".")/`main`, and
 // the core `node:` builtins. Pure over an injected `fs`/`path`/`url` — unit-testable.
 
-const isRelative = (s) => s.startsWith("./") || s.startsWith("../") || s.startsWith("/");
-const builtinKey = (spec) => (spec.startsWith("node:") ? spec.slice(5) : spec);
+import { createResolver, builtinKey } from "./resolve.js";
 
 function moduleNotFound(spec, fromDir) {
   const e = new Error(`Cannot find module '${spec}' from '${fromDir}'`);
@@ -31,62 +30,7 @@ export function createModule({ fs, path, url, builtins }) {
     }
   };
 
-  // The CJS entry a package.json points at: exports["."] require/default, then main.
-  const pickMain = (pkg) => {
-    const e = pkg.exports;
-    if (typeof e === "string") return e;
-    if (e && typeof e === "object") {
-      const dot = e["."] ?? e;
-      if (typeof dot === "string") return dot;
-      if (dot && typeof dot === "object") {
-        const c = dot.require ?? dot.node ?? dot.default;
-        if (typeof c === "string") return c;
-      }
-    }
-    return pkg.main || "index.js";
-  };
-
-  // Resolve a path with extension + index fallbacks (Node CJS rules, subset).
-  const resolveFile = (p) => {
-    if (kind(p) === "file") return p;
-    for (const ext of [".js", ".cjs", ".json"]) if (kind(p + ext) === "file") return p + ext;
-    if (kind(p) === "dir") {
-      const pkgPath = path.join(p, "package.json");
-      if (kind(pkgPath) === "file") {
-        const main = pickMain(JSON.parse(fs.readFileSync(pkgPath, "utf8")));
-        if (main) {
-          const r = resolveFile(path.join(p, main));
-          if (r) return r;
-        }
-      }
-      for (const idx of ["index.js", "index.cjs", "index.json"]) {
-        const r = path.join(p, idx);
-        if (kind(r) === "file") return r;
-      }
-    }
-    return null;
-  };
-
-  const resolveBare = (spec, fromDir) => {
-    const at = spec[0] === "@";
-    const slash = spec.indexOf("/", at ? spec.indexOf("/") + 1 : 0);
-    const name = slash === -1 ? spec : spec.slice(0, slash);
-    const sub = slash === -1 ? "" : spec.slice(slash + 1);
-    let dir = fromDir;
-    for (;;) {
-      const pkgDir = path.join(dir, "node_modules", name);
-      if (kind(pkgDir) === "dir") {
-        const r = resolveFile(sub ? path.join(pkgDir, sub) : pkgDir);
-        if (r) return r;
-      }
-      if (dir === "/") break;
-      dir = path.dirname(dir);
-    }
-    return null;
-  };
-
-  const resolveFrom = (spec, fromDir) =>
-    isRelative(spec) ? resolveFile(path.join(fromDir, spec)) : resolveBare(spec, fromDir);
+  const resolver = createResolver({ fs, path });
 
   // Node exposes require.cache keyed by filename → a { exports } record.
   const cacheProxy = new Proxy(
@@ -129,13 +73,13 @@ export function createModule({ fs, path, url, builtins }) {
     const require = (spec) => {
       const b = builtins.get(builtinKey(spec));
       if (b) return b;
-      const abs = resolveFrom(spec, fromDir);
+      const abs = resolver.resolveFrom(fromDir, spec);
       if (!abs) throw moduleNotFound(spec, fromDir);
       return load(abs);
     };
     require.resolve = (spec) => {
       if (builtins.has(builtinKey(spec))) return spec;
-      const abs = resolveFrom(spec, fromDir);
+      const abs = resolver.resolveFrom(fromDir, spec);
       if (!abs) throw moduleNotFound(spec, fromDir);
       return abs;
     };
@@ -175,7 +119,7 @@ export function createModule({ fs, path, url, builtins }) {
     _resolveFilename: (spec, parent) => {
       if (isBuiltin(spec)) return spec;
       const dir = parent && parent.path ? parent.path : "/";
-      const abs = resolveFrom(spec, dir);
+      const abs = resolver.resolveFrom(dir, spec);
       if (!abs) throw moduleNotFound(spec, dir);
       return abs;
     },
