@@ -12,8 +12,10 @@
 //!
 //! The default policy persists the root workspace and treats as ephemeral both
 //! `/tmp` (user scratch — scaffold a project, `npm install`, discard on close)
-//! and the OS-owned trees (`/bin`, `/sbin`, `/lib`) which are reinstalled at
-//! every boot, so persisting them is pure waste.
+//! and the OS-owned trees (`/bin`, `/sbin`, `/lib`, `/etc`) which are reinstalled
+//! at every boot, so persisting them is pure waste. `/etc` holds OS-shipped config
+//! (e.g. the default `/etc/profile`), reshipped each boot so an upgraded default
+//! reaches existing sessions; user overrides go in the persistent `~/.profile`.
 
 /// Whether a path's contents survive across sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +27,7 @@ pub enum Durability {
 }
 
 /// The path prefixes treated as ephemeral by default (see module docs).
-pub const DEFAULT_EPHEMERAL: &[&str] = &["/tmp", "/bin", "/sbin", "/lib"];
+pub const DEFAULT_EPHEMERAL: &[&str] = &["/tmp", "/bin", "/sbin", "/lib", "/etc"];
 
 /// A durability policy: an unordered set of `(prefix, durability)` rules plus a
 /// root default. Longest matching prefix wins.
@@ -147,6 +149,7 @@ mod tests {
         assert!(t.is_ephemeral("/bin/npm"));
         assert!(t.is_ephemeral("/sbin/ls"));
         assert!(t.is_ephemeral("/lib/workeros-node/fs.js"));
+        assert!(t.is_ephemeral("/etc/profile"));
     }
 
     #[test]

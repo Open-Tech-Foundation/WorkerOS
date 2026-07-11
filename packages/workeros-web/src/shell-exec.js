@@ -152,5 +152,20 @@ export function createShell({ kernel, startProcess, session, readLine }) {
     }
   }
 
-  return { exec };
+  // Source the login profiles once at startup, so their `export`s (notably PATH)
+  // take effect for the whole session. `/etc/profile` is OS-provided defaults
+  // (it puts npm's global `.bin` on PATH); `~/.profile` is the user's overrides.
+  // Missing files are skipped. This is the shell's own login behavior — the
+  // kernel and its PATH resolver stay oblivious to any of it (INV-1).
+  async function sourceProfile(sink) {
+    const io = sink || { stdout: () => {}, stderr: () => {} };
+    const home = (session.env && session.env.HOME) || "/";
+    const files = ["/etc/profile", (home === "/" ? "" : home) + "/.profile"];
+    for (const f of files) {
+      try { if (!kernel.fs_read(f)) continue; } catch { continue; } // missing → skip
+      await exec("source " + f, io);
+    }
+  }
+
+  return { exec, sourceProfile };
 }

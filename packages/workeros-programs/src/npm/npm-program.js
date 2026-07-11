@@ -32,8 +32,19 @@ const dirname = (p) => {
   return i <= 0 ? "/" : p.slice(0, i);
 };
 const abs = (p) => (p.startsWith("/") ? p : join(sys.cwd, p));
-// node_modules lives next to the project's package.json (the cwd).
-const NM = join(sys.cwd, "node_modules");
+
+// An install context: where packages unpack (`nmRoot`) and where their `.bin`
+// launchers go. A local install targets the project's `node_modules` (next to
+// the cwd's package.json); `-g` targets the persistent global store `/.node_modules`,
+// whose `.bin` a shell profile (`/etc/profile`) puts on PATH. Everything else —
+// fetch, untar, semver, bin-linking — is identical across the two (INV-1: npm is
+// just a program placing files; the OS learns nothing about node_modules).
+const GLOBAL_NM = "/.node_modules";
+const localCtx = () => {
+  const nmRoot = join(sys.cwd, "node_modules");
+  return { nmRoot, binDir: join(nmRoot, ".bin") };
+};
+const globalCtx = () => ({ nmRoot: GLOBAL_NM, binDir: join(GLOBAL_NM, ".bin") });
 
 // ---- VFS helpers -----------------------------------------------------------
 async function statKind(p) {
@@ -203,16 +214,16 @@ function untar(buf) {
 }
 
 // ---- install ---------------------------------------------------------------
-// installed: top-level name -> version already placed at /node_modules/<name>.
-async function installOne(name, range, installed, depth) {
+// installed: top-level name -> version already placed at <ctx.nmRoot>/<name>.
+async function installOne(name, range, installed, depth, ctx) {
   const pack = await fetchJson(REGISTRY + name.replace("/", "%2f"));
   const version = maxSatisfying(pack, range);
   if (!version) throw new Error("no version of " + name + " satisfies " + range);
   const meta = pack.versions[version];
 
-  // Hoist to /node_modules; if a different version already sits there, nest under
-  // the requiring package instead (npm's basic dedupe).
-  let target = join(NM, name);
+  // Hoist to the context's node_modules; if a different version already sits
+  // there, nest under the requiring package instead (npm's basic dedupe).
+  let target = join(ctx.nmRoot, name);
   const have = installed.get(name);
   if (have === version) return; // already satisfied at top level
   if (have && have !== version) target = null; // conflict -> caller nests (MVP: skip)
@@ -227,11 +238,11 @@ async function installOne(name, range, installed, depth) {
     await writeBytes(join(target, rel), f.data);
   }
   installed.set(name, version);
-  await linkBins(name, meta, target);
+  await linkBins(name, meta, target, ctx);
 
   const deps = meta.dependencies || {};
   for (const [dn, dr] of Object.entries(deps)) {
-    await installOne(dn, dr, installed, depth + 1);
+    await installOne(dn, dr, installed, depth + 1, ctx);
   }
 }
 
@@ -253,7 +264,7 @@ function binLauncherSource(targetAbs) {
 
 // Write `.bin` launchers for a package's `bin` field: a string (named after the
 // package's unscoped name) or a `{ name: relpath }` map.
-async function linkBins(name, meta, pkgDir) {
+async function linkBins(name, meta, pkgDir, ctx) {
   const bin = meta.bin;
   if (!bin) return;
   const unscoped = name.split("/").pop();
@@ -261,13 +272,13 @@ async function linkBins(name, meta, pkgDir) {
   for (const [rawName, rel] of Object.entries(entries)) {
     const binName = rawName.split("/").pop(); // guard against path segments
     if (!binName || !rel) continue;
-    await writeText(join(NM, ".bin", binName), binLauncherSource(join(pkgDir, rel)));
+    await writeText(join(ctx.binDir, binName), binLauncherSource(join(pkgDir, rel)));
   }
 }
 
-async function loadInstalled() {
+async function loadInstalled(nmRoot) {
   const installed = new Map();
-  const nm = NM;
+  const nm = nmRoot;
   if ((await statKind(nm)) !== "dir") return installed;
   for (const e of await sys.readdir(nm)) {
     if (!e.is_dir || e.name.startsWith(".")) continue;
@@ -292,12 +303,59 @@ async function loadInstalled() {
 
 // ---- commands --------------------------------------------------------------
 const top = tokenizeArgv(sys.argv.slice(1), { stopAtFirstOperand: true });
-const cmdIndex = top.findIndex((tok) => tok.kind === "operand");
+// `-g` / `--global` may appear as an option before the subcommand
+// (`npm -g install x`) or — because `stopAtFirstOperand` turns post-command
+// args into operands — as an operand after it (`npm install -g x`). Recognize
+// both, and drop the operand form so it isn't parsed as a package spec.
+const isGlobalTok = (tok) =>
+  (tok.kind === "option" && (tok.short === "g" || tok.name === "global")) ||
+  (tok.kind === "operand" && (tok.value === "-g" || tok.value === "--global"));
+const global = top.some(isGlobalTok);
+const cmdIndex = top.findIndex((tok) => tok.kind === "operand" && !isGlobalTok(tok));
 const cmd = cmdIndex >= 0 ? top[cmdIndex].value : null;
 const rest = cmdIndex >= 0
-  ? top.slice(cmdIndex + 1).filter((tok) => tok.kind === "operand").map((tok) => tok.value)
+  ? top.slice(cmdIndex + 1).filter((tok) => tok.kind === "operand" && !isGlobalTok(tok)).map((tok) => tok.value)
   : [];
 const pkgJsonPath = join(sys.cwd, "package.json");
+
+// npm create <x> == npm init <x> == exec the `create-<x>` package's bin (npx
+// semantics). Map the initializer name to its package, preserving a scope and
+// any trailing @version: foo->create-foo, @s->@s/create, @s/foo->@s/create-foo.
+function initializerPackage(spec) {
+  let name = spec, ver = "";
+  const at = spec.lastIndexOf("@");
+  if (at > 0) { name = spec.slice(0, at); ver = spec.slice(at + 1); }
+  let pkg;
+  if (name[0] === "@") {
+    const slash = name.indexOf("/");
+    pkg = slash < 0 ? name + "/create" : name.slice(0, slash + 1) + "create-" + name.slice(slash + 1);
+  } else {
+    pkg = "create-" + name;
+  }
+  return [pkg, ver];
+}
+
+// Fetch an initializer into an ephemeral `/tmp` prefix (discarded on close) and
+// run its bin under /bin/node with the user's cwd, so it scaffolds in place.
+// Honest limit (INV-5): sys.exec does not forward stdin, so interactive
+// scaffolders can't prompt — only non-interactive ones (--yes / presets) work.
+async function runInitializer(spec, args) {
+  const [pkgName, ver] = initializerPackage(spec);
+  const stage = "/tmp/.npm-create-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const ctx = { nmRoot: join(stage, "node_modules"), binDir: join(stage, "node_modules", ".bin") };
+  out("npm: fetching " + pkgName + (ver ? "@" + ver : "") + " ...\n");
+  await installOne(pkgName, ver, new Map(), 0, ctx);
+  const pkgDir = join(ctx.nmRoot, pkgName);
+  const meta = await readJson(join(pkgDir, "package.json"));
+  const unscoped = pkgName.split("/").pop();
+  let binRel;
+  if (typeof meta.bin === "string") binRel = meta.bin;
+  else if (meta.bin && typeof meta.bin === "object") binRel = meta.bin[unscoped] || Object.values(meta.bin)[0];
+  binRel = binRel || meta.main || "index.js";
+  const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  const line = ["node", q(join(pkgDir, binRel))].concat(args.map(q)).join(" ");
+  sys.exit((await sys.exec(line)) | 0);
+}
 
 async function readPkgJson() {
   if ((await statKind(pkgJsonPath)) === "file") return readJson(pkgJsonPath);
@@ -305,22 +363,36 @@ async function readPkgJson() {
 }
 
 try {
-  if (cmd === "init") {
+  if (cmd === "create" || (cmd === "init" && rest.length)) {
+    // `npm create <x>` / `npm init <x>` — scaffold via the create-* package.
+    if (!rest.length) {
+      err("usage: npm create <initializer> [args...]\n");
+      sys.exit(1);
+    }
+    const args = rest[1] === "--" ? rest.slice(2) : rest.slice(1);
+    await runInitializer(rest[0], args);
+  } else if (cmd === "init") {
     const name = sys.cwd.split("/").filter(Boolean).pop() || "app";
     const pkg = { name, version: "1.0.0", type: "commonjs", main: "index.js", scripts: { start: "node index.js" }, dependencies: {} };
     await writeText(pkgJsonPath, JSON.stringify(pkg, null, 2) + "\n");
     out("Wrote " + pkgJsonPath + "\n");
     sys.exit(0);
   } else if (cmd === "install" || cmd === "i" || cmd === "add") {
-    const pkg = await readPkgJson();
-    pkg.dependencies = pkg.dependencies || {};
-    const installed = await loadInstalled();
+    // `-g` installs into the persistent global store; otherwise into the
+    // project's node_modules (and package.json is updated).
+    const ctx = global ? globalCtx() : localCtx();
+    const pkg = global ? null : await readPkgJson();
+    if (pkg) pkg.dependencies = pkg.dependencies || {};
+    const installed = await loadInstalled(ctx.nmRoot);
     let toInstall;
     if (rest.length) {
       toInstall = rest.map((spec) => {
         const at = spec.lastIndexOf("@");
         return at > 0 ? [spec.slice(0, at), spec.slice(at + 1)] : [spec, "latest"];
       });
+    } else if (global) {
+      err("npm: `install -g` needs a package name\n");
+      sys.exit(1);
     } else {
       toInstall = Object.entries(pkg.dependencies);
     }
@@ -329,11 +401,11 @@ try {
       sys.exit(0);
     }
     for (const [name, range] of toInstall) {
-      await installOne(name, range === "latest" ? "" : range, installed, 0);
-      if (rest.length) pkg.dependencies[name] = "^" + installed.get(name);
+      await installOne(name, range === "latest" ? "" : range, installed, 0, ctx);
+      if (pkg && rest.length) pkg.dependencies[name] = "^" + installed.get(name);
     }
-    if (rest.length) await writeText(pkgJsonPath, JSON.stringify(pkg, null, 2) + "\n");
-    out("done. " + installed.size + " package(s) in node_modules.\n");
+    if (pkg && rest.length) await writeText(pkgJsonPath, JSON.stringify(pkg, null, 2) + "\n");
+    out("done. " + installed.size + " package(s) in " + ctx.nmRoot + ".\n");
     sys.exit(0);
   } else if (cmd === "run" || cmd === "run-script") {
     const pkg = await readPkgJson();
@@ -349,12 +421,12 @@ try {
     const code = await sys.exec(extra.length ? line + " " + extra.map(q).join(" ") : line);
     sys.exit(code | 0);
   } else if (cmd === "ls" || cmd === "list") {
-    const installed = await loadInstalled();
+    const installed = await loadInstalled((global ? globalCtx() : localCtx()).nmRoot);
     if (!installed.size) out("(empty)\n");
     for (const [name, version] of installed) out(name + "@" + version + "\n");
     sys.exit(0);
   } else {
-    err("usage: npm <init|install [pkg...]|run <script>|ls>\n");
+    err("usage: npm <init [initializer]|create <initializer>|install [-g] [pkg...]|run <script>|ls [-g]>\n");
     sys.exit(cmd ? 1 : 0);
   }
 } catch (e) {

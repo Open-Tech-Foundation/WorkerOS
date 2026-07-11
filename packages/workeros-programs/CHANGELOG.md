@@ -8,6 +8,23 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`npm install -g` + `npm create` / `npm init <initializer>`**
+  (`src/npm/npm-program.js`). Two package-manager gaps, both kept in userland
+  (INV-1 — the kernel learns nothing). `npm install -g <pkg>` installs into the
+  **persistent global store `/.node_modules`** with launchers in
+  `/.node_modules/.bin`; the OS ships a default **`/etc/profile`** (sourced by
+  the login shell) that puts that dir on `$PATH`, so global bins run as bare
+  commands from any cwd while the kernel resolver still knows only `/bin:/sbin`.
+  The `-g` flag is recognized before or after the subcommand. `npm create <x>` /
+  `npm init <x>` fetch the `create-*` initializer (scope- and version-aware:
+  `foo`→`create-foo`, `@s`→`@s/create`, `@s/foo`→`@s/create-foo`) into an
+  ephemeral `/tmp` prefix and run its bin under `/bin/node` in the current cwd,
+  scaffolding in place. The shared install path is refactored to a per-invocation
+  `{ nmRoot, binDir }` context so local and global installs run the same
+  fetch/untar/semver/bin-link code. Honest limit (INV-5): `sys.exec` doesn't
+  forward stdin, so interactive scaffolders can't prompt — only non-interactive
+  ones (`--yes`/presets) work. Global bin resolution is covered end-to-end by
+  `workeros-web`'s `tools/global-bin.test.js`.
 - **`node:fs` hard links + real `realpath`** (`src/node/fs.js`). `linkSync`
   (a hard link — a second name for the same file, the store→project primitive
   pnpm relies on) and a `realpathSync` that actually **resolves symlinks** through

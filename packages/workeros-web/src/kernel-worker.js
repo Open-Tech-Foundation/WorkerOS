@@ -791,6 +791,23 @@ self.onmessage = async (ev) => {
           if (data == null) continue; // an optional binary lib (codec.wasm) not built here
           kernel.fs_write(lib.path, typeof data === "string" ? enc.encode(data) : new Uint8Array(data));
         }
+        // Ship the default system profile. Sourced by the login shell at startup
+        // (shell-exec `sourceProfile`), it puts npm's global `.bin` on PATH so
+        // `npm install -g` binaries run as bare commands — the userland way to
+        // extend PATH, leaving the kernel resolver at /bin:/sbin (INV-1). `/etc`
+        // is an OS-owned ephemeral tree (mount.rs), so this is reshipped every
+        // boot (an upgraded default reaches existing sessions); user overrides
+        // that persist go in ~/.profile, which sourceProfile also reads.
+        kernel.fs_write(
+          "/etc/profile",
+          enc.encode(
+            "# /etc/profile — system-wide shell startup (sourced by the login shell).\n" +
+              "# Puts npm's global bin dir on PATH so `npm install -g` binaries run as\n" +
+              "# bare commands. This file is OS-shipped and reset each boot; put your\n" +
+              "# own persistent overrides in ~/.profile.\n" +
+              "export PATH=/.node_modules/.bin:$PATH\n",
+          ),
+        );
         // Restore the durable filesystem (ADR-022) on top of the freshly
         // installed OS, from the content-addressed block store. The manifest
         // holds only persistent paths (the OS trees /bin,/sbin,/lib and /tmp are
@@ -824,6 +841,9 @@ self.onmessage = async (ev) => {
         lastAutoSnap = Date.now(); // first auto-snapshot is one interval out
         setInterval(persistNow, AUTOSAVE_MS);
         shell = createShell({ kernel, startProcess, session, readLine: readLineFromTty });
+        // Apply the login profiles (PATH etc.) before any command can run, so
+        // both the interactive REPL and programmatic exec see the global bin dir.
+        await shell.sourceProfile();
         post({ type: MSG.BOOTED, version: kernel.version, abi: kernel.abi });
         break;
       }
