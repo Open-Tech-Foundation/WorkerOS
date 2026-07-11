@@ -16,9 +16,11 @@
 // whole surface is unit-testable in plain Node against a fake `syncFs`.
 //
 // Honest-surface notes (INV-5): reads return a `Uint8Array` (not a Node `Buffer`)
-// unless an encoding is given; there are no symlinks, permissions, or timestamps
-// (mode/mtime are plausible constants). Enough for bundlers/compilers, not a Node
-// fidelity claim.
+// unless an encoding is given; permissions/uid/gid are plausible constants. The
+// VFS *does* model symlinks and mtime/ctime/btime (ADR-022), so `lstat`/`stat`
+// report real timestamps + `isSymbolicLink()`, and `symlink`/`readlink` work;
+// `atime` is reported as `mtime` (not separately tracked). Not a full Node
+// fidelity claim, but real metadata where the kernel has it.
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -80,20 +82,31 @@ function pickEncoding(options) {
   return null;
 }
 
-function makeStats(kind, size) {
+// `m` is the kernel stat DTO: { kind, size, mtime, ctime, btime, nlink } with
+// times in ms since epoch (0 until the host clock stamps a mutation). `atime`
+// isn't tracked by the VFS — we report `mtime` for it (noatime-style), honestly.
+function makeStats(m) {
+  const kind = m.kind;
   const dir = kind === "dir";
-  const epoch = new Date(0);
+  const link = kind === "symlink";
+  const size = m.size || 0;
+  const mtimeMs = m.mtime || 0;
+  const ctimeMs = m.ctime || 0;
+  const birthtimeMs = m.btime || 0;
+  const atimeMs = mtimeMs;
   return {
     size,
-    mode: dir ? 0o040755 : 0o100644,
-    // Plausible constants (no real metadata in the VFS).
-    nlink: 1, uid: 0, gid: 0, dev: 0, ino: 0, rdev: 0, blksize: 4096,
+    mode: link ? 0o120777 : dir ? 0o040755 : 0o100644,
+    nlink: m.nlink || 1,
+    // Unmodeled fields stay plausible constants.
+    uid: 0, gid: 0, dev: 0, ino: 0, rdev: 0, blksize: 4096,
     blocks: Math.ceil(size / 512),
-    atimeMs: 0, mtimeMs: 0, ctimeMs: 0, birthtimeMs: 0,
-    atime: epoch, mtime: epoch, ctime: epoch, birthtime: epoch,
+    atimeMs, mtimeMs, ctimeMs, birthtimeMs,
+    atime: new Date(atimeMs), mtime: new Date(mtimeMs),
+    ctime: new Date(ctimeMs), birthtime: new Date(birthtimeMs),
     isFile: () => kind === "file",
     isDirectory: () => dir,
-    isSymbolicLink: () => false,
+    isSymbolicLink: () => link,
     isBlockDevice: () => false,
     isCharacterDevice: () => false,
     isFIFO: () => false,
@@ -247,13 +260,34 @@ export function createFs(syncFs) {
 
   function statSync(path, options) {
     try {
-      const m = syncFs.stat(path);
-      return makeStats(m.kind, m.size || 0);
+      return makeStats(syncFs.stat(path));
     } catch (e) {
       const err = fsError(e, "stat", path);
       if (err.code === "ENOENT" && options && options.throwIfNoEntry === false) return undefined;
       throw err;
     }
+  }
+
+  // `lstat` — does not follow a final symlink (so `isSymbolicLink()` can be true).
+  function lstatSync(path, options) {
+    try {
+      return makeStats(syncFs.lstat(path));
+    } catch (e) {
+      const err = fsError(e, "lstat", path);
+      if (err.code === "ENOENT" && options && options.throwIfNoEntry === false) return undefined;
+      throw err;
+    }
+  }
+
+  // `symlinkSync(target, path[, type])` — `type` is a Windows-only hint, ignored.
+  function symlinkSync(target, path, _type) {
+    guard(() => syncFs.symlink(String(target), path), "symlink", path);
+  }
+
+  function readlinkSync(path, options) {
+    const target = guard(() => syncFs.readlink(path), "readlink", path);
+    const encoding = pickEncoding(options);
+    return encoding === "buffer" ? enc.encode(target) : target;
   }
 
   function existsSync(path) {
@@ -348,7 +382,7 @@ export function createFs(syncFs) {
     const path = openPaths.get(fd);
     if (path === undefined) throw fsError(new Error("Badf"), "fstat");
     const m = guard(() => syncFs.stat(path), "fstat", path);
-    return makeStats(m.kind, m.size || 0);
+    return makeStats(m);
   }
 
   // A small path join used by rmSync (kept local to avoid a node:path dependency).
@@ -366,7 +400,8 @@ export function createFs(syncFs) {
     // Sync ops
     openSync, closeSync, readSync, writeSync,
     readFileSync, writeFileSync, appendFileSync,
-    statSync, lstatSync: statSync, fstatSync,
+    statSync, lstatSync, fstatSync,
+    symlinkSync, readlinkSync,
     existsSync, accessSync,
     readdirSync, mkdirSync, rmdirSync, unlinkSync, rmSync, renameSync,
     copyFileSync, realpathSync,
@@ -383,7 +418,9 @@ export function createFs(syncFs) {
     writeFile: wrapP(writeFileSync),
     appendFile: wrapP(appendFileSync),
     stat: wrapP(statSync),
-    lstat: wrapP(statSync),
+    lstat: wrapP(lstatSync),
+    symlink: wrapP(symlinkSync),
+    readlink: wrapP(readlinkSync),
     readdir: wrapP(readdirSync),
     mkdir: wrapP(mkdirSync),
     rmdir: wrapP(rmdirSync),

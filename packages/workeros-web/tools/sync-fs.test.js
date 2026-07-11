@@ -83,6 +83,39 @@ test("require('fs') does real synchronous file I/O; require('path') works", opts
   ]);
 });
 
+test("symlinkSync/readlinkSync/lstatSync + real mtime through node:fs", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      await os.fs.write(
+        "/proj/link.js",
+        [
+          "const fs = require('fs');",
+          "fs.writeFileSync('/t.txt', 'payload');",
+          "fs.symlinkSync('/t.txt', '/l');",
+          "console.log('readlink:', fs.readlinkSync('/l'));",
+          "console.log('stat.isFile:', fs.statSync('/l').isFile());",
+          "console.log('lstat.isSymlink:', fs.lstatSync('/l').isSymbolicLink());",
+          "console.log('through:', fs.readFileSync('/l', 'utf8'));",
+          "const m = fs.statSync('/t.txt').mtimeMs;",
+          "console.log('mtime>0:', m > 0);",
+        ].join("\n"),
+      );
+      return await window.run(os, ["node", "link.js"], { cwd: "/proj" });
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.out.trim().split("\n"), [
+    "readlink: /t.txt",
+    "stat.isFile: true",
+    "lstat.isSymlink: true",
+    "through: payload",
+    "mtime>0: true",
+  ]);
+});
+
 test("readFileSync on a missing file throws ENOENT with a Node-shaped error", opts, async () => {
   const { result, pageErrors } = await withPage((page) =>
     page.evaluate(async () => {

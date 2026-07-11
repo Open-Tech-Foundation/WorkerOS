@@ -7,6 +7,13 @@ a release yet, so everything lives under **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **Syscall surface for symlinks + host clock (`node:fs` wiring).** New
+  `Kernel::sys_lstat` (stat without following a final symlink), `sys_symlink`,
+  and `sys_readlink` expose the Stage-1 VFS symlink ops to guests through the
+  confined path layer (`SyscallContext::path_lstat`/`path_symlink`/`path_readlink`).
+  `Kernel::set_time(ms)` lets the (clock-less, ADR-020) kernel be stamped with
+  wall-clock time before a mutation, so inode mtime/ctime become real. `sys_stat`
+  now carries the full metadata (times + nlink) to callers.
 - **Snapshots + mark-sweep garbage collection (persistence Stage 4, ADR-022).**
   A ZFS/git-style snapshot layer over the content-addressed store: `snapshot_create`
   captures the durable tree as a retained manifest and **increfs** every chunk it

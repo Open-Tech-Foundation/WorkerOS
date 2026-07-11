@@ -20,15 +20,36 @@ const nameOf = (p) => p.slice(p.lastIndexOf("/") + 1);
 export function createFakeSyncFs(opts = {}) {
   const files = new Map(); // path → Uint8Array
   const dirs = new Set(["/"]); // directory paths
+  const links = new Map(); // path → symlink target (uninterpreted)
+  const mtimes = new Map(); // path → mtime (ms); a monotonic fake clock
   const fds = new Map(); // fd → { path, offset }
   let nextFd = 3;
+  let clock = 1000; // fake wall clock; bumps on each mutation so mtimes are real
+  const touch = (path) => mtimes.set(path, (clock += 1000));
 
   const fail = (name) => {
     throw new Error("kernel errno " + name);
   };
-  const exists = (p) => files.has(p) || dirs.has(p);
+  const exists = (p) => files.has(p) || dirs.has(p) || links.has(p);
 
-  const setBytes = (path, bytes) => files.set(path, bytes);
+  // Resolve a symlink one level (targets are relative to the link's dir).
+  const linkTarget = (path) => {
+    const t = links.get(path);
+    return t.startsWith("/") ? t : dirOf(path) + "/" + t;
+  };
+  const statOf = (path, kind, size) => ({
+    kind,
+    size,
+    mtime: mtimes.get(path) || 0,
+    ctime: mtimes.get(path) || 0,
+    btime: mtimes.get(path) || 0,
+    nlink: 1,
+  });
+
+  const setBytes = (path, bytes) => {
+    files.set(path, bytes);
+    touch(path);
+  };
   const growWrite = (path, offset, bytes) => {
     const old = files.get(path) || new Uint8Array(0);
     const end = offset + bytes.length;
@@ -43,6 +64,7 @@ export function createFakeSyncFs(opts = {}) {
     _dirs: dirs,
 
     open(path, o = {}) {
+      if (links.has(path)) return this.open(linkTarget(path), o); // follow symlink
       if (dirs.has(path)) {
         const fd = nextFd++;
         fds.set(fd, { path, offset: 0, dir: true });
@@ -89,9 +111,26 @@ export function createFakeSyncFs(opts = {}) {
       return h.offset;
     },
     stat(path) {
-      if (dirs.has(path)) return { kind: "dir", size: 0 };
-      if (files.has(path)) return { kind: "file", size: files.get(path).length };
+      if (links.has(path)) return this.stat(linkTarget(path)); // follow
+      if (dirs.has(path)) return statOf(path, "dir", 0);
+      if (files.has(path)) return statOf(path, "file", files.get(path).length);
       return fail("Noent");
+    },
+    lstat(path) {
+      if (links.has(path)) return statOf(path, "symlink", links.get(path).length);
+      if (dirs.has(path)) return statOf(path, "dir", 0);
+      if (files.has(path)) return statOf(path, "file", files.get(path).length);
+      return fail("Noent");
+    },
+    symlink(target, path) {
+      if (exists(path)) fail("Exist");
+      if (!dirs.has(dirOf(path))) fail("Noent");
+      links.set(path, target);
+      touch(path);
+    },
+    readlink(path) {
+      if (links.has(path)) return links.get(path);
+      return fail(exists(path) ? "Inval" : "Noent");
     },
     readdir(path) {
       if (files.has(path)) fail("Notdir");
@@ -113,8 +152,10 @@ export function createFakeSyncFs(opts = {}) {
       if (exists(path)) fail("Exist");
       if (!dirs.has(dirOf(path))) fail("Noent");
       dirs.add(path);
+      touch(path);
     },
     unlink(path) {
+      if (links.has(path)) { links.delete(path); return; } // removes the link itself
       if (dirs.has(path)) fail("Isdir");
       if (!files.has(path)) fail("Noent");
       files.delete(path);

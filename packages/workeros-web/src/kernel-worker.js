@@ -35,6 +35,12 @@ const AUTOSAVE_MS = 2000;
 const AUTO_SNAPSHOT_MS = 5 * 60 * 1000;
 let lastAutoSnap = 0;
 
+// Syscalls that mutate the filesystem — before servicing one we stamp the kernel
+// clock (ADR-020) so the resulting inode mtimes/ctimes are real wall-clock times.
+const MUTATING_CALLS = new Set([
+  "write", "open", "mkdir", "unlink", "rmdir", "rename", "symlink",
+]);
+
 // Persist the durable tree to the content-addressed block store if it changed
 // since the last flush (ADR-022). Writes only *new* chunk hashes (delta), then
 // the manifest root and the snapshot set, then mark-sweeps unreferenced chunks.
@@ -476,6 +482,9 @@ function serviceSync(pid) {
     writeResponse(rec.syncSab, -1, { error: String(e.message || e) });
     return;
   }
+  // Stamp the kernel's wall clock before a mutating call so inode mtimes/ctimes
+  // reflect real time (the kernel is clock-less per ADR-020).
+  if (MUTATING_CALLS.has(req.call)) kernel.setTime(Date.now());
   try {
     switch (req.call) {
       case "read": {
@@ -515,6 +524,16 @@ function serviceSync(pid) {
         break;
       case "stat":
         writeResponse(rec.syncSab, 0, kernel.sys_stat(pid, req.path));
+        break;
+      case "lstat":
+        writeResponse(rec.syncSab, 0, kernel.sys_lstat(pid, req.path));
+        break;
+      case "symlink":
+        kernel.sys_symlink(pid, req.target, req.path);
+        writeResponse(rec.syncSab, 0, {});
+        break;
+      case "readlink":
+        writeResponse(rec.syncSab, 0, { target: kernel.sys_readlink(pid, req.path) });
         break;
       case "readdir":
         writeResponse(rec.syncSab, 0, { entries: kernel.sys_readdir(pid, req.path) });
@@ -567,6 +586,7 @@ function onProgramMessage(pid, msg) {
 
 function handleSyscall(pid, msg) {
   const { id, call, args } = msg;
+  if (MUTATING_CALLS.has(call)) kernel.setTime(Date.now());
   try {
     switch (call) {
       case "write": {
@@ -624,6 +644,16 @@ function handleSyscall(pid, msg) {
         break;
       case "stat":
         reply(pid, id, true, kernel.sys_stat(pid, args.path));
+        break;
+      case "lstat":
+        reply(pid, id, true, kernel.sys_lstat(pid, args.path));
+        break;
+      case "symlink":
+        kernel.sys_symlink(pid, args.target, args.path);
+        reply(pid, id, true, null);
+        break;
+      case "readlink":
+        reply(pid, id, true, kernel.sys_readlink(pid, args.path));
         break;
       case "mkdir":
         kernel.sys_mkdir(pid, args.path);

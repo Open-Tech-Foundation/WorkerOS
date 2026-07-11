@@ -8,6 +8,14 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`node:fs` symlink + mtime syscalls wired through the stack.** The sync-syscall
+  channel + async ABI gain `lstat`/`symlink`/`readlink` (routed to the new kernel
+  ops), `stat` now returns real timestamps, and the kernel worker **stamps the
+  kernel clock (`setTime`) before every mutating call** so persisted mtimes/ctimes
+  are wall-clock real (the kernel is clock-less per ADR-020). New wasm bindings:
+  `sys_lstat`/`sys_symlink`/`sys_readlink`/`setTime`. Proven end-to-end by a
+  headless-browser test running a `node` script that symlinks, `readlink`s,
+  `lstat`s, and reads a real `mtimeMs` (`tools/sync-fs.test.js`).
 - **Durable filesystem: snapshots + mark-sweep GC (ADR-022, PLAN Phase 7).** The
   write-behind flush now persists against the kernel's **live set** (`liveChunks()`
   — working tree ∪ retained snapshots) instead of just the working tree, saves the

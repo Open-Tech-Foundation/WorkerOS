@@ -69,9 +69,29 @@ struct DirEntryDto {
 
 #[derive(Serialize)]
 struct StatDto {
-    /// "file" | "dir"
+    /// "file" | "dir" | "symlink"
     kind: &'static str,
     size: u64,
+    /// Timestamps (ms since epoch) + hard-link count.
+    mtime: f64,
+    ctime: f64,
+    btime: f64,
+    nlink: u32,
+}
+
+fn stat_dto(m: &workeros_kernel::vfs::Metadata) -> StatDto {
+    StatDto {
+        kind: match m.file_type {
+            workeros_kernel::vfs::FileType::Dir => "dir",
+            workeros_kernel::vfs::FileType::File => "file",
+            workeros_kernel::vfs::FileType::Symlink => "symlink",
+        },
+        size: m.size,
+        mtime: m.mtime as f64,
+        ctime: m.ctime as f64,
+        btime: m.btime as f64,
+        nlink: m.nlink,
+    }
 }
 
 #[derive(Serialize)]
@@ -629,14 +649,29 @@ impl WebKernel {
     #[wasm_bindgen]
     pub fn sys_stat(&self, pid: Pid, path: String) -> Result<JsValue, JsError> {
         let m = self.inner.sys_stat(pid, &path).map_err(errno_to_js)?;
-        to_js(&StatDto {
-            kind: match m.file_type {
-                workeros_kernel::vfs::FileType::Dir => "dir",
-                workeros_kernel::vfs::FileType::File => "file",
-                workeros_kernel::vfs::FileType::Symlink => "symlink",
-            },
-            size: m.size,
-        })
+        to_js(&stat_dto(&m))
+    }
+
+    #[wasm_bindgen]
+    pub fn sys_lstat(&self, pid: Pid, path: String) -> Result<JsValue, JsError> {
+        let m = self.inner.sys_lstat(pid, &path).map_err(errno_to_js)?;
+        to_js(&stat_dto(&m))
+    }
+
+    #[wasm_bindgen]
+    pub fn sys_symlink(&mut self, pid: Pid, target: String, link: String) -> Result<(), JsError> {
+        self.inner.sys_symlink(pid, &target, &link).map_err(errno_to_js)
+    }
+
+    #[wasm_bindgen]
+    pub fn sys_readlink(&self, pid: Pid, path: String) -> Result<String, JsError> {
+        self.inner.sys_readlink(pid, &path).map_err(errno_to_js)
+    }
+
+    /// Stamp the kernel wall clock (ms) before a mutation so mtimes are real.
+    #[wasm_bindgen(js_name = setTime)]
+    pub fn set_time(&mut self, now_ms: f64) {
+        self.inner.set_time(now_ms);
     }
 
     #[wasm_bindgen]

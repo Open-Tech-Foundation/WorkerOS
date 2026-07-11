@@ -117,3 +117,41 @@ test("fs.promises wraps sync ops", async () => {
   assert.equal(await fs.promises.readFile("/p", "utf8"), "async");
   await assert.rejects(fs.promises.readFile("/missing"), (e) => e.code === "ENOENT");
 });
+
+test("symlinkSync + readlinkSync + lstat vs stat (follow)", () => {
+  const fs = createFs(createFakeSyncFs());
+  fs.writeFileSync("/target.txt", "payload");
+  fs.symlinkSync("/target.txt", "/link");
+  // readlink returns the raw target.
+  assert.equal(fs.readlinkSync("/link"), "/target.txt");
+  // stat follows the link → the target file.
+  const st = fs.statSync("/link");
+  assert.equal(st.isFile(), true);
+  assert.equal(st.isSymbolicLink(), false);
+  assert.equal(st.size, "payload".length);
+  // lstat sees the link itself.
+  const ls = fs.lstatSync("/link");
+  assert.equal(ls.isSymbolicLink(), true);
+  assert.equal(ls.isFile(), false);
+  // reading through the link yields the target's bytes.
+  assert.equal(fs.readFileSync("/link", "utf8"), "payload");
+});
+
+test("statSync reports real mtime after a write (host clock)", () => {
+  const fs = createFs(createFakeSyncFs());
+  fs.writeFileSync("/f", "x");
+  const st = fs.statSync("/f");
+  assert.ok(st.mtimeMs > 0, "mtime is a real timestamp, not 0");
+  assert.ok(st.mtime instanceof Date);
+  assert.equal(st.atimeMs, st.mtimeMs, "atime reported as mtime (untracked)");
+});
+
+test("readlinkSync on a non-link throws EINVAL; buffer encoding", () => {
+  const fs = createFs(createFakeSyncFs());
+  fs.writeFileSync("/reg", "x");
+  assert.throws(() => fs.readlinkSync("/reg"), (e) => e.code === "EINVAL");
+  fs.symlinkSync("../up", "/l");
+  const buf = fs.readlinkSync("/l", "buffer");
+  assert.ok(buf instanceof Uint8Array);
+  assert.equal(dec.decode(buf), "../up");
+});

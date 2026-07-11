@@ -342,10 +342,30 @@ impl ProcessCtx {
         vfs.rmdir(&abs)
     }
 
-    /// Stat a path (for coreutils / `ls`).
+    /// Stat a path (for coreutils / `ls`). Follows a final symlink.
     pub fn path_stat(&self, vfs: &dyn Vfs, path_arg: &str) -> SysResult<Metadata> {
         let abs = self.resolve_path(path_arg)?;
         vfs.stat(&abs)
+    }
+
+    /// `lstat`: stat a path without following a final symlink (Node `fs.lstat`).
+    pub fn path_lstat(&self, vfs: &dyn Vfs, path_arg: &str) -> SysResult<Metadata> {
+        let abs = self.resolve_path(path_arg)?;
+        vfs.lstat(&abs)
+    }
+
+    /// Create a symlink at `link_arg` pointing at `target` (stored uninterpreted,
+    /// resolved relative to the link's directory at walk time). Only the link
+    /// path is confined to the process root; the target is opaque bytes.
+    pub fn path_symlink(&mut self, vfs: &mut dyn Vfs, target: &str, link_arg: &str) -> SysResult<()> {
+        let abs = self.resolve_path(link_arg)?;
+        vfs.symlink(target, &abs).map(|_| ())
+    }
+
+    /// Read a symlink's target (Node `fs.readlink`).
+    pub fn path_readlink(&self, vfs: &dyn Vfs, path_arg: &str) -> SysResult<String> {
+        let abs = self.resolve_path(path_arg)?;
+        vfs.readlink(&abs)
     }
 
     /// List a directory by path.

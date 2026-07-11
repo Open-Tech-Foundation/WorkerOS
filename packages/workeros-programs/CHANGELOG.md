@@ -8,6 +8,15 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:fs` symlinks + real timestamps** (`src/node/fs.js`). Now that the VFS
+  models symlinks and inode times (ADR-022), `fs` exposes them: `symlinkSync`,
+  `readlinkSync` (with `'buffer'` encoding), and a proper `lstatSync` that does
+  **not** follow a final link (so `Stats.isSymbolicLink()` can be true), plus the
+  `promises` equivalents. `statSync`/`lstatSync`/`fstatSync` now report real
+  `mtimeMs`/`ctimeMs`/`birthtimeMs` (from the host-stamped kernel clock) and
+  `Date` accessors instead of epoch-zero constants; `atime` is reported as
+  `mtime` (the VFS doesn't track access time — honest, INV-5). Unit-tested
+  against the fake `syncFs` (which gained symlink + mtime modeling).
 - **`node:zlib`** (`src/node/zlib.js`). Gzip/DEFLATE for the guest, one-shot sync
   + async. As with `node:crypto`, Node's API is *synchronous* (Vite's build
   reporter calls `gzipSync` inline) but the browser's only compressor,

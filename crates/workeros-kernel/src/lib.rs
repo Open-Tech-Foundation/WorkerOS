@@ -674,9 +674,32 @@ impl Kernel {
         self.contexts.get(&pid).ok_or(Errno::Badf)?.path_readdir(&self.vfs, path)
     }
 
-    /// Stat a path (for `ls`/`cp`).
+    /// Stat a path (for `ls`/`cp`). Follows a final symlink.
     pub fn sys_stat(&self, pid: Pid, path: &str) -> SysResult<Metadata> {
         self.contexts.get(&pid).ok_or(Errno::Badf)?.path_stat(&self.vfs, path)
+    }
+
+    /// `lstat` — stat without following a final symlink (Node `fs.lstat`).
+    pub fn sys_lstat(&self, pid: Pid, path: &str) -> SysResult<Metadata> {
+        self.contexts.get(&pid).ok_or(Errno::Badf)?.path_lstat(&self.vfs, path)
+    }
+
+    /// Create a symlink at `link` pointing at `target` (Node `fs.symlink`).
+    pub fn sys_symlink(&mut self, pid: Pid, target: &str, link: &str) -> SysResult<()> {
+        let ctx = self.contexts.get_mut(&pid).ok_or(Errno::Badf)?;
+        ctx.path_symlink(&mut self.vfs, target, link)
+    }
+
+    /// Read a symlink's target (Node `fs.readlink`).
+    pub fn sys_readlink(&self, pid: Pid, path: &str) -> SysResult<String> {
+        self.contexts.get(&pid).ok_or(Errno::Badf)?.path_readlink(&self.vfs, path)
+    }
+
+    /// Set the kernel's wall clock (ms since epoch). The kernel is clock-less
+    /// (ADR-020); the host stamps this before a mutation so inode mtimes/ctimes
+    /// reflect real time rather than 0.
+    pub fn set_time(&mut self, now_ms: f64) {
+        self.vfs.set_time(now_ms as u64);
     }
 
     /// `mkdir` a single directory.
