@@ -8,6 +8,17 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **Node-compat website report + canonical test classifier.** New shared
+  `tools/node-compat-classify.mjs` normalizes every official test to a canonical
+  Node builtin (folding upstream naming quirks like `test-h2-*` → http2,
+  `test-runner-*` → test-runner, `test-messageport-*` → worker; genuine one-offs
+  fall into `misc`, ~1%). The raw runner now imports it instead of an inline
+  heuristic that produced 247 noisy buckets (now 77 real modules). New
+  `tools/node-compat-report.mjs` (`npm run report:node-compat`, and auto-run at
+  the end of `test:node-compat:full`) emits a stable, public-shaped
+  `report.json` — target, overall counts, `topFailures`, per-module/per-suite
+  pass rates — for the website to fetch. Current raw full-tree result:
+  1,332 / 4,699 pass (28.3%).
 - **`fs.link`/`fs.realpath` syscalls wired.** The sync channel + async ABI gain
   `link` (mutating — stamps the clock + emits a watch event) and `realpath`,
   routed to the new kernel `sys_link`/`sys_realpath`; new wasm bindings expose
