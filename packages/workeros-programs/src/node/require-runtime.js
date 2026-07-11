@@ -25,6 +25,7 @@ import { util as utilModule } from "./util.js";
 import { createNet } from "./net.js";
 import { createHttp } from "./http.js";
 import { crypto as cryptoModule } from "./crypto.js";
+import { stream as streamModule } from "./stream.js";
 import { zlib as zlibModule } from "./zlib.js";
 
 // ---- core builtins --------------------------------------------------------
@@ -58,6 +59,7 @@ export function makeBuiltins(sys, extras) {
     ["buffer", bufferModule],
     ["events", EventEmitter],
     ["util", utilModule],
+    ["stream", streamModule],
     ["net", net],
     ["http", http],
     ["crypto", cryptoModule],

@@ -16,6 +16,14 @@ guest runtime. Format:
   argument-handling inconsistencies and gives the runtime one canonical
   program-level argv layer distinct from `wsh`'s shell parsing. Covered by
   `tools/args.test.js`.
+- **`node:stream`** (`src/node/stream.js`). A first Node-compatible stream
+  surface for the guest runtime: `Stream`, `Readable`, `Writable`, `Duplex`,
+  `Transform`, `PassThrough`, `Readable.from`, `pipe`, `pipeline`,
+  `finished`, and `stream.promises`. Registered as a real builtin so package
+  feature-detection and light stream usage no longer fail on a missing module.
+  Honest scope (INV-5): this is a pragmatic compatibility layer, not a full
+  Node backpressure/object-mode implementation yet. Covered by
+  `tools/stream.test.js`.
 - **WASM codec behind `node:zlib` + `node:crypto`** (`crates/workeros-codec`,
   `src/node/wasm-codec.js`). A freestanding Rust→wasm module (miniz_oxide DEFLATE +
   RustCrypto hashes) accelerates the CPU-bound hot paths behind the *same* APIs.

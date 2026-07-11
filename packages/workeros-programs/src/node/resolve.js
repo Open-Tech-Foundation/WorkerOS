@@ -21,6 +21,7 @@ export const NODE_BUILTINS = new Set([
   "buffer",
   "events",
   "util",
+  "stream",
   "net",
   "http",
   "crypto",
