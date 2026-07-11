@@ -388,13 +388,18 @@ guest runtime. Format:
     promise** (as in Node) instead of aborting the process at graph-build time, so
     `import('optional').catch(…)` degrades gracefully. Modules keep singleton
     identity across dynamic imports via the shared blob cache.
-  - **Format detection honors ESM syntax.** A module written with `import`/`export`
-    (or `import.meta`) is treated as ESM even when it also calls a `require` — e.g.
-    one from `createRequire(import.meta.url)` — instead of being misrouted to the
-    CommonJS evaluator by the bare `require(` heuristic (`usesCommonjs` →
-    `hasEsmSyntax`, tokenizer-based so strings/comments and `{ import: … }` keys
-    don't fool it). The source transform is token-offset precise (a module with no
-    `import.meta`/dynamic import/specifier to rewrite is returned unchanged).
+  - **CJS-vs-ESM format decided Node's way** (`detectFormat`). Extension is
+    authoritative (`.mjs` → ESM, `.cjs`/`.json` → CJS) and, for `.js`, the nearest
+    `package.json` `"type"` decides — `"module"` → ESM, otherwise CommonJS —
+    instead of sniffing the source. Only when a file has **no** package scope
+    (loose scripts, coreutils, `-e`) does it fall back to syntax (a
+    `require`/`module.exports` script is CJS; anything else, incl. a bare
+    top-level-await program, stays ESM). The syntax check is the tokenizer-based
+    `hasEsmSyntax`, so strings/comments and `{ import: … }` keys don't fool it, and
+    a module written with `import`/`export` is never misrouted to the CJS evaluator
+    just because it also calls a `createRequire`-made `require`. The source
+    transform is token-offset precise (a module with no `import.meta`/dynamic
+    import/specifier to rewrite is returned unchanged).
   Unit-covered in `tools/esm-graph.test.js` (transform + `hasEsmSyntax`) and driven
   end-to-end in a booted kernel — real `file://` `import.meta`, computed + lazy
   dynamic import, `createRequire(import.meta.url)` (`workeros-web`'s

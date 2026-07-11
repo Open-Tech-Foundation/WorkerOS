@@ -16,7 +16,7 @@
 // a plain ESM script keeps the kernel-graph stitch path. Both are guest code —
 // the kernel still owns only native resolution + execution (INV-1/INV-2).
 
-import { createNodeRuntime, usesCommonjs, makeBuiltins } from "/lib/workeros-node/require-runtime.js";
+import { createNodeRuntime, detectFormat, makeBuiltins } from "/lib/workeros-node/require-runtime.js";
 import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 import { buildEsmGraph, transformModule } from "/lib/workeros-node/esm-graph.js";
 import { createResolver, isBuiltinSpec, builtinKey } from "/lib/workeros-node/resolve.js";
@@ -168,8 +168,14 @@ const process = emitter({
   stderr: err2 ? new tty.WriteStream(2) : pipeStream(2),
   // sys.exit reports the code to the kernel and throws to unwind the current tick,
   // exactly like Node's non-returning process.exit.
-  exit: (code = 0) => sys.exit(code | 0),
+  exit: (code = 0) => { emitExit(code | 0); sys.exit(code | 0); },
 });
+// Node emits `'exit'` exactly once as the process finishes — natural completion or
+// an explicit process.exit. Handlers run synchronously; a throw here (e.g. a test
+// harness' deferred `mustCall` assertion) propagates to the program worker and
+// becomes a non-zero exit, exactly as an uncaught error would.
+let exitEmitted = false;
+const emitExit = (code) => { if (exitEmitted) return; exitEmitted = true; process.emit("exit", code | 0); };
 // Register/deregister signal interest with the kernel: a caught SIGINT is then
 // delivered cooperatively (via sys.onSignal) instead of hard-killing the process.
 process._onadd = (ev) => { if (SIGNALS.has(ev) && process.listenerCount(ev) === 1) sys.sighandle(ev, true); };
@@ -264,7 +270,9 @@ if (evalSource != null) {
 // CommonJS entry (`require`/`module.exports`): run it through the CJS runtime,
 // which resolves the `require` graph out of the VFS and provides the `node:`
 // builtins (fs/path). A plain ESM script falls through to the stitch path below.
-if (usesCommonjs(entrySource, entryAbs)) {
+// `-e`/`-p` has no file scope, so its format is syntax-only; a real entry uses the
+// nearest package.json `"type"` (Node's rule), not a source sniff.
+if (detectFormat(entrySource, entryAbs, evalSource != null ? undefined : { fs, path }) === "cjs") {
   const run = createNodeRuntime(sys, nodeBuiltins);
   await run(entryAbs, entrySource);
 } else {
@@ -344,7 +352,9 @@ const stitchGraph = (graph) => {
     for (const imp of mod.imports) if (imp.builtin) builtinBlob(imp.resolved);
   }
   const cjsPaths = new Set(
-    graph.modules.filter((m) => m.path !== graph.entry && usesCommonjs(m.source, m.path)).map((m) => m.path),
+    graph.modules
+      .filter((m) => m.path !== graph.entry && detectFormat(m.source, m.path, { fs, path }) === "cjs")
+      .map((m) => m.path),
   );
   for (const p of cjsPaths) cjsBlob(p);
   let remaining = graph.modules.filter((m) => !cjsPaths.has(m.path) && !pathToBlob.has(m.path));
@@ -390,7 +400,7 @@ globalThis.__workerosImport = async (base, spec) => {
   const abs = resolver.resolveFrom(path.dirname(base), target);
   if (!abs) throw new Error(`Cannot find module '${spec}' imported from ${base}`);
   const source = fs.readFileSync(abs, "utf8");
-  if (usesCommonjs(source, abs)) return import(cjsBlob(abs));
+  if (detectFormat(source, abs, { fs, path }) === "cjs") return import(cjsBlob(abs));
   return import(stitchGraph(buildEsmGraph({ fs, path, resolver }, abs, source)));
 };
 
@@ -406,3 +416,8 @@ await import(stitchGraph(buildEsmGraph({ fs, path, resolver }, entryAbs, entrySo
 // to completion instead of the process being reported exited the instant the
 // entry's synchronous body returns.
 await whenIdle();
+
+// The loop has drained: the process is about to exit successfully. Fire Node's
+// `'exit'` event (0) so end-of-run hooks — notably the compat harness' `mustCall`
+// bookkeeping — get their synchronous chance to assert.
+emitExit(0);

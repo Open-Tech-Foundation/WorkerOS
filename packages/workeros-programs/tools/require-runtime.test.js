@@ -4,9 +4,40 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createNodeRuntime } from "../src/node/require-runtime.js";
+import { createNodeRuntime, detectFormat } from "../src/node/require-runtime.js";
 import { createFs } from "../src/node/fs.js";
 import { createFakeSyncFs } from "./fake-syncfs.js";
+import { createPath } from "../src/node/path.js";
+
+// A minimal sync fs over an in-memory file map, for detectFormat's package.json walk.
+const fmtFs = (files) => ({
+  readFileSync(p) {
+    if (p in files) return files[p];
+    throw Object.assign(new Error("ENOENT " + p), { code: "ENOENT" });
+  },
+});
+
+test("detectFormat: extension and nearest package.json type decide the format (Node's rule)", () => {
+  const deps = {
+    fs: fmtFs({
+      "/pkg/package.json": '{"type":"module"}',
+      "/cjs/package.json": '{"name":"x"}', // no type → commonjs
+    }),
+    path: createPath(),
+  };
+  // Extensions are authoritative regardless of package type.
+  assert.equal(detectFormat("", "/pkg/a.mjs", deps), "esm");
+  assert.equal(detectFormat("", "/pkg/a.cjs", deps), "cjs");
+  assert.equal(detectFormat("", "/pkg/a.json", deps), "cjs");
+  // `.js` follows the enclosing package's "type" — NOT the source contents.
+  assert.equal(detectFormat("module.exports = 1;", "/pkg/a.js", deps), "esm");
+  assert.equal(detectFormat("export default 1;", "/cjs/a.js", deps), "cjs");
+  // No package scope (loose script / -e): fall back to syntax.
+  assert.equal(detectFormat("export default 1;", "/loose/a.js", deps), "esm");
+  assert.equal(detectFormat("const x = require('y');", "/loose/a.js", deps), "cjs");
+  // Omitting deps forces the syntax-only fallback.
+  assert.equal(detectFormat("import x from 'y';", "/pkg/a.js"), "esm");
+});
 
 // A fake program-worker `sys`: sync primitives + async fd ops over one store.
 function fakeSys() {

@@ -67,9 +67,10 @@ test("ESM: node: builtin edges + node_modules resolution (main + subpath exports
         // A bare ESM package resolved via package.json "main".
         "/proj/node_modules/greeter/package.json": '{"type":"module","main":"index.js"}',
         "/proj/node_modules/greeter/index.js": "export default (n) => 'hi ' + n;\n",
-        // A scoped package with a subpath export map.
+        // A scoped package with a subpath export map. `type:module` makes its `.js`
+        // ESM per Node's rule (an ESM `.js` in a non-module package is invalid Node).
         "/proj/node_modules/@scope/util/package.json":
-          '{"exports":{"./str":"./lib/str.js"}}',
+          '{"type":"module","exports":{"./str":"./lib/str.js"}}',
         "/proj/node_modules/@scope/util/lib/str.js":
           "export const upper = (s) => s.toUpperCase();\n",
       };

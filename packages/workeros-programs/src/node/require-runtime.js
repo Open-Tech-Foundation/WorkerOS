@@ -111,6 +111,48 @@ export function usesCommonjs(source, p = "") {
   );
 }
 
+// The nearest enclosing `package.json`'s `type` (Node's module-format authority):
+// walk up from the file's directory; the first package.json found decides
+// (`"module"`/`"commonjs"`, defaulting to `"commonjs"` when the field is absent, as
+// Node does). Returns null if no package scope exists up to `/`.
+function nearestType(absPath, { fs, path }) {
+  let dir = path.dirname(absPath);
+  for (;;) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+      return pkg.type === "module" ? "module" : "commonjs";
+    } catch {
+      // no/broken package.json here — keep walking up
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * The module format of `absPath` the way Node decides it — by extension and the
+ * nearest `package.json` `"type"`, NOT by sniffing source:
+ *   - `.mjs` → esm, `.cjs`/`.json` → cjs,
+ *   - `.js`/extensionless → the enclosing package's `"type"` (`module` → esm),
+ *   - no package scope (loose scripts, `-e`) → fall back to syntax (lenient, so a
+ *     standalone `import`-using script still runs).
+ * `deps` = `{ fs, path }`; omit it to force the syntax-only fallback.
+ */
+export function detectFormat(source, absPath, deps) {
+  if (absPath.endsWith(".mjs")) return "esm";
+  if (absPath.endsWith(".cjs") || absPath.endsWith(".json")) return "cjs";
+  // Inside a package, `"type"` is authoritative (Node's rule) — `.js` is ESM iff the
+  // enclosing package is `"type":"module"`, regardless of what the source looks like.
+  const type = deps ? nearestType(absPath, deps) : null;
+  if (type === "module") return "esm";
+  if (type === "commonjs") return "cjs";
+  // No package scope (loose scripts, coreutils, `-e`): sniff. A require/module.exports
+  // script is CommonJS; anything else — including a plain top-level-await program —
+  // stays ESM so TLA works.
+  return usesCommonjs(source) ? "cjs" : "esm";
+}
+
 // ---- the runtime -----------------------------------------------------------
 export function createNodeRuntime(sys, extras) {
   const builtins = makeBuiltins(sys, extras);
