@@ -13,6 +13,7 @@ import { createOs } from "./os.js";
 import { createUrl } from "./url.js";
 import { createFs } from "./fs.js";
 import { createModule } from "./module.js";
+import { hasEsmSyntax } from "./esm-graph.js";
 import { buffer as bufferModule } from "./buffer.js";
 import { assert as assertModule, strict as assertStrictModule } from "./assert.js";
 import { stringDecoder as stringDecoderModule } from "./string_decoder.js";
@@ -99,6 +100,10 @@ export function makeBuiltins(sys, extras) {
 export function usesCommonjs(source, p = "") {
   if (p.endsWith(".cjs")) return true;
   if (p.endsWith(".mjs")) return false;
+  // Static ESM syntax wins: a module with `import`/`export` (or `import.meta`) is
+  // ESM even when it also calls a `require` — e.g. one made via
+  // `createRequire(import.meta.url)`. Such source can't run in the CJS evaluator.
+  if (hasEsmSyntax(source)) return false;
   return (
     /(^|[^.\w$])require\s*\(/.test(source) ||
     /\bmodule\.exports\b/.test(source) ||

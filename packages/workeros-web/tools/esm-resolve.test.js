@@ -87,6 +87,51 @@ test("ESM: node: builtin edges + node_modules resolution (main + subpath exports
   ]);
 });
 
+test("ESM: fs-backed import.meta + lazy/computed dynamic import (no visible blob URLs)", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const files = {
+        "/proj/app.js": [
+          "import { createRequire } from 'node:module';",
+          // import.meta must be a real file:// path rooted in the VFS, not a blob:.
+          "console.log('url:', import.meta.url);",
+          "console.log('dir:', import.meta.dirname, 'file:', import.meta.filename);",
+          "console.log('resolve:', import.meta.resolve('./lib/math.js'));",
+          // createRequire(import.meta.url) — needs a real file URL to work.
+          "const require = createRequire(import.meta.url);",
+          "console.log('cjs:', require('./cjsdep.js').tag);",
+          // Computed dynamic import — the specifier is not a literal, so it can only
+          // work via the fs-backed runtime hook (never a pre-stitched graph edge).
+          "const name = 'math';",
+          "const m = await import('./lib/' + name + '.js');",
+          "console.log('dyn:', m.add(2, 3));",
+          // Lazy: a missing dynamic import rejects (catchable), it does NOT abort
+          // the program at graph-build time.",
+          "const r = await import('does-not-exist').then(() => 'loaded', () => 'caught');",
+          "console.log('lazy:', r);",
+        ].join("\n"),
+        "/proj/lib/math.js": "export const add = (a, b) => a + b;\n",
+        "/proj/cjsdep.js": "module.exports = { tag: 'from-cjs' };\n",
+      };
+      for (const [p, src] of Object.entries(files)) await os.fs.write(p, src);
+      return await window.run(os, ["node", "app.js"], { cwd: "/proj" });
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  const lines = result.out.trim().split("\n");
+  assert.deepEqual(lines, [
+    "url: file:///proj/app.js",
+    "dir: /proj file: /proj/app.js",
+    "resolve: file:///proj/lib/math.js",
+    "cjs: from-cjs",
+    "dyn: 5",
+    "lazy: caught",
+  ]);
+});
+
 test("ESM: an uninstalled bare package fails honestly (not a silent stub)", opts, async () => {
   const { result } = await withPage((page) =>
     page.evaluate(async () => {

@@ -18,7 +18,8 @@
 
 import { createNodeRuntime, usesCommonjs, makeBuiltins } from "/lib/workeros-node/require-runtime.js";
 import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
-import { buildEsmGraph } from "/lib/workeros-node/esm-graph.js";
+import { buildEsmGraph, transformModule } from "/lib/workeros-node/esm-graph.js";
+import { createResolver, isBuiltinSpec, builtinKey } from "/lib/workeros-node/resolve.js";
 import { createTty } from "/lib/workeros-node/tty.js";
 import { createEventLoop } from "/lib/workeros-node/event-loop.js";
 import { createWorkerThreads } from "/lib/workeros-node/worker-threads.js";
@@ -154,7 +155,7 @@ const process = emitter({
   // `versions.node` is what packages feature-detect on; we report a recent value
   // so they take modern code paths (which our builtins target) rather than throw
   // "unsupported Node". We are still not Node — see `version`/`release` (INV-5).
-  versions: { node: "20.0.0", workeros: "0.0.0", v8: "0.0" },
+  versions: { node: "22.23.1", workeros: "0.0.0", v8: "0.0" },
   cwd: () => cwd,
   chdir: (d) => { cwd = resolveCwd(String(d)); },
   hrtime,
@@ -268,18 +269,22 @@ if (usesCommonjs(entrySource, entryAbs)) {
   await run(entryAbs, entrySource);
 } else {
 
-const graph = buildEsmGraph({ fs, path }, entryAbs, entrySource);
+// Node module resolution is *userland* (INV-1). We build the entry's ESM graph and
+// stitch it for evaluation. The browser's native ESM loader (in this worker) can
+// only fetch blob:/data: URLs — never a VFS path — so a blob per module is the
+// unavoidable eval primitive. But nothing user-observable is blob-shaped: the
+// resolver, `import.meta.url`, and dynamic `import()` are all backed by the sync
+// `fs`, so `import.meta.url` is a real `file://` path and `import(expr)` resolves
+// lazily out of `node_modules` exactly as in Node.
+const urlMod = builtins.get("url");
+const toFileUrl = (abs) => urlMod.pathToFileURL(abs).href;
+const resolver = createResolver({ fs, path, conditions: ["node", "import"] });
 
-// Stitch the resolved graph into blob URLs, dependencies first, rewriting each
-// import specifier to its dependency's blob URL. Mechanical assembly only — the
-// resolver already decided every target.
+// resolved path | builtin key -> blob URL. Also the module cache: a path stitched
+// once (statically or via a later dynamic import) keeps one blob, so the browser
+// gives it a single module instance — Node's singleton semantics.
 const pathToBlob = new Map();
 
-// `node:` builtin edges (Phase 5·C-ESM): resolved as `builtin`, so there is no
-// VFS file. Synthesize a tiny ES module per distinct builtin that re-exports the
-// live runtime object (stashed on the global for the blob realm to read) —
-// `export default m` plus a named export per own key, so both
-// `import fs from 'node:fs'` and `import { readFileSync } from 'fs'` work.
 globalThis.__workerosBuiltins = builtins;
 // Load a CommonJS module (and, on demand, its `require` subtree) via the
 // synchronous CJS loader — backed by the sync `fs`, so a CJS dep reached from
@@ -299,61 +304,100 @@ const ownKeys = (m) =>
   m && typeof m === "object" && !Array.isArray(m)
     ? Object.keys(m).filter((k) => k !== "default" && isIdent(k))
     : [];
+const blobUrl = (src) => URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
 
-// `node:` builtin edges (Phase 5·C-ESM): the kernel marked these `builtin`, so
-// there is no VFS file — synthesize a re-export module wired to the guest runtime
-// (`import fs from 'node:fs'` and `import { readFileSync } from 'fs'` both work).
-for (const mod of graph.modules) {
-  for (const imp of mod.imports) {
-    if (imp.builtin && !pathToBlob.has(imp.resolved)) {
-      const getter = `globalThis.__workerosBuiltins.get(${JSON.stringify(imp.resolved)})`;
-      const src = reexportSource(getter, ownKeys(builtins.get(imp.resolved)));
-      pathToBlob.set(imp.resolved, URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+// A `node:` builtin has no VFS file — synthesize a re-export module wired to the
+// guest runtime object (`import fs from 'node:fs'` / `import { readFileSync } from
+// 'fs'` both work). Keyed by the builtin key, created once.
+const builtinBlob = (key) => {
+  if (!pathToBlob.has(key)) {
+    const getter = `globalThis.__workerosBuiltins.get(${JSON.stringify(key)})`;
+    pathToBlob.set(key, blobUrl(reexportSource(getter, ownKeys(builtins.get(key)))));
+  }
+  return pathToBlob.get(key);
+};
+
+// A CommonJS module (`module.exports`/`require`) reached from ESM can't evaluate
+// as an ES module — stand it up with a synthetic ESM that hands off to the sync
+// CJS loader (its `require` subtree resolves out of the VFS at load time).
+const cjsBlob = (abs) => {
+  if (!pathToBlob.has(abs)) {
+    let keys = [];
+    try {
+      keys = ownKeys(globalThis.__workerosLoadCjs(abs)); // cached; probes named exports
+    } catch {
+      // A load failure surfaces at runtime (the real import), not here.
     }
+    pathToBlob.set(abs, blobUrl(reexportSource(`globalThis.__workerosLoadCjs(${JSON.stringify(abs)})`, keys)));
   }
-}
+  return pathToBlob.get(abs);
+};
 
-// CommonJS modules the kernel resolved into an ESM graph (Phase 5·D follow-up):
-// they use `module.exports`/`require`, so they can't be evaluated as ES modules.
-// Stand each one up with a synthetic ES module that hands off to the synchronous
-// CJS loader, and skip stitching the CJS source as ESM. (The entry itself is ESM
-// here — a CJS entry goes through the runtime branch above.)
-const cjsPaths = new Set(
-  graph.modules.filter((m) => m.path !== graph.entry && usesCommonjs(m.source, m.path)).map((m) => m.path),
-);
-for (const p of cjsPaths) {
-  let keys = [];
-  try {
-    keys = ownKeys(globalThis.__workerosLoadCjs(p)); // cached; probes named exports
-  } catch {
-    // A load failure surfaces at runtime (the real import below), not here.
+// Stitch a resolved graph into blob modules (dependencies first) and return the
+// entry's blob URL. `transformModule` rewrites each module's static specifiers to
+// their dependency blobs and makes `import.meta` / dynamic `import()` fs-backed.
+// Reused for the entry graph and for every lazily import()'d subgraph, sharing the
+// `pathToBlob` cache. Cyclic ESM can't be blob-stitched (a blob URL must exist
+// before it's referenced) — a true cycle is reported rather than silently wrong.
+const stitchGraph = (graph) => {
+  for (const mod of graph.modules) {
+    for (const imp of mod.imports) if (imp.builtin) builtinBlob(imp.resolved);
   }
-  const src = reexportSource(`globalThis.__workerosLoadCjs(${JSON.stringify(p)})`, keys);
-  pathToBlob.set(p, URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
-}
-
-let remaining = graph.modules.filter((m) => !cjsPaths.has(m.path));
-while (remaining.length) {
-  const built = [];
-  for (const mod of remaining) {
-    if (!mod.imports.every((imp) => pathToBlob.has(imp.resolved))) continue;
-    let src = mod.source;
-    for (const imp of mod.imports) {
-      const url = pathToBlob.get(imp.resolved);
-      src = src.split(`"${imp.specifier}"`).join(`"${url}"`);
-      src = src.split(`'${imp.specifier}'`).join(`"${url}"`);
+  const cjsPaths = new Set(
+    graph.modules.filter((m) => m.path !== graph.entry && usesCommonjs(m.source, m.path)).map((m) => m.path),
+  );
+  for (const p of cjsPaths) cjsBlob(p);
+  let remaining = graph.modules.filter((m) => !cjsPaths.has(m.path) && !pathToBlob.has(m.path));
+  while (remaining.length) {
+    const built = [];
+    for (const mod of remaining) {
+      if (!mod.imports.every((imp) => pathToBlob.has(imp.resolved))) continue;
+      const resolvedOf = new Map(mod.imports.map((i) => [i.specifier, i.resolved]));
+      const src = transformModule(mod.source, mod.path, {
+        staticUrl: (spec) => pathToBlob.get(resolvedOf.get(spec)),
+      });
+      pathToBlob.set(mod.path, blobUrl(src));
+      built.push(mod.path);
     }
-    pathToBlob.set(mod.path, URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
-    built.push(mod.path);
+    if (built.length === 0) { err("node: unresolvable or cyclic module graph\n"); sys.exit(1); }
+    remaining = remaining.filter((m) => !pathToBlob.has(m.path));
   }
-  if (built.length === 0) { err("node: unresolvable or cyclic module graph\n"); sys.exit(1); }
-  remaining = remaining.filter((m) => !pathToBlob.has(m.path));
-}
+  return pathToBlob.get(graph.entry);
+};
+
+// `import.meta` for a module: a real `file://` URL plus fs-derived
+// filename/dirname and a `resolve()` that runs the same resolver (as Node's
+// `import.meta.resolve`). This is what `createRequire(import.meta.url)`,
+// `fileURLToPath(import.meta.url)`, and `new URL('./x', import.meta.url)` see.
+globalThis.__workerosMeta = (abs) => ({
+  url: toFileUrl(abs),
+  filename: abs,
+  dirname: path.dirname(abs),
+  resolve: (spec) => {
+    const r = resolver.resolveFrom(path.dirname(abs), String(spec));
+    return r ? toFileUrl(r) : undefined;
+  },
+});
+
+// Lazy, fs-resolved dynamic `import()`: resolve the specifier against the importing
+// module's real directory, materialize it on demand, and import the result. A
+// missing target rejects the returned promise (as in Node) instead of aborting the
+// process at graph-build time — so `import('optional').catch(...)` degrades.
+globalThis.__workerosImport = async (base, spec) => {
+  spec = String(spec);
+  if (isBuiltinSpec(spec)) return import(builtinBlob(builtinKey(spec)));
+  const target = spec.startsWith("file://") ? urlMod.fileURLToPath(spec) : spec;
+  const abs = resolver.resolveFrom(path.dirname(base), target);
+  if (!abs) throw new Error(`Cannot find module '${spec}' imported from ${base}`);
+  const source = fs.readFileSync(abs, "utf8");
+  if (usesCommonjs(source, abs)) return import(cjsBlob(abs));
+  return import(stitchGraph(buildEsmGraph({ fs, path, resolver }, abs, source)));
+};
 
 // Evaluate the script. A ProcessExit thrown by process.exit (via sys.exit) unwinds
 // past here and is caught by the program worker, which reports the code; a genuine
 // error likewise propagates to the worker's handler (stack + exit 1).
-await import(pathToBlob.get(graph.entry));
+await import(stitchGraph(buildEsmGraph({ fs, path, resolver }, entryAbs, entrySource)));
 
 } // end ESM branch
 

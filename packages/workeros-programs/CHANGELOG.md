@@ -371,6 +371,35 @@ guest runtime. Format:
   replacing the ad-hoc helper.
 
 ### Changed
+- **fs-backed `import.meta`, dynamic `import()`, and format detection**
+  (`src/node/esm-graph.js`, `src/node/node-program.js`,
+  `src/node/require-runtime.js`). ESM is still evaluated via a blob per module —
+  the browser's worker ESM loader can only fetch `blob:`/`data:` URLs, never a VFS
+  path — but that blob is now an invisible detail: everything a script observes is
+  backed by the sync `fs`, matching Node.
+  - **`import.meta` is real.** `import.meta.url` is the module's `file://` path (not
+    a `blob:` URL), with `import.meta.dirname`/`filename` and an
+    `import.meta.resolve()` that runs the resolver. So `createRequire(import.meta.url)`,
+    `fileURLToPath(import.meta.url)`, and `new URL('./x', import.meta.url)` all work.
+  - **Dynamic `import()` is lazy and fs-resolved.** A computed specifier
+    (`import(expr)`) now resolves at call time against the importing module's real
+    directory and materializes on demand — previously only string literals worked,
+    and they were pulled into the static graph. A missing target **rejects the
+    promise** (as in Node) instead of aborting the process at graph-build time, so
+    `import('optional').catch(…)` degrades gracefully. Modules keep singleton
+    identity across dynamic imports via the shared blob cache.
+  - **Format detection honors ESM syntax.** A module written with `import`/`export`
+    (or `import.meta`) is treated as ESM even when it also calls a `require` — e.g.
+    one from `createRequire(import.meta.url)` — instead of being misrouted to the
+    CommonJS evaluator by the bare `require(` heuristic (`usesCommonjs` →
+    `hasEsmSyntax`, tokenizer-based so strings/comments and `{ import: … }` keys
+    don't fool it). The source transform is token-offset precise (a module with no
+    `import.meta`/dynamic import/specifier to rewrite is returned unchanged).
+  Unit-covered in `tools/esm-graph.test.js` (transform + `hasEsmSyntax`) and driven
+  end-to-end in a booted kernel — real `file://` `import.meta`, computed + lazy
+  dynamic import, `createRequire(import.meta.url)` (`workeros-web`'s
+  `tools/esm-resolve.test.js`). Known limit (INV-5): a true ESM import *cycle*
+  can't be blob-stitched and is reported rather than run.
 - **Node-accurate `exports`/`imports` resolution** (`src/node/resolve.js`,
   `src/node/module.js`). The resolver now implements Node's package-resolution
   algorithm faithfully rather than approximating it:
