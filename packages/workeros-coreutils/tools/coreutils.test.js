@@ -6,11 +6,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { coreutils } from "../src/index.js";
+import { collectSimpleFlags, hasFlag as hasParsedFlag } from "../../workeros-programs/src/cli/args.js";
 
 const enc = new TextEncoder(), dec = new TextDecoder();
 
 async function run(name, { argv = [], stdin = "", files = {} } = {}) {
-  const body = coreutils["/sbin/" + name];
+  const body = coreutils["/sbin/" + name].replace(/^import .*?\n/, "");
   const outB = [], errB = [];
   const vfs = new Map(Object.entries(files).map(([k, v]) => [k, enc.encode(v)]));
   const fds = new Map();
@@ -30,8 +31,13 @@ async function run(name, { argv = [], stdin = "", files = {} } = {}) {
     exit: (code) => { const e = new Error("exit"); e.__exit = code | 0; throw e; },
   };
   let code = 0;
-  const fn = new Function("sys", "return (async () => {\n" + body + "\n})();");
-  try { await fn(sys); } catch (e) { if (e && e.__exit !== undefined) code = e.__exit; else throw e; }
+  const fn = new Function(
+    "sys",
+    "collectSimpleFlags",
+    "hasParsedFlag",
+    "return (async () => {\n" + body + "\n})();",
+  );
+  try { await fn(sys, collectSimpleFlags, hasParsedFlag); } catch (e) { if (e && e.__exit !== undefined) code = e.__exit; else throw e; }
   return { code, out: outB.map((b) => dec.decode(b)).join(""), err: errB.map((b) => dec.decode(b)).join("") };
 }
 
@@ -86,7 +92,7 @@ test("ls", async () => {
   
   // Custom run for ls because it needs readdir mock
   async function runLs(args) {
-    const body = coreutils["/sbin/ls"];
+    const body = coreutils["/sbin/ls"].replace(/^import .*?\n/, "");
     let out = "";
     const sys = {
       argv: ["ls", ...args], cwd: "/",
@@ -95,14 +101,21 @@ test("ls", async () => {
       readdir: st.sysOverrides.readdir,
       exit: (code) => { const e = new Error(); e.code = code; throw e; }
     };
-    try { await new Function("sys", "return (async () => { " + body + "})();")(sys); } catch(e) {}
+    try {
+      await new Function(
+        "sys",
+        "collectSimpleFlags",
+        "hasParsedFlag",
+        "return (async () => { " + body + "})();",
+      )(sys, collectSimpleFlags, hasParsedFlag);
+    } catch(e) {}
     return out;
   }
   
-  assert.equal(await runLs(["/dir"]), "a.txt\\nb.txt\\n");
-  assert.equal(await runLs(["-a", "/dir"]), ".hidden\\na.txt\\nb.txt\\n");
-  assert.equal(await runLs(["-r", "/dir"]), "b.txt\\na.txt\\n");
-  assert.equal(await runLs(["-l", "/dir"]), "-rw-r--r--        0 a.txt\\n-rw-r--r--        0 b.txt\\n");
+  assert.equal(await runLs(["/dir"]), "a.txt\nb.txt\n");
+  assert.equal(await runLs(["-a", "/dir"]), ".hidden\na.txt\nb.txt\n");
+  assert.equal(await runLs(["-r", "/dir"]), "b.txt\na.txt\n");
+  assert.equal(await runLs(["-l", "/dir"]), "-rw-r--r--        3 a.txt\n-rw-r--r--        7 b.txt\n");
 });
 
 // grep is a Rust `wasm32-wasip1` binary (crates/wsh-grep), not a JS coreutil —

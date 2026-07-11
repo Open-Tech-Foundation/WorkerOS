@@ -11,6 +11,7 @@
 // gzip is auto-detected on extract/list when the archive ends in .gz/.tgz.
 
 import { createTar, parseTar } from "/lib/workeros-archive/tar.js";
+import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 import { zlib } from "/lib/workeros-node/zlib.js";
 
 const enc = new TextEncoder();
@@ -53,21 +54,27 @@ async function mkdirp(p) {
 // ---- argument parsing (supports `tar czf …` and `tar -czf …`) --------------
 let op = null, gzipFlag = false, verbose = false, file = null, chdir = null;
 const operands = [];
-const args = sys.argv.slice(1);
-for (let i = 0; i < args.length; i++) {
-  let a = args[i];
-  const looksLikeFlags = a.startsWith("-") ? true : (i === 0 && /^[cxtzvf]+$/.test(a));
-  if (!looksLikeFlags) { operands.push(a); continue; }
-  if (a.startsWith("-")) a = a.slice(1);
-  for (let j = 0; j < a.length; j++) {
-    const c = a[j];
+try {
+  for (const tok of tokenizeArgv(sys.argv.slice(1), {
+    shortValue: new Set(["f", "C"]),
+    firstTokenGroupedShort: true,
+  })) {
+    if (tok.kind === "operand") { operands.push(tok.value); continue; }
+    if (tok.kind !== "option") continue;
+    const c = tok.short || tok.name;
     if (c === "c" || c === "x" || c === "t") op = c;
     else if (c === "z") gzipFlag = true;
     else if (c === "v") verbose = true;
-    else if (c === "f") { file = args[++i]; }
-    else if (c === "C") { chdir = args[++i]; }
+    else if (c === "f") file = tok.value;
+    else if (c === "C") chdir = tok.value;
     else { err(`tar: invalid option -- '${c}'\n`); sys.exit(2); }
   }
+} catch (e) {
+  if (e instanceof ArgError) {
+    err("tar: " + e.message + "\n");
+    sys.exit(e.exitCode);
+  }
+  throw e;
 }
 if (!op) { err("tar: you must specify one of -c, -x, -t\n"); sys.exit(2); }
 

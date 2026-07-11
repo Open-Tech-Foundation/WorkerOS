@@ -17,6 +17,7 @@
 // the kernel still owns only native resolution + execution (INV-1/INV-2).
 
 import { createNodeRuntime, usesCommonjs, makeBuiltins } from "/lib/workeros-node/require-runtime.js";
+import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 import { buildEsmGraph } from "/lib/workeros-node/esm-graph.js";
 import { createTty } from "/lib/workeros-node/tty.js";
 import { createEventLoop } from "/lib/workeros-node/event-loop.js";
@@ -25,19 +26,32 @@ const enc = new TextEncoder();
 const err = (s) => sys.write(2, enc.encode(s));
 
 // `-e "code"` / `--eval` runs the argument as source (no file); `-p`/`--print`
-// evaluates an expression and prints it (wrapped in console.log). Otherwise
-// argv[1] is a script path. This makes one-liners like
+// evaluates an expression and prints it (wrapped in console.log). Otherwise the
+// first operand is the script path. This makes one-liners like
 // `node -e "require('http').createServer(...).listen(5173)"` work.
-let script = sys.argv[1];
+let script = null;
 let evalSource = null;
-if (script === "-e" || script === "--eval" || script === "-p" || script === "--print") {
-  const code = sys.argv[2];
-  if (code == null) {
-    err("node: " + script + " requires an argument\n");
+try {
+  const tokens = tokenizeArgv(sys.argv.slice(1), {
+    shortAlias: { e: "eval", p: "print" },
+    shortValue: new Set(["e", "p"]),
+    longValue: new Set(["eval", "print"]),
+    stopAtFirstOperand: true,
+  });
+  const first = tokens.find((tok) => tok.kind === "option" || tok.kind === "operand");
+  if (first?.kind === "option" && (first.name === "eval" || first.name === "print")) {
+    const code = first.value;
+    evalSource = first.name === "print" ? "console.log(" + code + ")" : code;
+    script = "[eval]";
+  } else if (first?.kind === "operand") {
+    script = first.value;
+  }
+} catch (e) {
+  if (e instanceof ArgError) {
+    err("node: " + e.message + "\n");
     sys.exit(1);
   }
-  evalSource = script === "-p" || script === "--print" ? "console.log(" + code + ")" : code;
-  script = "[eval]";
+  throw e;
 }
 if (!script) {
   // Real Node drops into a REPL here; we have no TTY, so say so plainly.

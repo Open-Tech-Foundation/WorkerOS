@@ -15,8 +15,9 @@
 // protocols, and no TLS/redirect-chain introspection. Everything `fetch` can
 // express, curl exposes; nothing it can't.
 //
-// Authored as a plain top-level-await script (no import/export) so it runs through
-// the program worker's ESM path, which awaits top-level await.
+// Authored as a top-level-await ESM program so it can share the guest argv helper.
+
+import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -160,47 +161,25 @@ function splitForm(f) {
   return [f.slice(0, i), f.slice(i + 1)];
 }
 
-const argv = sys.argv.slice(1);
-for (let i = 0; i < argv.length; i++) {
-  const a = argv[i];
-  if (a === "--") {
-    for (i++; i < argv.length; i++) opts.urls.push(argv[i]);
-    break;
-  }
-  if (a.startsWith("--")) {
-    const eq = a.indexOf("=");
-    const name = eq < 0 ? a.slice(2) : a.slice(2, eq);
-    let consumed = false;
-    const getVal = () => {
-      if (eq >= 0) return a.slice(eq + 1);
-      consumed = true;
-      return argv[++i];
-    };
-    setLong(name, getVal);
-    void consumed;
-  } else if (a.startsWith("-") && a.length > 1) {
-    // Bundled short flags, e.g. `-sS` or `-o file` / `-ofile`.
-    for (let j = 1; j < a.length; j++) {
-      const c = a[j];
-      if (SHORT_VALUE.has(c)) {
-        const inline = a.slice(j + 1);
-        const val = inline !== "" ? inline : argv[++i];
-        setLong(SHORT_ALIAS[c], () => val);
-        break; // value consumed the rest of the token
-      }
-      const long = SHORT_ALIAS[c];
-      if (!long) {
-        err("curl: option -" + c + ": is unknown\n");
-        sys.exit(2);
-      }
-      setLong(long, () => {
-        err("curl: option -" + c + " takes no value here\n");
-        sys.exit(2);
-      });
+try {
+  for (const tok of tokenizeArgv(sys.argv.slice(1), { shortAlias: SHORT_ALIAS, shortValue: SHORT_VALUE })) {
+    if (tok.kind === "operand") {
+      opts.urls.push(tok.value);
+      continue;
     }
-  } else {
-    opts.urls.push(a);
+    if (tok.kind !== "option") continue;
+    if (!tok.long && !SHORT_ALIAS[tok.short]) {
+      err("curl: option -" + tok.short + ": is unknown\n");
+      sys.exit(2);
+    }
+    setLong(tok.name, () => tok.value);
   }
+} catch (e) {
+  if (e instanceof ArgError) {
+    err("curl: " + e.message + "\n");
+    sys.exit(e.exitCode);
+  }
+  throw e;
 }
 
 if (opts.urls.length === 0) {

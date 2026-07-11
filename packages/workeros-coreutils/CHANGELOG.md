@@ -8,7 +8,10 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Added
-- **`coreutils`** — implemented a POSIX-compliant argument parser across all tools handling short grouped flags (`-al`), long flags (`--recursive`), and the `--` operand terminator.
+- **Shared argv parsing in the coreutils prelude** (`src/index.js`). The
+  builtins now use the same guest-side POSIX/GNU-style argument tokenizer as the
+  user programs, so grouped short flags, long flags, and the `--` operand
+  terminator are handled consistently across the OS.
 - **`ls`** — enhanced to support `-l` (long format), `-h` (human-readable sizes), `-r` (reverse sort), and `-R` (recursive directory traversal).
 - **`echo -e`/`-E`** — interpret (or not) backslash escapes: `\n \t \r \e \a \b \f
   \v \\`, `\xHH`, `\0NNN`, and `\c`. Option groups combine (`-ne`). Lets `echo -e

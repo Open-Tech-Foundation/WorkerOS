@@ -10,6 +10,7 @@
 // update an existing one in place). A directory operand without -r is skipped.
 
 import { createZip } from "/lib/workeros-archive/zip.js";
+import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 import { zlib } from "/lib/workeros-node/zlib.js";
 
 const enc = new TextEncoder();
@@ -33,20 +34,27 @@ const statOf = async (p) => { try { return await sys.stat(p); } catch { return n
 
 let recurse = false, quiet = false, archive = null;
 const inputs = [];
-for (const a of sys.argv.slice(1)) {
-  if (a.startsWith("-") && a !== "-") {
-    if (a === "--recurse-paths") { recurse = true; continue; }
-    if (a === "--quiet") { quiet = true; continue; }
-    for (let i = 1; i < a.length; i++) {
-      const c = a[i];
-      if (c === "r" || c === "R") recurse = true;
-      else if (c === "q") quiet = true;
-      else if (c === "0" || c === "9" || (c >= "1" && c <= "8")) { /* level — accepted, ignored */ }
-      else { err(`zip: invalid option -- '${c}'\n`); sys.exit(2); }
+try {
+  for (const tok of tokenizeArgv(sys.argv.slice(1), {
+    shortAlias: { r: "recurse-paths", R: "recurse-paths", q: "quiet" },
+  })) {
+    if (tok.kind === "operand") {
+      if (!archive) archive = tok.value;
+      else inputs.push(tok.value);
+      continue;
     }
-    continue;
+    if (tok.kind !== "option") continue;
+    if (tok.name === "recurse-paths") recurse = true;
+    else if (tok.name === "quiet") quiet = true;
+    else if (!tok.long && tok.name >= "0" && tok.name <= "9") { /* accepted, ignored */ }
+    else { err(`zip: invalid option -- '${tok.short || tok.name}'\n`); sys.exit(2); }
   }
-  if (!archive) archive = a; else inputs.push(a);
+} catch (e) {
+  if (e instanceof ArgError) {
+    err("zip: " + e.message + "\n");
+    sys.exit(e.exitCode);
+  }
+  throw e;
 }
 if (!archive || inputs.length === 0) { err("usage: zip [-rq] archive.zip file...\n"); sys.exit(2); }
 if (!/\.zip$/i.test(archive)) archive += ".zip";

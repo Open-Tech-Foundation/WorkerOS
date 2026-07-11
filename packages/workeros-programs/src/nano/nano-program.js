@@ -1645,11 +1645,24 @@ async function tryExit() {
 async function main() {
   // Args: flags then a filename. `-l`/`--linenumbers`, `-L`/`--nolinenumbers`.
   let arg = null;
-  for (let i = 1; i < sys.argv.length; i++) {
-    const a = sys.argv[i];
-    if (a === "-l" || a === "--linenumbers") showLineNumbers = true;
-    else if (a === "-L" || a === "--nolinenumbers") showLineNumbers = false;
-    else if (!a.startsWith("-")) { arg = a; break; }
+  try {
+    const { ArgError, tokenizeArgv } = await import("/lib/workeros-cli/args.js");
+    for (const tok of tokenizeArgv(sys.argv.slice(1), {
+      shortAlias: { l: "linenumbers", L: "nolinenumbers" },
+      stopAtFirstOperand: true,
+    })) {
+      if (tok.kind === "operand") { arg = tok.value; break; }
+      if (tok.kind !== "option") continue;
+      if (tok.name === "linenumbers") showLineNumbers = true;
+      else if (tok.name === "nolinenumbers") showLineNumbers = false;
+      else { err(`nano: invalid option -- '${tok.short || tok.name}'\n`); sys.exit(2); }
+    }
+  } catch (e) {
+    if (e instanceof ArgError) {
+      err("nano: " + e.message + "\n");
+      sys.exit(e.exitCode);
+    }
+    throw e;
   }
   await updateSize();
 

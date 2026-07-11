@@ -8,6 +8,14 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **Shared guest argv parser** (`src/cli/args.js`). A common POSIX/GNU-style
+  tokenizer for WorkerOS guest programs: grouped short flags, long flags,
+  option values, `--`, tar-style bare short clusters, and stop-at-first-operand
+  behavior. Reused by `curl`, `tar`, `gzip`, `zip`, `unzip`, `sh`, `nano`,
+  `/bin/node`, and `npm`, replacing ad hoc parsers. This fixes several
+  argument-handling inconsistencies and gives the runtime one canonical
+  program-level argv layer distinct from `wsh`'s shell parsing. Covered by
+  `tools/args.test.js`.
 - **WASM codec behind `node:zlib` + `node:crypto`** (`crates/workeros-codec`,
   `src/node/wasm-codec.js`). A freestanding Rust→wasm module (miniz_oxide DEFLATE +
   RustCrypto hashes) accelerates the CPU-bound hot paths behind the *same* APIs.

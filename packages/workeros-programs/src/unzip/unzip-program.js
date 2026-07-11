@@ -8,6 +8,7 @@
 //   unzip -o archive.zip         overwrite without prompting (the default here)
 
 import { parseZip } from "/lib/workeros-archive/zip.js";
+import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 import { zlib } from "/lib/workeros-node/zlib.js";
 
 const enc = new TextEncoder();
@@ -38,20 +39,27 @@ async function mkdirp(p) {
 }
 
 let listOnly = false, destDir = null, archive = null;
-const args = sys.argv.slice(1);
-for (let i = 0; i < args.length; i++) {
-  const a = args[i];
-  if (a === "-d") { destDir = args[++i]; continue; }
-  if (a.startsWith("-") && a !== "-") {
-    for (let j = 1; j < a.length; j++) {
-      const c = a[j];
-      if (c === "l") listOnly = true;
-      else if (c === "o" || c === "q" || c === "n") { /* overwrite/quiet/never — accepted */ }
-      else { err(`unzip: invalid option -- '${c}'\n`); sys.exit(2); }
+try {
+  for (const tok of tokenizeArgv(sys.argv.slice(1), {
+    shortAlias: { d: "dir", l: "list", o: "overwrite", q: "quiet", n: "never" },
+    shortValue: new Set(["d"]),
+  })) {
+    if (tok.kind === "operand") {
+      if (!archive) archive = tok.value;
+      continue;
     }
-    continue;
+    if (tok.kind !== "option") continue;
+    if (tok.name === "dir") destDir = tok.value;
+    else if (tok.name === "list") listOnly = true;
+    else if (tok.name === "overwrite" || tok.name === "quiet" || tok.name === "never") { /* accepted */ }
+    else { err(`unzip: invalid option -- '${tok.short || tok.name}'\n`); sys.exit(2); }
   }
-  if (!archive) archive = a;
+} catch (e) {
+  if (e instanceof ArgError) {
+    err("unzip: " + e.message + "\n");
+    sys.exit(e.exitCode);
+  }
+  throw e;
 }
 if (!archive) { err("usage: unzip [-l] [-o] archive.zip [-d dir]\n"); sys.exit(2); }
 

@@ -14,6 +14,7 @@
 // /lib and uses the `sys` global the program worker installs.
 
 import { zlib } from "/lib/workeros-node/zlib.js";
+import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
 
 const enc = new TextEncoder();
 const err = (s) => sys.write(2, enc.encode(s));
@@ -41,22 +42,30 @@ let toStdout = self === "zcat";
 let keep = false, force = false;
 const files = [];
 
-for (const a of sys.argv.slice(1)) {
-  if (a === "-" || !a.startsWith("-")) { files.push(a); continue; }
-  if (a === "--stdout") { toStdout = true; continue; }
-  if (a === "--decompress" || a === "--uncompress") { decompress = true; continue; }
-  if (a === "--keep") { keep = true; continue; }
-  if (a === "--force") { force = true; continue; }
-  if (a === "--help") { err("usage: gzip [-cdkf] [file...]\n"); sys.exit(0); }
-  for (let i = 1; i < a.length; i++) {
-    const c = a[i];
-    if (c === "d") decompress = true;
-    else if (c === "c") toStdout = true;
-    else if (c === "k") keep = true;
-    else if (c === "f") force = true;
-    else if (c >= "1" && c <= "9") { /* compression level — accepted, ignored */ }
-    else { err(`${self}: invalid option -- '${c}'\n`); sys.exit(2); }
+try {
+  for (const tok of tokenizeArgv(sys.argv.slice(1), {
+    shortAlias: { c: "stdout", d: "decompress", k: "keep", f: "force" },
+  })) {
+    if (tok.kind === "operand") { files.push(tok.value); continue; }
+    if (tok.kind !== "option") continue;
+    if (tok.name === "stdout") toStdout = true;
+    else if (tok.name === "decompress" || tok.name === "uncompress") decompress = true;
+    else if (tok.name === "keep") keep = true;
+    else if (tok.name === "force") force = true;
+    else if (tok.name === "help") { err("usage: gzip [-cdkf] [file...]\n"); sys.exit(0); }
+    else if (!tok.long && tok.name >= "1" && tok.name <= "9") { /* accepted, ignored */ }
+    else {
+      const opt = tok.long ? `--${tok.name}` : tok.short;
+      err(tok.long ? `${self}: invalid option ${opt}\n` : `${self}: invalid option -- '${opt}'\n`);
+      sys.exit(2);
+    }
   }
+} catch (e) {
+  if (e instanceof ArgError) {
+    err(`${self}: ${e.message}\n`);
+    sys.exit(e.exitCode);
+  }
+  throw e;
 }
 
 const xform = (bytes) => (decompress ? zlib.gunzipSync(bytes) : zlib.gzipSync(bytes));

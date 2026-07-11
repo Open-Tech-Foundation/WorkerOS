@@ -15,6 +15,8 @@
 // Authored as a plain top-level-await script so it runs through the program
 // worker's ESM path.
 
+import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
+
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const err = (s) => sys.write(2, enc.encode(s));
@@ -62,13 +64,28 @@ let script = null;
 let file = null;
 const rest = [];
 
-for (let i = 0; i < args.length; i++) {
-  const a = args[i];
-  if (a === "-c") { script = args[++i] ?? ""; continue; }
-  if (a === "-s" || a === "-") { continue; } // read from stdin
-  if (a === "-e" || a === "-x" || a === "-u") { continue; } // set-options: honored inside
-  if (a.startsWith("-")) { continue; } // ignore other shell flags
-  if (file === null) { file = a; } else { rest.push(a); }
+try {
+  for (const tok of tokenizeArgv(args, {
+    shortAlias: { c: "command", s: "stdin", e: "errexit", x: "xtrace", u: "nounset" },
+    shortValue: new Set(["c"]),
+    stopAtFirstOperand: true,
+  })) {
+    if (tok.kind === "operand") {
+      if (tok.value === "-" && file === null) continue;
+      if (file === null) file = tok.value;
+      else rest.push(tok.value);
+      continue;
+    }
+    if (tok.kind !== "option") continue;
+    if (tok.name === "command") script = tok.value ?? "";
+    else if (tok.name === "stdin" || tok.name === "errexit" || tok.name === "xtrace" || tok.name === "nounset") { /* honored inside */ }
+  }
+} catch (e) {
+  if (e instanceof ArgError) {
+    err("sh: " + e.message + "\n");
+    sys.exit(1);
+  }
+  throw e;
 }
 
 try {

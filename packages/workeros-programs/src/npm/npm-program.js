@@ -6,9 +6,10 @@
 // (ADR-008 — outbound fetch to a CORS-enabled host), resolves semver, unpacks the
 // gzip+tar into `/node_modules`, and runs `scripts` via a sub-shell (`sys.exec`).
 //
-// Authored as a plain top-level-await script (no import/export, no require) so it
-// runs through the program worker's ESM path, which awaits top-level await. The
-// host installs its text into the VFS at `/bin/npm` on boot.
+// Authored as a top-level-await ESM program so it can share the guest argv helper.
+// The host installs its text into the VFS at `/bin/npm` on boot.
+
+import { tokenizeArgv } from "/lib/workeros-cli/args.js";
 
 const REGISTRY = "https://registry.npmjs.org/";
 const enc = new TextEncoder();
@@ -290,9 +291,12 @@ async function loadInstalled() {
 }
 
 // ---- commands --------------------------------------------------------------
-const argv = sys.argv;
-const cmd = argv[1];
-const rest = argv.slice(2).filter((a) => !a.startsWith("-"));
+const top = tokenizeArgv(sys.argv.slice(1), { stopAtFirstOperand: true });
+const cmdIndex = top.findIndex((tok) => tok.kind === "operand");
+const cmd = cmdIndex >= 0 ? top[cmdIndex].value : null;
+const rest = cmdIndex >= 0
+  ? top.slice(cmdIndex + 1).filter((tok) => tok.kind === "operand").map((tok) => tok.value)
+  : [];
 const pkgJsonPath = join(sys.cwd, "package.json");
 
 async function readPkgJson() {
@@ -340,7 +344,9 @@ try {
       sys.exit(1);
     }
     out("> " + line + "\n\n");
-    const code = await sys.exec(line);
+    const extra = rest[1] === "--" ? rest.slice(2) : rest.slice(1);
+    const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+    const code = await sys.exec(extra.length ? line + " " + extra.map(q).join(" ") : line);
     sys.exit(code | 0);
   } else if (cmd === "ls" || cmd === "list") {
     const installed = await loadInstalled();
