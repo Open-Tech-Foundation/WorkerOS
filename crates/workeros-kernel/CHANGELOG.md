@@ -7,6 +7,24 @@ a release yet, so everything lives under **Unreleased**.
 ## [Unreleased]
 
 ### Added
+- **Snapshots + mark-sweep garbage collection (persistence Stage 4, ADR-022).**
+  A ZFS/git-style snapshot layer over the content-addressed store: `snapshot_create`
+  captures the durable tree as a retained manifest and **increfs** every chunk it
+  references (so a later working-tree edit or delete can't free bytes a snapshot
+  still needs — snapshots share chunks with the working tree and each other, so an
+  unchanged capture costs only its manifest). `snapshot_auto` maintains a rolling
+  last-10 undo ring (oldest ring-evicted, its chunks decreffed); `snapshot_destroy`
+  releases a named snapshot; `snapshot_restore` wipes the persistent working tree
+  and rebuilds it from a snapshot (named or `auto:<id>`) while leaving ephemeral
+  subtrees like `/tmp` untouched; `snapshot_list` reports each capture's name/time/
+  footprint. `live_chunks` returns the union of chunks referenced by the working
+  tree **or** any retained snapshot — the mark set the host sweeps against (delete
+  everything else). `snapshot_export`/`snapshot_import` serialize the retained set
+  (`b"WOSN"`) so snapshots survive a reload, re-holding their chunks on import.
+  Native-tested (snapshot-held chunk survives working delete + restores; destroy
+  and ring-eviction free orphaned chunks; restore replaces persistent tree yet
+  keeps `/tmp`; live-set = working ∪ snapshots; export/import round-trip +
+  post-reload restore; corrupt-blob rejection) — 197 kernel tests pass.
 - **Content-addressed manifest + chunk access (persistence Stage 3, ADR-022).**
   New `Kernel` surface projects the durable tree as a manifest + a flat set of
   chunks the host can store by key: `manifest()` serializes the persistent

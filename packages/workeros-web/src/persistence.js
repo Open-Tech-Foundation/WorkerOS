@@ -10,15 +10,21 @@
 //   - **meta/manifest**: the durable directory tree + inode metadata + each
 //     file's ordered chunk-hash list — the root that ties the chunks together.
 //
+//   - **snapshots**: a `WOSN` blob capturing the retained named + auto-ring
+//     snapshots (their manifests), stored under a single meta key so they
+//     outlive a reload; the chunks they reference are part of the live set.
+//
 // This module is the dumb block store: it compresses/decompresses and moves bytes
 // by key. All structure and content-addressing decisions are the kernel's (INV-2,
-// the ADR-015/-020 discipline). Snapshots + GC layer on top in Stage 4.
+// the ADR-015/-020 discipline) — including which chunks are live; the worker
+// mark-sweeps the rest via `deleteChunks`.
 
 const DB_NAME = "workeros";
 const DB_VERSION = 2;
 const CHUNKS = "chunks";
 const META = "meta";
 const MANIFEST_KEY = "manifest";
+const SNAPSHOTS_KEY = "snapshots";
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -89,6 +95,10 @@ export async function openPersistence() {
         return null;
       },
       async saveManifest() {},
+      async loadSnapshots() {
+        return null;
+      },
+      async saveSnapshots() {},
       async knownChunks() {
         return new Set();
       },
@@ -112,6 +122,16 @@ export async function openPersistence() {
     },
     async saveManifest(bytes) {
       await txReq(db, META, "readwrite", (s) => s.put(bytes, MANIFEST_KEY));
+    },
+
+    /** The retained-snapshot set blob (`WOSN`), or null if none stored. */
+    async loadSnapshots() {
+      const v = await txReq(db, META, "readonly", (s) => s.get(SNAPSHOTS_KEY));
+      if (v == null) return null;
+      return v instanceof Uint8Array ? v : new Uint8Array(v);
+    },
+    async saveSnapshots(bytes) {
+      await txReq(db, META, "readwrite", (s) => s.put(bytes, SNAPSHOTS_KEY));
     },
 
     /** The set of chunk hashes (hex) already stored — to skip re-writing them. */

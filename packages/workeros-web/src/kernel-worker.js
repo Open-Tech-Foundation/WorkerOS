@@ -28,28 +28,48 @@ let persistence = null;
 let lastPersistedGen = 0;
 let saving = false;
 const AUTOSAVE_MS = 2000;
+// Rolling auto-snapshot cadence (ADR-022, Stage 4). We checkpoint the durable
+// tree into the last-10 undo ring at most this often, so a busy editor doesn't
+// flood the ring (and retain chunks) on every keystroke. Set at boot so the
+// first checkpoint is one interval in, not on the first change.
+const AUTO_SNAPSHOT_MS = 5 * 60 * 1000;
+let lastAutoSnap = 0;
 
 // Persist the durable tree to the content-addressed block store if it changed
 // since the last flush (ADR-022). Writes only *new* chunk hashes (delta), then
-// the manifest root. Coalesces concurrent calls; safe on a timer and on tab hide.
+// the manifest root and the snapshot set, then mark-sweeps unreferenced chunks.
+// Coalesces concurrent calls; safe on a timer and on tab hide.
 async function persistNow() {
   if (!kernel || !persistence || !persistence.available || saving) return;
   const gen = kernel.fsGeneration();
   if (gen === lastPersistedGen) return;
   saving = true;
   try {
+    // Take a rolling auto-snapshot on a bounded cadence so the last-10 durable
+    // states stay recoverable (the kernel evicts the oldest beyond the ring).
+    const now = Date.now();
+    if (now - lastAutoSnap >= AUTO_SNAPSHOT_MS) {
+      kernel.snapshotAuto();
+      lastAutoSnap = now;
+    }
     // Read the kernel's durable projection synchronously — no writes can
-    // interleave between these calls in the single-threaded worker.
+    // interleave between these calls in the single-threaded worker. `live` is
+    // every chunk the working tree *or* a retained snapshot needs.
     const manifest = kernel.manifest();
-    const refs = kernel.referencedChunks(); // hex hashes of durable chunks
+    const live = kernel.liveChunks();
+    const liveSet = new Set(live);
     const known = await persistence.knownChunks();
     // Delta: store only chunks the block store doesn't already hold.
-    for (const hex of refs) {
+    for (const hex of live) {
       if (known.has(hex)) continue;
       const bytes = kernel.chunkBytes(hex);
       if (bytes) await persistence.putChunk(hex, bytes);
     }
     await persistence.saveManifest(manifest);
+    await persistence.saveSnapshots(kernel.snapshotExport());
+    // Mark-sweep GC: any previously-stored chunk no longer live is garbage.
+    const garbage = [...known].filter((hex) => !liveSet.has(hex));
+    if (garbage.length) await persistence.deleteChunks(garbage);
     lastPersistedGen = gen;
   } catch (err) {
     console.warn("[workeros] persist failed:", err && err.message);
@@ -714,6 +734,10 @@ self.onmessage = async (ev) => {
               }
             }
             kernel.hydrateManifest(manifest);
+            // Re-register retained snapshots on top (their chunks were loaded
+            // above, part of the live set). Ignored if none were stored.
+            const snaps = await persistence.loadSnapshots();
+            if (snaps && snaps.length) kernel.snapshotImport(snaps);
           }
         } catch (err) {
           console.warn("[workeros] hydrate failed:", err && err.message);
@@ -722,6 +746,7 @@ self.onmessage = async (ev) => {
         // don't immediately re-persist the just-restored state; only genuine user
         // changes from here advance it. Then start the write-behind timer.
         lastPersistedGen = kernel.fsGeneration();
+        lastAutoSnap = Date.now(); // first auto-snapshot is one interval out
         setInterval(persistNow, AUTOSAVE_MS);
         shell = createShell({ kernel, startProcess, session, readLine: readLineFromTty });
         post({ type: MSG.BOOTED, version: kernel.version, abi: kernel.abi });

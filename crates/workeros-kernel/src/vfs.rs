@@ -17,7 +17,7 @@
 
 use crate::errno::{Errno, SysResult};
 use crate::hash::{sha256, Hash};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub mod mount;
 pub mod path;
@@ -91,6 +91,40 @@ impl ChunkStore {
             }
         }
     }
+}
+
+/// A retained point-in-time capture of the durable tree (ADR-022, ZFS-style).
+///
+/// A snapshot is just the serialized manifest at capture time plus the flat set
+/// of chunk hashes it references. Creating one **increfs** every referenced
+/// chunk so a later working-tree edit or delete cannot free bytes the snapshot
+/// still needs; destroying (or ring-evicting) it decrefs them. Snapshots share
+/// chunks with the working tree and each other — a snapshot of an unchanged tree
+/// costs only its manifest.
+#[derive(Debug, Clone)]
+struct Snapshot {
+    /// The durable tree serialized in the `WOM1` manifest shape at capture time.
+    manifest: Vec<u8>,
+    /// Every chunk hash the manifest references, held (increffed) while retained.
+    chunks: Vec<Hash>,
+    /// Capture time (ms since epoch, host clock).
+    created: u64,
+}
+
+/// How many rolling auto-snapshots to retain (the approved last-10 undo ring).
+const AUTO_RING: usize = 10;
+
+/// One row of [`MemVfs::snap_list`]: a retained snapshot's identity + size.
+#[derive(Debug, Clone)]
+pub struct SnapInfo {
+    /// Named snapshots carry the user's name; auto-snapshots are `"auto:<seq>"`.
+    pub name: String,
+    /// Capture time (ms since epoch).
+    pub created: u64,
+    /// Distinct chunks the snapshot references (its content footprint).
+    pub chunks: usize,
+    /// `true` for the rolling auto-ring, `false` for named snapshots.
+    pub auto: bool,
 }
 
 /// An inode number. Stable for the lifetime of the inode.
@@ -286,6 +320,12 @@ pub struct MemVfs {
     now: u64,
     /// The content-addressed chunk store backing file data (ADR-022).
     store: ChunkStore,
+    /// Named snapshots, retained until explicitly destroyed (ADR-022).
+    snapshots: BTreeMap<String, Snapshot>,
+    /// The rolling auto-snapshot ring (oldest at front); capped at [`AUTO_RING`].
+    auto: VecDeque<(u64, Snapshot)>,
+    /// Monotonic id stamped onto each auto-snapshot (its `auto:<seq>` name).
+    snap_seq: u64,
 }
 
 impl Default for MemVfs {
@@ -316,6 +356,9 @@ impl MemVfs {
             generation: 0,
             now: 0,
             store: ChunkStore::default(),
+            snapshots: BTreeMap::new(),
+            auto: VecDeque::new(),
+            snap_seq: 0,
         }
     }
 
@@ -691,6 +734,12 @@ impl MemVfs {
 const MANIFEST_MAGIC: &[u8; 4] = b"WOM1";
 const MANIFEST_VERSION: u8 = 1;
 
+/// Snapshot-set wire format (ADR-022, Stage 4): `b"WOSN"` + version, then a
+/// `u64 snap_seq`, a `u32` count, and that many records — `u8 kind` (0=named:
+/// `u32+name`; 1=auto: `u64 id`), `u64 created`, `u32+manifest` (a `WOM1` blob).
+const SNAPSET_MAGIC: &[u8; 4] = b"WOSN";
+const SNAPSET_VERSION: u8 = 1;
+
 impl MemVfs {
     /// Serialize the durable directory tree + metadata + file chunk-hash lists
     /// to a manifest blob (ADR-022). Ephemeral subtrees (per `mounts`) are
@@ -891,6 +940,251 @@ impl MemVfs {
             inode.btime = btime;
         }
     }
+
+    // --- Snapshots + mark-sweep GC (ADR-022, Stage 4) ----------------------
+
+    /// The flat, deduplicated set of chunk hashes the durable working tree
+    /// currently references (a snapshot's content footprint at capture time).
+    fn working_chunks(&self, mounts: &MountTable) -> Vec<Hash> {
+        let mut set = BTreeSet::new();
+        self.collect_chunks("/", ROOT_INO, mounts, &mut set);
+        set.into_iter().collect()
+    }
+
+    /// Create (or replace) a named snapshot of the current durable tree. Every
+    /// chunk it references is increffed so a later working-tree edit or delete
+    /// cannot free bytes the snapshot still needs; a same-name replace releases
+    /// the previous capture's holds.
+    pub fn snap_create(&mut self, name: &str, mounts: &MountTable) -> SysResult<()> {
+        let manifest = self.manifest(mounts);
+        let chunks = self.working_chunks(mounts);
+        for h in &chunks {
+            self.store.incref(h);
+        }
+        let snap = Snapshot { manifest, chunks, created: self.now };
+        if let Some(old) = self.snapshots.insert(name.to_string(), snap) {
+            for h in &old.chunks {
+                self.store.decref(h);
+            }
+        }
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// Push a rolling auto-snapshot of the durable tree, evicting the oldest once
+    /// the ring exceeds [`AUTO_RING`] (the approved last-10 undo history). Does
+    /// not bump the generation — the host takes these *during* a flush, so the
+    /// same flush persists them.
+    pub fn snap_auto(&mut self, mounts: &MountTable) {
+        let manifest = self.manifest(mounts);
+        let chunks = self.working_chunks(mounts);
+        for h in &chunks {
+            self.store.incref(h);
+        }
+        let id = self.snap_seq;
+        self.snap_seq += 1;
+        self.auto.push_back((id, Snapshot { manifest, chunks, created: self.now }));
+        while self.auto.len() > AUTO_RING {
+            if let Some((_, old)) = self.auto.pop_front() {
+                for h in &old.chunks {
+                    self.store.decref(h);
+                }
+            }
+        }
+    }
+
+    /// Destroy a named snapshot, releasing its chunk holds (bytes freed at the
+    /// last reference). `ENOENT` if no such name.
+    pub fn snap_destroy(&mut self, name: &str) -> SysResult<()> {
+        match self.snapshots.remove(name) {
+            Some(s) => {
+                for h in &s.chunks {
+                    self.store.decref(h);
+                }
+                self.generation += 1;
+                Ok(())
+            }
+            None => Err(Errno::Noent),
+        }
+    }
+
+    /// List retained snapshots: named (sorted) first, then the auto ring from
+    /// oldest to newest.
+    pub fn snap_list(&self) -> Vec<SnapInfo> {
+        let mut out: Vec<SnapInfo> = self
+            .snapshots
+            .iter()
+            .map(|(name, s)| SnapInfo {
+                name: name.clone(),
+                created: s.created,
+                chunks: s.chunks.len(),
+                auto: false,
+            })
+            .collect();
+        for (id, s) in &self.auto {
+            out.push(SnapInfo {
+                name: format!("auto:{id}"),
+                created: s.created,
+                chunks: s.chunks.len(),
+                auto: true,
+            });
+        }
+        out
+    }
+
+    fn find_snapshot(&self, name: &str) -> Option<&Snapshot> {
+        if let Some(s) = self.snapshots.get(name) {
+            return Some(s);
+        }
+        let id = name.strip_prefix("auto:").and_then(|n| n.parse::<u64>().ok())?;
+        self.auto.iter().find(|(i, _)| *i == id).map(|(_, s)| s)
+    }
+
+    /// Restore the durable tree to a snapshot's captured state: the persistent
+    /// working tree is wiped and rebuilt from the snapshot's manifest, while
+    /// ephemeral subtrees (e.g. `/tmp`) are left untouched. The snapshot itself
+    /// is retained (restore is non-destructive to history). `ENOENT` if unknown.
+    pub fn snap_restore(&mut self, name: &str, mounts: &MountTable) -> SysResult<()> {
+        let manifest = match self.find_snapshot(name) {
+            Some(s) => s.manifest.clone(),
+            None => return Err(Errno::Noent),
+        };
+        self.clear_persistent(mounts);
+        self.hydrate_manifest(&manifest)?;
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// The chunk hashes (hex) that must survive garbage collection: every chunk
+    /// referenced by the durable working tree **or** any retained snapshot. The
+    /// host deletes any stored chunk whose key is absent here (mark-sweep GC).
+    pub fn live_chunks(&self, mounts: &MountTable) -> Vec<String> {
+        let mut set = BTreeSet::new();
+        self.collect_chunks("/", ROOT_INO, mounts, &mut set);
+        for s in self.snapshots.values() {
+            set.extend(s.chunks.iter().copied());
+        }
+        for (_, s) in &self.auto {
+            set.extend(s.chunks.iter().copied());
+        }
+        set.iter().map(crate::hash::to_hex).collect()
+    }
+
+    /// Remove every persistent entry from the tree (decref-ing file chunks and
+    /// reclaiming quota), leaving ephemeral subtrees intact — the pre-step of a
+    /// snapshot restore.
+    fn clear_persistent(&mut self, mounts: &MountTable) {
+        self.clear_dir("/", ROOT_INO, mounts);
+    }
+
+    fn clear_dir(&mut self, dir_path: &str, dir_ino: Ino, mounts: &MountTable) {
+        let children: Vec<(String, Ino)> = match self.slots.get(dir_ino).and_then(|s| s.as_ref()) {
+            Some(Inode { kind: Kind::Dir { entries }, .. }) => {
+                entries.iter().map(|(n, &i)| (n.clone(), i)).collect()
+            }
+            _ => return,
+        };
+        for (name, child) in children {
+            let child_path = join_path(dir_path, &name);
+            if mounts.is_ephemeral(&child_path) {
+                // Keep the ephemeral entry, but descend to reach a persistent carve-out.
+                let is_dir = matches!(
+                    self.slots.get(child).and_then(|s| s.as_ref()),
+                    Some(Inode { kind: Kind::Dir { .. }, .. })
+                );
+                if is_dir && mounts.has_persistent_under(&child_path) {
+                    self.clear_dir(&child_path, child, mounts);
+                }
+            } else {
+                self.remove_subtree(child);
+                if let Ok(inode) = self.get_mut(dir_ino) {
+                    if let Kind::Dir { entries } = &mut inode.kind {
+                        entries.remove(&name);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recursively free an inode subtree (children first, then the node), using
+    /// the reap path so file chunks are decreffed and quota reclaimed.
+    fn remove_subtree(&mut self, ino: Ino) {
+        let kids: Vec<Ino> = match self.slots.get(ino).and_then(|s| s.as_ref()) {
+            Some(Inode { kind: Kind::Dir { entries }, .. }) => entries.values().copied().collect(),
+            _ => Vec::new(),
+        };
+        for k in kids {
+            self.remove_subtree(k);
+        }
+        if let Ok(inode) = self.get_mut(ino) {
+            inode.nlink = 0;
+            inode.open_count = 0;
+        }
+        self.maybe_reap(ino);
+    }
+
+    /// Serialize all retained snapshots (named + auto ring) to a blob the host
+    /// stores so they outlive a reload. Chunk *bytes* are not included — they
+    /// live in the shared block store, referenced by the embedded manifests.
+    pub fn snap_export(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(SNAPSET_MAGIC);
+        out.push(SNAPSET_VERSION);
+        put_u64(&mut out, self.snap_seq);
+        let total = (self.snapshots.len() + self.auto.len()) as u32;
+        out.extend_from_slice(&total.to_le_bytes());
+        for (name, s) in &self.snapshots {
+            out.push(0); // named
+            put_bytes(&mut out, name.as_bytes());
+            put_u64(&mut out, s.created);
+            put_bytes(&mut out, &s.manifest);
+        }
+        for (id, s) in &self.auto {
+            out.push(1); // auto
+            put_u64(&mut out, *id);
+            put_u64(&mut out, s.created);
+            put_bytes(&mut out, &s.manifest);
+        }
+        out
+    }
+
+    /// Re-register snapshots from a [`snap_export`](Self::snap_export) blob at
+    /// boot, increffing the chunks each manifest references (which must already
+    /// be loaded via [`load_chunk`](Self::load_chunk)). `EINVAL` on a corrupt blob.
+    pub fn snap_import(&mut self, bytes: &[u8]) -> SysResult<()> {
+        if bytes.len() < 5 || &bytes[0..4] != SNAPSET_MAGIC || bytes[4] != SNAPSET_VERSION {
+            return Err(Errno::Inval);
+        }
+        let mut p = 5usize;
+        self.snap_seq = self.snap_seq.max(take_u64(bytes, &mut p)?);
+        let count = take_u32(bytes, &mut p)?;
+        for _ in 0..count {
+            let kind = take_byte(bytes, &mut p)?;
+            let (name, id, is_auto) = match kind {
+                0 => {
+                    let name = std::str::from_utf8(take_bytes(bytes, &mut p)?)
+                        .map_err(|_| Errno::Inval)?
+                        .to_string();
+                    (Some(name), 0, false)
+                }
+                1 => (None, take_u64(bytes, &mut p)?, true),
+                _ => return Err(Errno::Inval),
+            };
+            let created = take_u64(bytes, &mut p)?;
+            let manifest = take_bytes(bytes, &mut p)?.to_vec();
+            let chunks = parse_manifest_chunks(&manifest)?;
+            for h in &chunks {
+                self.store.incref(h);
+            }
+            let snap = Snapshot { manifest, chunks, created };
+            if is_auto {
+                self.auto.push_back((id, snap));
+            } else if let Some(name) = name {
+                self.snapshots.insert(name, snap);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Append a `u64` (little-endian).
@@ -977,6 +1271,37 @@ fn take_bytes<'a>(bytes: &'a [u8], p: &mut usize) -> SysResult<&'a [u8]> {
     let slice = &bytes[*p..end];
     *p = end;
     Ok(slice)
+}
+
+/// Collect the deduplicated chunk hashes a `WOM1` manifest references — used to
+/// re-hold a snapshot's chunks on import without re-walking a live tree. Mirrors
+/// the record grammar of [`MemVfs::hydrate_manifest`]; `EINVAL` on corruption.
+fn parse_manifest_chunks(bytes: &[u8]) -> SysResult<Vec<Hash>> {
+    if bytes.len() < 5 || &bytes[0..4] != MANIFEST_MAGIC || bytes[4] != MANIFEST_VERSION {
+        return Err(Errno::Inval);
+    }
+    let mut set = BTreeSet::new();
+    let mut p = 5usize;
+    while p < bytes.len() {
+        let kind = take_byte(bytes, &mut p)?;
+        let _path = take_bytes(bytes, &mut p)?;
+        let _times = take_times(bytes, &mut p)?;
+        match kind {
+            0 => {}
+            1 => {
+                let _size = take_u64(bytes, &mut p)?;
+                let n = take_u32(bytes, &mut p)? as usize;
+                for _ in 0..n {
+                    set.insert(take_hash(bytes, &mut p)?);
+                }
+            }
+            2 => {
+                let _target = take_bytes(bytes, &mut p)?;
+            }
+            _ => return Err(Errno::Inval),
+        }
+    }
+    Ok(set.into_iter().collect())
 }
 
 impl Vfs for MemVfs {
@@ -1616,6 +1941,157 @@ mod tests {
         let mut vfs = fs();
         assert_eq!(vfs.hydrate_manifest(b"XX").unwrap_err(), Errno::Inval);
         assert_eq!(vfs.hydrate_manifest(b"WOM1\x01\x09").unwrap_err(), Errno::Inval);
+    }
+
+    // --- Snapshots + mark-sweep GC (ADR-022, Stage 4) -----------------------
+
+    /// Simulate a full reload the way the host does with snapshots: the block
+    /// store carries every *live* chunk (working tree ∪ snapshots), and the
+    /// snapshot set is exported/re-imported alongside the working manifest.
+    fn reload_with_snapshots(src: &MemVfs, mounts: &mount::MountTable) -> MemVfs {
+        let manifest = src.manifest(mounts);
+        let snapset = src.snap_export();
+        let block: Vec<(String, Vec<u8>)> = src
+            .live_chunks(mounts)
+            .into_iter()
+            .map(|hex| {
+                let bytes = src.chunk_bytes_hex(&hex).expect("live chunk present");
+                (hex, bytes)
+            })
+            .collect();
+        let mut dst = fs();
+        for (hex, bytes) in &block {
+            assert_eq!(&dst.load_chunk(bytes.clone()), hex, "chunk integrity");
+        }
+        dst.hydrate_manifest(&manifest).unwrap();
+        dst.snap_import(&snapset).unwrap();
+        dst
+    }
+
+    #[test]
+    fn snapshot_retains_chunks_after_working_delete_and_restores() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        vfs.set_time(100);
+        write_file(&mut vfs, "/keep.txt", b"v1");
+        vfs.snap_create("s1", &mounts).unwrap();
+        assert_eq!(vfs.snap_list().len(), 1);
+
+        // Delete from the working tree — the snapshot's incref keeps the bytes.
+        vfs.unlink("/keep.txt").unwrap();
+        assert!(vfs.resolve("/keep.txt").is_err());
+        assert_eq!(vfs.chunk_count(), 1, "chunk held by the snapshot");
+        assert_eq!(vfs.live_chunks(&mounts).len(), 1);
+
+        // Restore brings the file back byte-for-byte.
+        vfs.snap_restore("s1", &mounts).unwrap();
+        assert_eq!(read_file(&vfs, "/keep.txt"), b"v1");
+    }
+
+    #[test]
+    fn snapshot_destroy_releases_chunks() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        write_file(&mut vfs, "/f", b"data");
+        vfs.snap_create("s", &mounts).unwrap();
+        vfs.unlink("/f").unwrap();
+        assert_eq!(vfs.chunk_count(), 1, "held by the snapshot");
+        vfs.snap_destroy("s").unwrap();
+        assert_eq!(vfs.chunk_count(), 0, "last reference gone");
+        assert_eq!(vfs.snap_destroy("s").unwrap_err(), Errno::Noent);
+    }
+
+    #[test]
+    fn auto_ring_keeps_last_ten() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        for i in 0..12 {
+            write_file(&mut vfs, &format!("/f{i}"), format!("body{i}").as_bytes());
+            vfs.snap_auto(&mounts);
+        }
+        let autos: Vec<_> = vfs.snap_list().into_iter().filter(|s| s.auto).collect();
+        assert_eq!(autos.len(), AUTO_RING);
+        // The two oldest (auto:0, auto:1) rolled off; the ring is [auto:2..auto:11].
+        assert_eq!(autos.first().unwrap().name, "auto:2");
+        assert_eq!(autos.last().unwrap().name, "auto:11");
+    }
+
+    #[test]
+    fn auto_ring_eviction_frees_orphaned_chunks() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        // A file captured only by the oldest auto-snapshot, then deleted.
+        write_file(&mut vfs, "/ghost", b"unique-ghost-bytes");
+        vfs.snap_auto(&mounts); // auto:0 holds the ghost chunk
+        vfs.unlink("/ghost").unwrap();
+        assert_eq!(vfs.chunk_count(), 1, "held only by auto:0");
+        // Push AUTO_RING more auto-snapshots to roll auto:0 off the ring.
+        for _ in 0..AUTO_RING {
+            vfs.snap_auto(&mounts);
+        }
+        assert_eq!(vfs.chunk_count(), 0, "auto:0 evicted → ghost chunk freed");
+    }
+
+    #[test]
+    fn restore_replaces_working_tree_but_keeps_ephemeral() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        vfs.set_time(1);
+        write_file(&mut vfs, "/proj/a", b"A1");
+        vfs.snap_create("base", &mounts).unwrap();
+
+        // Mutate the persistent tree and scribble in ephemeral /tmp.
+        write_file(&mut vfs, "/proj/a", b"A2-modified-and-longer");
+        write_file(&mut vfs, "/proj/b", b"added-after-snapshot");
+        write_file(&mut vfs, "/tmp/scratch", b"temp");
+
+        vfs.snap_restore("base", &mounts).unwrap();
+        assert_eq!(read_file(&vfs, "/proj/a"), b"A1", "reverted");
+        assert_eq!(vfs.resolve("/proj/b").unwrap_err(), Errno::Noent, "post-snap add removed");
+        assert_eq!(read_file(&vfs, "/tmp/scratch"), b"temp", "ephemeral untouched");
+    }
+
+    #[test]
+    fn live_chunks_is_working_union_snapshots() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        write_file(&mut vfs, "/a", b"alpha");
+        vfs.snap_create("s", &mounts).unwrap();
+        write_file(&mut vfs, "/b", b"beta");
+        vfs.unlink("/a").unwrap(); // alpha now held only by the snapshot
+
+        assert_eq!(vfs.live_chunks(&mounts).len(), 2, "beta (working) + alpha (snapshot)");
+        vfs.snap_destroy("s").unwrap();
+        assert_eq!(vfs.live_chunks(&mounts).len(), 1, "only beta remains live");
+        assert_eq!(vfs.chunk_count(), 1, "alpha's bytes were swept");
+    }
+
+    #[test]
+    fn snapshots_survive_reload_and_restore_afterwards() {
+        let mounts = mount::MountTable::default();
+        let mut vfs = fs();
+        vfs.set_time(7);
+        write_file(&mut vfs, "/keep", b"persisted");
+        vfs.snap_create("release-1", &mounts).unwrap();
+        vfs.unlink("/keep").unwrap(); // only the snapshot holds it now
+
+        let mut reloaded = reload_with_snapshots(&vfs, &mounts);
+        let listed = reloaded.snap_list();
+        let s = listed.iter().find(|s| s.name == "release-1").expect("snapshot survived");
+        assert!(!s.auto);
+        assert_eq!(s.created, 7, "capture time survived");
+
+        // The snapshot-only chunk rode across the reload via the live set, so a
+        // post-reload restore rebuilds the file byte-for-byte.
+        reloaded.snap_restore("release-1", &mounts).unwrap();
+        assert_eq!(read_file(&reloaded, "/keep"), b"persisted");
+    }
+
+    #[test]
+    fn snap_import_rejects_corrupt_blob() {
+        let mut vfs = fs();
+        assert_eq!(vfs.snap_import(b"XX").unwrap_err(), Errno::Inval);
+        assert_eq!(vfs.snap_import(b"WOSN\x02").unwrap_err(), Errno::Inval);
     }
 
     #[test]

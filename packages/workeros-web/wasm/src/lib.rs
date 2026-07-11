@@ -75,6 +75,14 @@ struct StatDto {
 }
 
 #[derive(Serialize)]
+struct SnapDto {
+    name: String,
+    created: f64,
+    chunks: u32,
+    auto: bool,
+}
+
+#[derive(Serialize)]
 struct ProcDto {
     pid: Pid,
     ppid: Pid,
@@ -301,6 +309,68 @@ impl WebKernel {
     #[wasm_bindgen(js_name = hydrateManifest)]
     pub fn hydrate_manifest(&mut self, bytes: &[u8]) -> Result<(), JsError> {
         self.inner.hydrate_manifest(bytes).map_err(errno_to_js)
+    }
+
+    // --- Snapshots + mark-sweep GC (ADR-022, Stage 4) ----------------------
+
+    /// Capture a named snapshot of the durable tree (retained until destroyed).
+    #[wasm_bindgen(js_name = snapshotCreate)]
+    pub fn snapshot_create(&mut self, name: String) -> Result<(), JsError> {
+        self.inner.snapshot_create(&name).map_err(errno_to_js)
+    }
+
+    /// Push a rolling auto-snapshot (last-10 undo ring); evicts the oldest.
+    #[wasm_bindgen(js_name = snapshotAuto)]
+    pub fn snapshot_auto(&mut self) {
+        self.inner.snapshot_auto()
+    }
+
+    /// Destroy a named snapshot, releasing its chunk holds.
+    #[wasm_bindgen(js_name = snapshotDestroy)]
+    pub fn snapshot_destroy(&mut self, name: String) -> Result<(), JsError> {
+        self.inner.snapshot_destroy(&name).map_err(errno_to_js)
+    }
+
+    /// Restore the durable tree to a snapshot (named or `auto:<id>`).
+    #[wasm_bindgen(js_name = snapshotRestore)]
+    pub fn snapshot_restore(&mut self, name: String) -> Result<(), JsError> {
+        self.inner.snapshot_restore(&name).map_err(errno_to_js)
+    }
+
+    /// Retained snapshots as `[{ name, created, chunks, auto }]`.
+    #[wasm_bindgen(js_name = snapshotList)]
+    pub fn snapshot_list(&self) -> Result<JsValue, JsError> {
+        let dtos: Vec<SnapDto> = self
+            .inner
+            .snapshot_list()
+            .into_iter()
+            .map(|(name, created, chunks, auto)| SnapDto {
+                name,
+                created: created as f64,
+                chunks: chunks as u32,
+                auto,
+            })
+            .collect();
+        to_js(&dtos)
+    }
+
+    /// Hex hashes of every chunk the working tree or a retained snapshot needs —
+    /// the host keeps these and sweeps all other stored chunks (GC).
+    #[wasm_bindgen(js_name = liveChunks)]
+    pub fn live_chunks(&self) -> Vec<String> {
+        self.inner.live_chunks()
+    }
+
+    /// Serialize retained snapshots for the host to persist across reloads.
+    #[wasm_bindgen(js_name = snapshotExport)]
+    pub fn snapshot_export(&self) -> Vec<u8> {
+        self.inner.snapshot_export()
+    }
+
+    /// Re-register persisted snapshots at boot (chunks loaded first).
+    #[wasm_bindgen(js_name = snapshotImport)]
+    pub fn snapshot_import(&mut self, bytes: &[u8]) -> Result<(), JsError> {
+        self.inner.snapshot_import(bytes).map_err(errno_to_js)
     }
 
     /// `otf:spawn` — resolve `argv`'s invocation + import graph, register the

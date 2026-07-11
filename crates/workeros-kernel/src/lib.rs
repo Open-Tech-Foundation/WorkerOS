@@ -267,6 +267,55 @@ impl Kernel {
         self.vfs.hydrate_manifest(bytes)
     }
 
+    // --- Snapshots + mark-sweep GC (ADR-022, Stage 4) ----------------------
+
+    /// Capture a named snapshot of the durable tree, retained until destroyed.
+    pub fn snapshot_create(&mut self, name: &str) -> SysResult<()> {
+        self.vfs.snap_create(name, &self.mounts)
+    }
+
+    /// Push a rolling auto-snapshot (last-10 undo ring); evicts the oldest.
+    pub fn snapshot_auto(&mut self) {
+        self.vfs.snap_auto(&self.mounts)
+    }
+
+    /// Destroy a named snapshot, releasing its chunk holds. `ENOENT` if unknown.
+    pub fn snapshot_destroy(&mut self, name: &str) -> SysResult<()> {
+        self.vfs.snap_destroy(name)
+    }
+
+    /// Restore the durable tree to a snapshot (named or `auto:<id>`). `ENOENT`
+    /// if unknown; the snapshot is retained.
+    pub fn snapshot_restore(&mut self, name: &str) -> SysResult<()> {
+        self.vfs.snap_restore(name, &self.mounts)
+    }
+
+    /// Retained snapshots as `(name, created_ms, chunk_count, is_auto)` rows.
+    pub fn snapshot_list(&self) -> Vec<(String, u64, usize, bool)> {
+        self.vfs
+            .snap_list()
+            .into_iter()
+            .map(|s| (s.name, s.created, s.chunks, s.auto))
+            .collect()
+    }
+
+    /// Hex hashes of every chunk the working tree **or** a retained snapshot
+    /// needs — the host keeps these and sweeps all other stored chunks (GC).
+    pub fn live_chunks(&self) -> Vec<String> {
+        self.vfs.live_chunks(&self.mounts)
+    }
+
+    /// Serialize retained snapshots for the host to persist across reloads.
+    pub fn snapshot_export(&self) -> Vec<u8> {
+        self.vfs.snap_export()
+    }
+
+    /// Re-register persisted snapshots at boot (chunks must be loaded first).
+    /// `EINVAL` on a corrupt blob.
+    pub fn snapshot_import(&mut self, bytes: &[u8]) -> SysResult<()> {
+        self.vfs.snap_import(bytes)
+    }
+
     /// Resolve an invocation (interpreter + entry + import graph), register a
     /// process, create its syscall context, and wire its stdio per `plan`. Does
     /// **not** start a worker — that is the host's job (`otf:spawn`), which uses

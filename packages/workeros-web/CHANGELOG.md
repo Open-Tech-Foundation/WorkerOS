@@ -8,6 +8,18 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **Durable filesystem: snapshots + mark-sweep GC (ADR-022, PLAN Phase 7).** The
+  write-behind flush now persists against the kernel's **live set** (`liveChunks()`
+  — working tree ∪ retained snapshots) instead of just the working tree, saves the
+  serialized snapshot set (`snapshotExport()`) to a meta key, and **garbage-collects**
+  by deleting any stored chunk no longer live. On a bounded cadence (5 min) it takes
+  a rolling auto-snapshot (`snapshotAuto()`) so the last-10 durable states stay
+  recoverable; boot re-registers persisted snapshots (`snapshotImport()`) on top of
+  the hydrated tree. New wasm bindings expose `snapshotCreate`/`snapshotAuto`/
+  `snapshotDestroy`/`snapshotRestore`/`snapshotList`/`liveChunks`/`snapshotExport`/
+  `snapshotImport`; `persistence.js` gains `saveSnapshots`/`loadSnapshots`. Proven by
+  a headless-browser test that overwrites a multi-chunk file and asserts its old
+  chunks are swept from IndexedDB on the next flush (`tools/persistence.test.js`).
 - **Durable filesystem: content-addressed block store + delta flush (ADR-022,
   PLAN Phase 7).** `src/persistence.js` is a content-addressed IndexedDB block
   store: file data lives as SHA-256-keyed **chunks** (each compressed with
