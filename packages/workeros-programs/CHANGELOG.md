@@ -29,6 +29,12 @@ guest runtime. Format:
   npm destructures `path.win32.isAbsolute` and uses `path.win32.parse` at load.
 
 ### Fixed
+- **`process` EventEmitter surface completed** (`src/node/node-program.js`). The
+  minimal emitter behind `process` lacked `getMaxListeners`/`setMaxListeners`/
+  `listeners`/`removeAllListeners`/`eventNames`/`prependListener`, so `npm install`
+  died with `process.getMaxListeners is not a function` (arborist's signal-handling
+  saves/restores signal listeners around `getMaxListeners`/`setMaxListeners`). Added
+  the standard methods; `getMaxListeners()` defaults to 10 like Node.
 - **`Buffer.from` no longer crashes when `SharedArrayBuffer` is undefined**
   (`src/node/buffer.js`). The `value instanceof SharedArrayBuffer` check was
   unguarded, so on a page that isn't cross-origin isolated (where the global is

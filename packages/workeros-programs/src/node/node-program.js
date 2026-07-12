@@ -81,18 +81,32 @@ const [in0, out1, err2, ws, workerInit] = await Promise.all([
 // SIGWINCH handler below so tty.WriteStream.getWindowSize()/columns stay accurate.
 const winsize = { cols: ws.cols, rows: ws.rows };
 
-// A minimal Node EventEmitter — enough for `process` and its streams
-// (on/once/off/emit/listenerCount). `_onadd`/`_onremove` hooks let `process`
-// tell the kernel when it starts/stops catching a signal.
+// A minimal Node EventEmitter — enough for `process` and its streams. Covers the
+// EventEmitter surface npm's signal-handling exercises on `process`
+// (getMaxListeners/setMaxListeners/listeners in addition to on/once/off/emit).
+// `_onadd`/`_onremove` hooks let `process` tell the kernel when it starts/stops
+// catching a signal.
 const emitter = (obj = {}) => {
   const map = new Map();
+  let maxListeners = 10; // Node's EventEmitter.defaultMaxListeners
   const list = (ev) => map.get(ev) || (map.set(ev, []), map.get(ev));
   obj.on = (ev, fn) => { list(ev).push(fn); obj._onadd?.(ev); return obj; };
   obj.addListener = obj.on;
+  obj.prependListener = (ev, fn) => { list(ev).unshift(fn); obj._onadd?.(ev); return obj; };
   obj.once = (ev, fn) => { const g = (...a) => { obj.off(ev, g); fn(...a); }; return obj.on(ev, g); };
+  obj.prependOnceListener = (ev, fn) => { const g = (...a) => { obj.off(ev, g); fn(...a); }; return obj.prependListener(ev, g); };
   obj.off = (ev, fn) => { map.set(ev, list(ev).filter((f) => f !== fn)); obj._onremove?.(ev); return obj; };
   obj.removeListener = obj.off;
+  obj.removeAllListeners = (ev) => {
+    if (ev === undefined) { for (const k of [...map.keys()]) obj.removeAllListeners(k); return obj; }
+    map.set(ev, []); obj._onremove?.(ev); return obj;
+  };
+  obj.listeners = (ev) => list(ev).slice();
+  obj.rawListeners = (ev) => list(ev).slice();
   obj.listenerCount = (ev) => list(ev).length;
+  obj.eventNames = () => [...map.keys()].filter((ev) => list(ev).length > 0);
+  obj.setMaxListeners = (n) => { maxListeners = n; return obj; };
+  obj.getMaxListeners = () => maxListeners;
   obj.emit = (ev, ...a) => { const l = list(ev).slice(); for (const f of l) f(...a); return l.length > 0; };
   return obj;
 };
