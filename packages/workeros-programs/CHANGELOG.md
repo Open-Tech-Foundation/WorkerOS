@@ -29,6 +29,11 @@ guest runtime. Format:
   npm destructures `path.win32.isAbsolute` and uses `path.win32.parse` at load.
 
 ### Fixed
+- **`Buffer.from` no longer crashes when `SharedArrayBuffer` is undefined**
+  (`src/node/buffer.js`). The `value instanceof SharedArrayBuffer` check was
+  unguarded, so on a page that isn't cross-origin isolated (where the global is
+  absent) every `Buffer.from` threw `ReferenceError: SharedArrayBuffer is not
+  defined`. Guarded with `typeof`, matching `util.js`.
 - **Cyclic `require` returns the live `module.exports`** (`src/node/module.js`). A
   module that reassigns `module.exports = X` and *then* requires dependents that
   cycle back to it (pacote's fetcher.js exports its base class, then requires the

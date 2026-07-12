@@ -22,6 +22,20 @@ function toBytes(data) {
  * @returns {Promise<WorkerOS>}
  */
 export function boot(opts = {}) {
+  // WorkerOS runs synchronous syscalls over a SharedArrayBuffer + Atomics.wait
+  // (ADR-010). SharedArrayBuffer only exists in a cross-origin-isolated page, so
+  // fail here with an actionable message rather than letting every later syscall
+  // die deep in a worker with a bare "SharedArrayBuffer is not defined" (surfacing
+  // as e.g. "ls: SharedArrayBuffer is not defined" on the first command).
+  if (typeof SharedArrayBuffer === "undefined" || !globalThis.crossOriginIsolated) {
+    return Promise.reject(new Error(
+      "WorkerOS needs a cross-origin-isolated page (SharedArrayBuffer is unavailable). " +
+      "Serve it with `Cross-Origin-Opener-Policy: same-origin` and " +
+      "`Cross-Origin-Embedder-Policy: require-corp` (the dev server in tools/serve.js " +
+      "already does), then reload — `globalThis.crossOriginIsolated` must be true.",
+    ));
+  }
+
   const workerUrl =
     opts.workerUrl || new URL("./kernel-worker.js", import.meta.url).href;
   const wasmUrl =

@@ -108,7 +108,10 @@ export class Buffer extends Uint8Array {
   // ---- factories ----------------------------------------------------------
   static from(value, encodingOrOffset, length) {
     if (typeof value === "string") return toBufferView(fromString(value, encodingOrOffset));
-    if (value instanceof ArrayBuffer || value instanceof SharedArrayBuffer) {
+    // `SharedArrayBuffer` is absent unless the page is cross-origin isolated, so
+    // guard the reference — an unguarded `instanceof` throws a ReferenceError and
+    // crashes every Buffer.from (i.e. every program) when it's undefined.
+    if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer)) {
       const offset = encodingOrOffset || 0;
       const len = length === undefined ? value.byteLength - offset : length;
       return new Buffer(value, offset, len); // shares memory
