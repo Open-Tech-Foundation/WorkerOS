@@ -228,6 +228,55 @@ process._onadd = (ev) => { if (SIGNALS.has(ev) && process.listenerCount(ev) === 
 process._onremove = (ev) => { if (SIGNALS.has(ev) && process.listenerCount(ev) === 0) sys.sighandle(ev, false); };
 globalThis.process = process;
 
+// Node's fatal-error semantics for the guest. An exception that escapes an async
+// callback — a timer, a socket 'data' handler, a resolved-promise continuation —
+// has nowhere to go in a browser worker: it neither rejects the tail `whenIdle()`
+// nor exits the process, so the run would just hang until the harness times out.
+// Mirror Node instead: hand it to a `process.on('uncaughtException')` listener if
+// one is registered (and let the process continue); with no listener, print the
+// stack and exit 1. This is what turns a test's *asynchronous* assertion failure
+// into a real non-zero exit — the difference between a reported FAIL and a
+// timeout. (Synchronous throws at module top level already reject up to the
+// program worker; this covers only what escapes the loop.)
+let inFatal = false;
+const onFatal = (error, kind) => {
+  // process.exit()'s unwinding throw isn't an error — the code is already reported.
+  if (error && error.name === "ProcessExit") return;
+  const event = kind === "unhandledRejection" ? "unhandledRejection" : "uncaughtException";
+  if (process.listenerCount(event) > 0) {
+    // A handler exists: Node emits and keeps running (unless the handler itself
+    // throws, which is then genuinely fatal). unhandledRejection also passes the
+    // promise as the 2nd arg; we don't retain it, so pass undefined.
+    try { process.emit(event, error, undefined); return; }
+    catch (e) { if (e && e.name === "ProcessExit") return; error = e; }
+  }
+  if (inFatal) return; // a throw from within stderr write / emit('exit') — give up cleanly
+  inFatal = true;
+  if (event === "unhandledRejection") {
+    // Node ≥15 default: an unhandled rejection is fatal, reported as such.
+    err("node: Unhandled promise rejection. " +
+      ((error && (error.stack || error.message)) || String(error)) + "\n");
+  } else {
+    err(((error && (error.stack || error.message)) || String(error)) + "\n");
+  }
+  emitExit(1);
+  try { sys.exit(1); } catch (e) { if (!e || e.name !== "ProcessExit") throw e; }
+};
+// A browser worker surfaces every async-callback throw as a global 'error' event
+// and every dropped rejection as 'unhandledrejection' — the single choke point
+// through which the event loop's rethrows (event-loop.js) and stray rejections
+// pass. preventDefault() suppresses the worker's own console spew; onFatal owns it.
+if (typeof self !== "undefined" && self.addEventListener) {
+  self.addEventListener("error", (ev) => {
+    ev.preventDefault();
+    onFatal(ev.error != null ? ev.error : new Error(ev.message || "uncaught exception"), "uncaughtException");
+  });
+  self.addEventListener("unhandledrejection", (ev) => {
+    ev.preventDefault();
+    onFatal(ev.reason, "unhandledRejection");
+  });
+}
+
 // Node event-loop keep-alive (INV-1): without it, /bin/node reports the process
 // exited the instant the script's synchronous top level returns, so a top-level
 // setInterval/setTimeout would never fire. `install` publishes wrapped timer

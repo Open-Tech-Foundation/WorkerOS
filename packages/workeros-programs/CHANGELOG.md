@@ -8,6 +8,26 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **Uncaught-exception / unhandled-rejection semantics** (`src/node/node-program.js`).
+  `/bin/node` now mirrors Node's fatal-error path: an exception that escapes an
+  async callback — a timer, a socket `'data'` handler, a resolved-promise
+  continuation — is routed to a `process.on('uncaughtException')` /
+  `'unhandledRejection'` listener if one is registered, and otherwise prints the
+  stack and exits `1`. Previously such a throw was swallowed by the browser worker,
+  so the process neither exited nor drained the loop and simply **hung** until the
+  harness timed out. This is what turns an *asynchronous* assertion failure into a
+  real non-zero exit — the difference, across the whole compat suite, between a
+  reported failure and a timeout.
+- **`util.getCallSites()`** (`src/node/util.js`). Node ≥22.9's structured
+  call-site accessor, built on V8's `Error.prepareStackTrace`, returning
+  `{ functionName, scriptName, lineNumber, column, columnNumber }` records. Node's
+  own test harness (`common.mustNotCall`) calls it, so it gates a large slice of
+  the official suite.
+- **`node:net` flowing-mode + server surface** (`src/node/net.js`). `Socket` gains
+  `pause()`/`resume()`/`isPaused()` (the read pump honours `pause()`),
+  `cork()`/`uncork()` no-ops, and `Server` gains `getConnections(cb)` with live
+  connection tracking, `maxConnections`, and the module-level
+  `net.getDefaultAutoSelectFamily`/`setDefaultAutoSelectFamily` accessors.
 - **`node:net` connection lifecycle + ephemeral ports** (`src/node/net.js`,
   kernel `net.rs`). `server.listen(0)` now binds a real kernel-assigned ephemeral
   port (49152–65535) and reports it via `server.address()`, so clients that dial

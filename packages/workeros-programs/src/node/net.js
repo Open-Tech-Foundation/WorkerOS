@@ -34,6 +34,7 @@ export function createNet(sys, EventEmitter) {
       this._rfd = conn ? conn.rfd : -1;
       this._wfd = conn ? conn.wfd : -1;
       this._reading = false;
+      this._paused = false;
       this._closed = false;
       this._refd = false;
       this._encoding = null;
@@ -81,6 +82,9 @@ export function createNet(sys, EventEmitter) {
       this._reading = true;
       try {
         for (;;) {
+          // Flowing mode honours pause(): stop consuming until resume() re-enters.
+          // readable is still true, so the finally's _finishClose() is a no-op.
+          if (this._paused) break;
           const bytes = await sys.read(this._rfd, 1 << 16);
           if (this._closed) break;
           if (!bytes || bytes.length === 0) {
@@ -222,9 +226,24 @@ export function createNet(sys, EventEmitter) {
       return this;
     }
 
+    // Flowing-mode control (Node's Readable surface). resume() puts the socket in
+    // flowing mode — starts/continues the read pump; pause() halts consumption.
+    pause() { this._paused = true; return this; }
+    resume() {
+      this._paused = false;
+      if (!this._reading && !this._closed && this._rfd >= 0) this._pump();
+      return this;
+    }
+    isPaused() { return !!this._paused; }
+
     // Node's abrupt close: on a loopback pipe there is no RST to send, so this is
     // an immediate destroy (the peer sees EOF on its next read — INV-6).
     resetAndDestroy() { return this.destroy(); }
+
+    // Writable cork/uncork: our writes hit the pipe immediately, so batching is a
+    // no-op — but the methods must exist (streams and http both call them).
+    cork() {}
+    uncork() {}
 
     // Tuning knobs Node exposes that have no meaning on a loopback pipe (INV-5).
     setNoDelay() { return this; }
@@ -244,6 +263,8 @@ export function createNet(sys, EventEmitter) {
       this._listener = -1;
       this.listening = false;
       this._refd = false;
+      this._connections = 0;
+      this.maxConnections = undefined;
       if (connectionListener) this.on("connection", connectionListener);
     }
 
@@ -285,6 +306,8 @@ export function createNet(sys, EventEmitter) {
           if (!this.listening) break;
           const socket = new Socket(conn, this._opts);
           socket.server = this; // Node exposes the owning server on the socket
+          this._connections++;
+          socket.once("close", () => { if (this._connections > 0) this._connections--; });
           this.emit("connection", socket);
         }
       })();
@@ -292,6 +315,10 @@ export function createNet(sys, EventEmitter) {
     }
 
     address() { return { address: "127.0.0.1", family: "IPv4", port: this._port }; }
+
+    // Node's async connection count (the only public way to read it — the field
+    // itself is private). Loopback tracks it on accept / socket 'close'.
+    getConnections(cb) { const n = this._connections; queueMicrotask(() => cb(null, n)); return this; }
 
     // A listening server holds the event loop open (like Node); unref() lets the
     // process exit while it keeps listening, ref() re-arms it. Idempotent via the
@@ -401,6 +428,7 @@ export function createNet(sys, EventEmitter) {
   // Node's Happy Eyeballs tuning state. WorkerOS loopback has no address-family
   // race, but packages and Node's test harness use these accessors for setup.
   let autoSelectFamilyAttemptTimeout = 250;
+  let autoSelectFamily = true;
   const getDefaultAutoSelectFamilyAttemptTimeout = () => autoSelectFamilyAttemptTimeout;
   const setDefaultAutoSelectFamilyAttemptTimeout = (value) => {
     const timeout = Number(value);
@@ -409,6 +437,8 @@ export function createNet(sys, EventEmitter) {
     }
     autoSelectFamilyAttemptTimeout = timeout;
   };
+  const getDefaultAutoSelectFamily = () => autoSelectFamily;
+  const setDefaultAutoSelectFamily = (value) => { autoSelectFamily = !!value; };
 
   const net = {
     Server: callable(Server),
@@ -424,6 +454,8 @@ export function createNet(sys, EventEmitter) {
     isIPv6,
     getDefaultAutoSelectFamilyAttemptTimeout,
     setDefaultAutoSelectFamilyAttemptTimeout,
+    getDefaultAutoSelectFamily,
+    setDefaultAutoSelectFamily,
     // Windows-only internal Node exposes; a no-op everywhere else.
     _setSimultaneousAccepts() {},
   };

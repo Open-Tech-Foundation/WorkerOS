@@ -277,10 +277,41 @@ const legacy = {
   _extend: (target, source) => Object.assign(target, source),
 };
 
+// `util.getCallSites([frameCount][, options])` (Node ≥22.9) — an array of the
+// current call stack's frames as plain objects. The Node test harness leans on it
+// (`common.mustNotCall` captures the caller here), so a huge slice of the suite
+// requires it. Built on V8's structured stack trace (`Error.prepareStackTrace`
+// handed the raw CallSite[]), which Chromium provides; we only reshape it into
+// Node's `{ functionName, scriptName, lineNumber, columnNumber }` records.
+const getCallSites = (frameCount = 10, options) => {
+  if (typeof frameCount === "object" && frameCount !== null) { options = frameCount; frameCount = 10; }
+  const limit = Math.max(0, frameCount | 0);
+  const holder = {};
+  const prev = Error.prepareStackTrace;
+  const prevLimit = Error.stackTraceLimit;
+  // +1: frame 0 is this getCallSites call itself, which Node omits from the result.
+  Error.stackTraceLimit = limit + 1;
+  Error.prepareStackTrace = (_e, sites) => sites;
+  Error.captureStackTrace(holder, getCallSites);
+  const sites = holder.stack || [];
+  Error.prepareStackTrace = prev;
+  Error.stackTraceLimit = prevLimit;
+  return sites.slice(0, limit).map((s) => {
+    const column = s.getColumnNumber() ?? 0;
+    return {
+      functionName: s.getFunctionName() || "",
+      scriptName: s.getFileName() || "",
+      lineNumber: s.getLineNumber() ?? 0,
+      column, // Node 22.9 name
+      columnNumber: column, // Node ≥23 name; expose both so either test passes
+    };
+  });
+};
+
 export {
   inspect, nodeFormat as format, formatWithOptions,
   promisify, callbackify, inherits, deprecate, debuglog,
-  isDeepStrictEqual, types, stripVTControlCharacters,
+  isDeepStrictEqual, types, stripVTControlCharacters, getCallSites,
 };
 export const TextEncoder = globalThis.TextEncoder;
 export const TextDecoder = globalThis.TextDecoder;
@@ -298,6 +329,7 @@ export const util = {
   isDeepStrictEqual,
   types,
   stripVTControlCharacters,
+  getCallSites,
   TextEncoder: globalThis.TextEncoder,
   TextDecoder: globalThis.TextDecoder,
   ...legacy,
