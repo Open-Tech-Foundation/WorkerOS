@@ -349,11 +349,11 @@ function concatChunks(chunks) {
  *  process's streams), feeding `input` as its stdin. Resolves the child's exit
  *  code with the collected stdout/stderr — the primitive `child_process`'s
  *  synchronous forms (`execCaptureSync`) build on. */
-function runCaptured(line, input) {
+function runCaptured(line, input, opts) {
   const outChunks = [];
   const errChunks = [];
   const sink = { stdout: (b) => outChunks.push(b), stderr: (b) => errChunks.push(b) };
-  return shell.exec(line, sink, input).then((code) => ({
+  return shell.exec(line, sink, input, opts).then((code) => ({
     code: code | 0,
     stdout: concatChunks(outChunks),
     stderr: concatChunks(errChunks),
@@ -372,7 +372,11 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
   const exited = new Promise((r) => (resolveExit = r));
   // Per-process synchronous-syscall buffer (used by WASI blocking calls; ADR-010).
   const syncSab = allocSyncBuffer();
-  programs.set(spawned.pid, { worker, sink, onExit, resolveExit, done: false, syncSab });
+  // Keep the spawn env/cwd on the record: `system(3)`-style `exec` (npm run,
+  // `sh -c`) resolves its command line against the *calling* process's
+  // environment (notably the PATH npm augments with node_modules/.bin), not the
+  // shell driver's persistent session.
+  programs.set(spawned.pid, { worker, sink, onExit, resolveExit, done: false, syncSab, env, cwd });
   worker.onmessage = (e) => onProgramMessage(spawned.pid, e.data);
   worker.onerror = (e) => {
     try {
@@ -676,7 +680,7 @@ function serviceSync(pid) {
         // and we write the framed { code, stdout, stderr } back when it exits,
         // waking the guest. `input` (this request's payload) is the child's stdin.
         const input = requestBytes(rec.syncSab);
-        runCaptured(req.line, input.length ? input : undefined)
+        runCaptured(req.line, input.length ? input : undefined, { env: rec.env, cwd: rec.cwd })
           .then((res) => writeResponse(rec.syncSab, 0, frameExecResult(res.code, res.stdout, res.stderr)))
           .catch((e) => writeResponse(rec.syncSab, -1, { error: String(e && e.message ? e.message : e) }));
         return; // response is written asynchronously above (no immediate write)
@@ -869,7 +873,7 @@ function handleSyscall(pid, msg) {
           ? rec.sink
           : { stdout: () => {}, stderr: () => {} };
         shell
-          .exec(args.line, sink)
+          .exec(args.line, sink, undefined, rec && { env: rec.env, cwd: rec.cwd })
           .then((code) => reply(pid, id, true, code | 0))
           .catch((e) => reply(pid, id, false, String(e && e.message ? e.message : e)));
         break; // reply happens asynchronously above

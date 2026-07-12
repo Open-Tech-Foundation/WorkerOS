@@ -143,15 +143,29 @@ export function createShell({ kernel, startProcess, session, readLine }) {
 
   /** Run a full command line / script; stream output to `sink`; resolve exit code.
    *  `input` (optional bytes) is fed as the command's stdin — the path
-   *  `child_process`'s `execCapture` uses to deliver a child's piped input. */
-  async function exec(line, sink, input) {
+   *  `child_process`'s `execCapture` uses to deliver a child's piped input.
+   *  `opts.env`/`opts.cwd` (optional) run the line as a `system(3)`-style
+   *  subshell against a *caller-supplied* environment and working directory
+   *  rather than the persistent interactive session — this is how `npm run` /
+   *  `sh -c` see the PATH npm augmented with `node_modules/.bin`. */
+  async function exec(line, sink, input, opts) {
     const io = {
       stdin: input && input.length ? new StdinReader(input) : null,
       out: (b) => sink.stdout(b),
       err: (b) => sink.stderr(b),
     };
+    // A fresh interpreter over a throwaway session keeps the caller's env/cwd
+    // from leaking into (or inheriting from) the interactive shell state.
+    let runner = interp;
+    if (opts && (opts.env || opts.cwd)) {
+      const childSession = {
+        cwd: opts.cwd || session.cwd,
+        env: opts.env || session.env,
+      };
+      runner = createInterpreter({ runtime, session: childSession });
+    }
     try {
-      return await interp.run(line, io);
+      return await runner.run(line, io);
     } catch (e) {
       sink.stderr(enc.encode("wsh: " + (e && e.message ? e.message : e) + "\n"));
       return 1;

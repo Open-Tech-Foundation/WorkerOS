@@ -204,6 +204,38 @@ test("sh/bash program: -c, script file, and piped stdin (curl | bash idiom)", op
   assert.equal(result.piped.out, "piped-ok\n");
 });
 
+// Regression: `system(3)`-style `sh -c CMD` must resolve CMD against the env of
+// the process that spawned the shell — the mechanism npm/npx relies on when it
+// augments PATH with an npx-cache `node_modules/.bin`. A child spawned via the
+// streaming `child_process.spawn` (no wrapLine fallback) with a PATH the
+// interactive session does *not* have must still find its command.
+test("sh -c resolves commands against the caller's PATH (npx bin lookup)", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      // A bin reachable *only* via /opt/bin, which is not on the session PATH.
+      await window.sh(os, "mkdir -p /opt/bin");
+      await os.fs.write("/opt/bin/greet", "#!/bin/node\nconsole.log('hello-optbin');\n");
+      // A node program that streaming-spawns `sh -c greet` with a private PATH.
+      await os.fs.write(
+        "/driver.js",
+        [
+          "const cp = require('child_process');",
+          "const c = cp.spawn('sh', ['-c', 'greet'], { env: { PATH: '/opt/bin:/bin', HOME: '/' } });",
+          "let out = '';",
+          "c.stdout.on('data', (d) => (out += d));",
+          "c.stderr.on('data', (d) => (out += d));",
+          "c.on('exit', (code) => { process.stdout.write(out); process.exit(code); });",
+        ].join("\n"),
+      );
+      return await window.sh(os, "node /driver.js");
+    }),
+  );
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.out, "hello-optbin\n");
+  assert.equal(result.code, 0);
+});
+
 test("text coreutils pipelines: seq/sort/uniq/wc/tail/cut end-to-end", opts, async () => {
   const { result, pageErrors } = await withPage((page) =>
     page.evaluate(async () => {
