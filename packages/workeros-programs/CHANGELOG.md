@@ -29,6 +29,14 @@ guest runtime. Format:
   npm destructures `path.win32.isAbsolute` and uses `path.win32.parse` at load.
 
 ### Fixed
+- **`node:zlib` engines expose the internals `minizlib` drives** (`src/node/zlib.js`).
+  npm's `tar` unpacks tarballs through `minizlib`, which bypasses the stream API and
+  reaches into Node's private zlib: `engine._handle` (whose `.close` it neutralizes),
+  a synchronous `engine._processChunk(chunk, flushFlag)`, and `engine.close`. Added
+  a stand-in `_handle`, a `_processChunk` (accumulate, then run the one-shot codec on
+  `Z_FINISH`), and `close`. `_processChunk` concatenates manually because minizlib
+  monkeypatches `Buffer.concat` to a no-op for the call's duration. This completes
+  `npm install` — express@5 + its 66 deps install from the registry.
 - **`EventEmitter.prototype.off` is now the same function as `removeListener`**
   (`src/node/events.js`), as in Node — not a wrapper that dispatches through
   `this.removeListener`. A subclass that overrides `removeListener` to call

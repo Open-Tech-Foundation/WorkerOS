@@ -107,6 +107,13 @@ class ZlibBase extends streamModule.Transform {
     this._syncFn = syncFn;
     this._chunks = [];
     this.bytesWritten = 0;
+    // `minizlib` (used by npm's `tar`) bypasses the stream interface and drives the
+    // engine through Node's private zlib internals: it reads `engine._handle` and
+    // temporarily neutralizes its `.close`, then calls `engine._processChunk(chunk,
+    // flushFlag)` synchronously. We provide a stand-in `_handle` and a
+    // `_processChunk` so that path works. `_handle` just needs a `close` to save and
+    // restore; our codec is one-shot, so it isn't a real native binding.
+    this._handle = { close() {} };
   }
 
   _transform(chunk, _encoding, cb) {
@@ -115,6 +122,36 @@ class ZlibBase extends streamModule.Transform {
     this.bytesWritten += buf.length;
     cb();
   }
+
+  // Synchronous chunk processor for `minizlib`. Our codec is one-shot (a whole
+  // gzip/zlib member at a time), so accumulate input and (de)compress on the final
+  // `Z_FINISH` flush, returning the full result then — sufficient for tar unpacking
+  // package tarballs, which are complete members.
+  _processChunk(chunk, flushFlag) {
+    const buf = toBytes(chunk);
+    if (buf.length) { this._chunks.push(buf); this.bytesWritten += buf.length; }
+    if (flushFlag === constants.Z_FINISH) {
+      const chunks = this._chunks;
+      this._chunks = [];
+      // minizlib monkeypatches `Buffer.concat` to a no-op for the duration of this
+      // call (Node's native handler concatenates itself), so join manually — a
+      // `Buffer.concat` here would return undefined and blow up the codec.
+      let total;
+      if (chunks.length === 1) {
+        total = chunks[0];
+      } else {
+        let len = 0;
+        for (const c of chunks) len += c.length;
+        total = Buffer.alloc(len);
+        let o = 0;
+        for (const c of chunks) { total.set(c, o); o += c.length; }
+      }
+      return this._syncFn(total);
+    }
+    return Buffer.alloc(0);
+  }
+
+  close(cb) { if (typeof cb === "function") queueMicrotask(cb); return this; }
 
   _flush(cb) {
     try {
