@@ -55,6 +55,12 @@ export function createHttp(sys, EventEmitter, net) {
       this.socket = socket;
       this.headers = {};
       this.rawHeaders = [];
+      // We don't support trailers, but Node always exposes empty `trailers`/
+      // `rawTrailers` — consumers read them unconditionally (minipass-fetch does
+      // `createHeadersLenient(res.trailers)`, i.e. `Object.keys(res.trailers)`, on
+      // every response; `undefined` there throws "Cannot convert … to object").
+      this.trailers = {};
+      this.rawTrailers = [];
       this.method = null;
       this.url = null;
       this.httpVersion = "1.1";

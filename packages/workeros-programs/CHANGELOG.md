@@ -29,6 +29,19 @@ guest runtime. Format:
   npm destructures `path.win32.isAbsolute` and uses `path.win32.parse` at load.
 
 ### Fixed
+- **`EventEmitter.prototype.off` is now the same function as `removeListener`**
+  (`src/node/events.js`), as in Node — not a wrapper that dispatches through
+  `this.removeListener`. A subclass that overrides `removeListener` to call
+  `this.off` (minipass does exactly this) turned `super.off()` into infinite
+  `off ↔ removeListener` recursion → `RangeError: Maximum call stack size exceeded`.
+  This is what made `npm install <pkg>` blow up in `minipass-fetch` while consuming
+  any non-trivial registry response body ("Could not create Buffer from response
+  body: Maximum call stack size exceeded").
+- **`http.IncomingMessage` exposes empty `trailers`/`rawTrailers`**
+  (`src/node/http.js`). They were `undefined`; minipass-fetch does
+  `createHeadersLenient(res.trailers)` (`Object.keys(res.trailers)`) on every
+  response, so `undefined` threw "Cannot convert undefined or null to object"
+  ("Invalid response body while trying to fetch …").
 - **`process` EventEmitter surface completed** (`src/node/node-program.js`). The
   minimal emitter behind `process` lacked `getMaxListeners`/`setMaxListeners`/
   `listeners`/`removeAllListeners`/`eventNames`/`prependListener`, so `npm install`

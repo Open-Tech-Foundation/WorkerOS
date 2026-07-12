@@ -128,7 +128,11 @@ Object.assign(EventEmitter.prototype, {
     if (this._events.has("removeListener")) this.emit("removeListener", type, removed.listener ?? removed);
     return this;
   },
-  off(type, listener) { return this.removeListener(type, listener); },
+  // `off` is aliased to `removeListener` (same function) after this object is
+  // assigned — see below. It must NOT be a wrapper that calls `this.removeListener`:
+  // a subclass that overrides `removeListener` to call `this.off` (minipass does
+  // exactly this) would then recurse infinitely through `super.off`. Node aliases
+  // them to the same function for the same reason.
 
   removeAllListeners(type) {
     if (this._events === undefined) return this;
@@ -200,6 +204,9 @@ Object.assign(EventEmitter.prototype, {
 });
 
 EventEmitter.prototype.constructor = EventEmitter;
+// `off` IS `removeListener` (identical function), as in Node — never a wrapper
+// (see the note above `removeAllListeners`).
+EventEmitter.prototype.off = EventEmitter.prototype.removeListener;
 
 // ---- static helpers -------------------------------------------------------
 
