@@ -7,6 +7,15 @@ guest runtime. Format:
 
 ## [Unreleased]
 
+### Fixed
+- **ESM named imports of function-shaped builtins** (`src/node/node-program.js`).
+  The synthetic re-export module for a `node:` builtin only enumerated named
+  exports when the runtime value was a plain object, so `import { Readable } from
+  'node:stream'` failed with *"does not provide an export named 'Readable'"* now
+  that `node:stream` is a function carrying properties (the classic CJS
+  `module.exports = fn; fn.Named = …` shape). `ownKeys` now enumerates functions
+  too — fixing that import for any such builtin.
+
 ### Added
 - **`node:stream` is now the real streams core, vendored from `readable-stream`**
   (`src/node/stream.js`). The previous ~440-line hand-rolled subset is replaced by

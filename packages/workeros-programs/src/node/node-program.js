@@ -397,8 +397,12 @@ const reexportSource = (getter, keys) => {
   for (const n of keys) src += `export const ${n} = m[${JSON.stringify(n)}];\n`;
   return src;
 };
+// A module value can be a function carrying named properties, not just a plain
+// object — the classic CJS `module.exports = fn; fn.Named = …` shape (node:stream
+// is exactly this: `Stream` is a function with `Stream.Readable` etc.). Enumerate
+// named exports for both so `import { Readable } from 'node:stream'` resolves.
 const ownKeys = (m) =>
-  m && typeof m === "object" && !Array.isArray(m)
+  m && (typeof m === "object" || typeof m === "function") && !Array.isArray(m)
     ? Object.keys(m).filter((k) => k !== "default" && isIdent(k))
     : [];
 const blobUrl = (src) => URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
