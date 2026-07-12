@@ -4,9 +4,8 @@
 // the kernel already resolved the whole module graph and handed it over.
 //
 // Every guest gets one native surface:
-//   • `globalThis.sys` — the WorkerOS syscall ABI (argv/env/cwd + fd ops + a
-//     `resolveGraph` call), plus a routing `console`. Coreutils and `/bin/node`
-//     alike are written against it.
+//   • `globalThis.sys` — the WorkerOS syscall ABI (argv/env/cwd + fd ops), plus
+//     a routing `console`. Coreutils and `/bin/node` alike are written against it.
 // Node.js compatibility (`process`, CommonJS `require`) is not a worker concern:
 // it lives in the userland `/bin/node` program, which installs `process` and
 // evaluates the target script itself. The kernel has no `node` interpreter.
@@ -208,10 +207,6 @@ function makeSys(start, syncCall) {
     netListen: (port) => call("net_listen", { port }),
     netConnect: (port) => call("net_connect", { port }),
     netAccept: (listener) => call("net_accept", { listener }),
-    // Ask the kernel to resolve a JS module graph (INV-2: the kernel owns every
-    // specifier→path decision). A userland runtime like /bin/node calls this to
-    // get the graph and then evaluates it itself, in this same worker.
-    resolveGraph: (path) => call("resolveGraph", { path, cwd: start.cwd }),
     exit: (code = 0) => {
       reportExit(code | 0);
       throw new ProcessExit(code | 0);
@@ -219,29 +214,13 @@ function makeSys(start, syncCall) {
   };
 }
 
-/** Stitch a kernel-resolved module graph into blob URLs; return the entry URL.
- *  Dependencies build first so specifiers can be rewritten to their blob URLs.
- *  Mechanical assembly only — the kernel decided every specifier→path (INV-2). */
+/** A guest program is a single self-contained module (its deps were inlined at
+ *  build time — the esbuild bundle for /bin, the inline prelude for /sbin
+ *  coreutils), so "stitching" is just wrapping the entry source in a blob URL to
+ *  import. The kernel decided the entry (INV-2); the worker only assembles it. */
 function stitch(graph) {
-  const pathToBlob = new Map();
-  let remaining = [...graph.modules];
-  while (remaining.length) {
-    const built = [];
-    for (const mod of remaining) {
-      if (!mod.imports.every((imp) => pathToBlob.has(imp.resolved))) continue;
-      let src = mod.source;
-      for (const imp of mod.imports) {
-        const url = pathToBlob.get(imp.resolved);
-        src = src.split(`"${imp.specifier}"`).join(`"${url}"`);
-        src = src.split(`'${imp.specifier}'`).join(`"${url}"`);
-      }
-      pathToBlob.set(mod.path, URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
-      built.push(mod.path);
-    }
-    if (built.length === 0) throw new Error("unresolvable or cyclic module graph");
-    remaining = remaining.filter((m) => !pathToBlob.has(m.path));
-  }
-  return pathToBlob.get(graph.entry);
+  const entry = graph.modules.find((m) => m.path === graph.entry) ?? graph.modules[0];
+  return URL.createObjectURL(new Blob([entry.source], { type: "text/javascript" }));
 }
 
 /** Read a whole VFS file into a Uint8Array via the syscall channel. */

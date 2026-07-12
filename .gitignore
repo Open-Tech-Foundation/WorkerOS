@@ -35,3 +35,4 @@ packages/workeros-programs/src/**/*.wasm
 
 # Bundled OS programs (built by tools/bundle.mjs; shipped in the npm tarball via prepack).
 packages/workeros-programs/src/bundles/
+packages/workeros-coreutils/src/bundles/

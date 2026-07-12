@@ -91,6 +91,7 @@ out(s + (nl ? "\\n" : ""));
 sys.exit(0);
 `),
 
+  // No prelude: they only exit. Kept import-free so the bundle is trivially empty.
   "/sbin/true": `sys.exit(0);`,
   "/sbin/false": `sys.exit(1);`,
 
@@ -420,3 +421,23 @@ out(res);
 sys.exit(0);
 `),
 };
+
+async function fetchText(rel) {
+  const url = new URL(rel, import.meta.url);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`workeros-coreutils: ${rel} -> HTTP ${res.status}`);
+  return res.text();
+}
+
+// The installable coreutils, each a single **self-contained bundle**. The build
+// step (`tools/bundle.mjs`, esbuild) inlines the one shared import — the CLI arg
+// parser at `/lib/workeros-cli/args.js` (the real implementation lives in the
+// sibling programs package; there is no clone here) — so each coreutil reaches
+// the kernel as one module with no imports to resolve. The raw `coreutils`
+// strings above are the bundler's inputs (and drive the unit tests); boot
+// installs the built bundle. Dev, tests, and production all load the same
+// artifact, exactly like the /bin programs.
+export const bundledCoreutils = Object.keys(coreutils).map((path) => ({
+  path,
+  source: () => fetchText(`./bundles/${path.split("/").pop()}.js`),
+}));

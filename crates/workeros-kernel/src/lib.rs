@@ -428,15 +428,6 @@ impl Kernel {
         Ok(())
     }
 
-    /// Resolve the module graph rooted at `path` (relative to `cwd`), without
-    /// spawning anything. This is the kernel's JS-resolution service: a userland
-    /// runtime like `/bin/node` calls it to obtain a fully-resolved graph (INV-2 —
-    /// the kernel owns every specifier→path decision) and then evaluates it itself.
-    pub fn resolve_graph(&self, cwd: &str, path: &str) -> Result<ModuleGraph, ResolveError> {
-        let entry = path::normalize(cwd, path);
-        resolver::resolve_graph(&self.vfs, &entry)
-    }
-
     /// Open a fresh IPC pipe (`otf:ipc_open`); the returned id is referenced by a
     /// [`StdioPlan`] to wire two processes together.
     pub fn pipe_open(&mut self) -> PipeId {
@@ -936,13 +927,14 @@ mod tests {
     #[test]
     fn spawn_resolves_graph_and_registers_process() {
         let mut k = boot();
-        k.fs_write("/proj/main.js", b"import './util.js'; console.log('x')").unwrap();
-        k.fs_write("/proj/util.js", b"export const u = 1;").unwrap();
+        // Programs are single self-contained modules — the kernel hands back one
+        // module (the entry) and never walks an import graph.
+        k.fs_write("/proj/main.js", b"console.log('x')").unwrap();
         let spawned = k
             .spawn(argv(&["js", "main.js"]), vec![], "/proj".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
             .unwrap();
         assert_eq!(spawned.graph.entry, "/proj/main.js");
-        assert_eq!(spawned.graph.modules.len(), 2);
+        assert_eq!(spawned.graph.modules.len(), 1);
         assert!(k.processes.contains(spawned.pid));
     }
 

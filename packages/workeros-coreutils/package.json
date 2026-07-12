@@ -6,7 +6,9 @@
   "type": "module",
   "main": "src/index.js",
   "scripts": {
-    "build": "echo 'workeros-coreutils: pure JS source, nothing to build'",
+    "build:programs": "node tools/bundle.mjs",
+    "build": "npm run build:programs",
+    "prepack": "npm run build",
     "test": "node --test tools/*.test.js"
   },
   "files": [
@@ -14,5 +16,8 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
   }
 }

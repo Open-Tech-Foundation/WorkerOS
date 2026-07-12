@@ -11,7 +11,7 @@ import init, { WebKernel } from "./kernel-wasm/workeros_web_wasm.js";
 import { MSG } from "./protocol.js";
 import { createShell } from "./shell-exec.js";
 import { createLineEditor } from "./shell/readline.js";
-import { coreutils } from "../../workeros-coreutils/src/index.js";
+import { bundledCoreutils } from "../../workeros-coreutils/src/index.js";
 import { programs as osPrograms, libraries as osLibraries } from "../../workeros-programs/src/index.js";
 import { allocSyncBuffer, readRequest, requestBytes, writeResponse } from "./sync-syscall.js";
 import { frameExecResult } from "./exec-frame.js";
@@ -775,11 +775,6 @@ function handleSyscall(pid, msg) {
         kernel.sys_rename(pid, args.from, args.to);
         reply(pid, id, true, null);
         break;
-      case "resolveGraph":
-        // The kernel's JS-resolution service: hand back the module graph rooted at
-        // `path` so a userland runtime (e.g. /bin/node) can evaluate it in-process.
-        reply(pid, id, true, kernel.resolve_graph(args.cwd, args.path));
-        break;
       // ---- otf:net_* — port-keyed loopback sockets (ADR-021) ----
       case "net_listen":
         // Returns { listener, port }; port is the bound port (assigned when the
@@ -944,9 +939,12 @@ self.onmessage = async (ev) => {
         // Service Worker's preview requests are driven through.
         injectorPid = kernel.register_host_process();
         // Install the coreutils into /sbin (system binaries, kept apart from the
-        // /bin OS programs) so the shell can resolve them via PATH.
-        for (const [path, source] of Object.entries(coreutils)) {
-          kernel.fs_write(path, enc.encode(source));
+        // /bin OS programs) so the shell can resolve them via PATH. Each ships as
+        // a single self-contained bundle (esbuild inlined its one shared import,
+        // the CLI arg parser), fetched same-origin like the /bin programs.
+        for (const util of bundledCoreutils) {
+          const data = await util.source();
+          kernel.fs_write(util.path, enc.encode(data));
         }
         // Install the OS programs (npm, …) into /bin. Everything at once for now;
         // a selectable install manifest is future work. Each program's source is
