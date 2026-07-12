@@ -72,6 +72,10 @@ test("finished callback and promises.finished resolve on stream completion", asy
     finished(sink, (err) => (err ? reject(err) : resolve()));
   });
   const promiseDone = promises.finished(sink);
+  // A PassThrough is a Duplex: `finished` waits for BOTH sides to complete, so the
+  // buffered readable side must be drained or `finished` never fires (this matches
+  // real node:stream — the previous hand-rolled subset fired on `finish` alone).
+  sink.resume();
   sink.end("ok");
   await Promise.all([cbDone, promiseDone]);
   assert.equal(sink.writableFinished, true);

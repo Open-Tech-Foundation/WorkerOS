@@ -294,11 +294,15 @@ export const kMaxLength = 0x7fffffff; // 2^31 - 1 (browser typed-array ceiling)
 export const kStringMaxLength = 0x1fffffe8;
 export const constants = { MAX_LENGTH: kMaxLength, MAX_STRING_LENGTH: kStringMaxLength };
 export const SlowBuffer = (length) => Buffer.alloc(+length);
+// `node:buffer` re-exports the platform Blob; the browser/worker provides it as a
+// global. Consumers (e.g. readable-stream's isBlob check) read `buffer.Blob`.
+export const Blob = globalThis.Blob;
 
 // The `node:buffer` module object registered as a builtin (import + require).
 export const buffer = {
   Buffer,
   SlowBuffer,
+  Blob,
   constants,
   kMaxLength,
   kStringMaxLength,

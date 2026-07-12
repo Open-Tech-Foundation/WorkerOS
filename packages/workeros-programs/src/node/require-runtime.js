@@ -22,7 +22,7 @@ import { util as utilModule } from "./util.js";
 import { createNet } from "./net.js";
 import { createHttp } from "./http.js";
 import { crypto as cryptoModule } from "./crypto.js";
-import { stream as streamModule } from "./stream.js";
+import { stream as streamModule, web as streamWeb, consumers as streamConsumers } from "./stream.js";
 import { createTimers } from "./timers.js";
 import { createTimersPromises } from "./timers-promises.js";
 import { createReadline } from "./readline.js";
@@ -75,6 +75,9 @@ export function makeBuiltins(sys, extras) {
     ["util", utilModule],
     ["util/types", utilModule.types],
     ["stream", streamModule],
+    ["stream/promises", streamModule.promises],
+    ["stream/web", streamWeb],
+    ["stream/consumers", streamConsumers],
     ["timers", timers],
     ["timers/promises", timersPromises],
     ["readline", readline],

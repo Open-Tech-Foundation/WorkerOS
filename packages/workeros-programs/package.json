@@ -38,6 +38,7 @@
     "access": "public"
   },
   "devDependencies": {
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "readable-stream": "^4.7.0"
   }
 }

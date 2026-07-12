@@ -984,39 +984,44 @@ export function createFs(syncFs, onFsEvent) {
     const end = options.end; // inclusive, per Node
     const hwm = options.highWaterMark || 64 * 1024;
     const autoClose = options.autoClose !== false;
-    const rs = new Readable({ encoding: options.encoding || null });
+    const rs = new Readable({ encoding: options.encoding || null, highWaterMark: hwm });
     rs.path = path == null ? undefined : toPath(path);
     rs.bytesRead = 0;
     let fd = options.fd ?? null;
     const ownFd = options.fd == null;
-    const fail = (e) => { rs.emit("error", e); if (autoClose && ownFd && fd != null) { try { closeSync(fd); } catch { /* */ } } };
-    rs.on("end", () => { if (autoClose && ownFd && fd != null) { try { closeSync(fd); } catch { /* */ } } rs.emit("close"); });
-    defer(() => {
-      try {
-        if (fd == null) fd = openSync(rs.path, flags);
-        if (start) syncFs.seek(fd, start, SEEK_SET);
-      } catch (e) { return fail(e); }
+    let pos = start;
+    let opened = false;
+    const fail = (e) => { rs.destroy(e); if (autoClose && ownFd && fd != null) { try { closeSync(fd); } catch { /* */ } } };
+    rs.on("end", () => { if (autoClose && ownFd && fd != null) { try { closeSync(fd); } catch { /* */ } } });
+    // Open once, lazily. Idempotent so both the eager `open`/`ready` notification
+    // (which Node fires even for an unread stream) and the first `_read` share it.
+    const ensureOpen = () => {
+      if (opened) return;
+      opened = true;
+      if (fd == null) fd = openSync(rs.path, flags);
+      if (start) syncFs.seek(fd, start, SEEK_SET);
       rs.emit("open", fd);
       rs.emit("ready");
-      let pos = start;
-      const pump = () => {
-        try {
-          let want = hwm;
-          if (end != null) {
-            const remaining = end - pos + 1;
-            if (remaining <= 0) return void rs.push(null);
-            want = Math.min(want, remaining);
-          }
-          const chunk = guard(() => syncFs.read(fd, want), "read", rs.path);
-          if (chunk.length === 0) return void rs.push(null);
-          pos += chunk.length;
-          rs.bytesRead += chunk.length;
-          rs.push(chunk);
-          defer(pump);
-        } catch (e) { fail(e); }
-      };
-      defer(pump);
-    });
+    };
+    // Pull-based: the streams core calls `_read` when it wants more, honoring the
+    // highWaterMark. We push exactly one chunk per call (or null at EOF).
+    rs._read = function () {
+      try {
+        ensureOpen();
+        let want = hwm;
+        if (end != null) {
+          const remaining = end - pos + 1;
+          if (remaining <= 0) return void rs.push(null);
+          want = Math.min(want, remaining);
+        }
+        const chunk = guard(() => syncFs.read(fd, want), "read", rs.path);
+        if (chunk.length === 0) return void rs.push(null);
+        pos += chunk.length;
+        rs.bytesRead += chunk.length;
+        rs.push(chunk);
+      } catch (e) { fail(e); }
+    };
+    defer(() => { try { ensureOpen(); } catch (e) { fail(e); } });
     return rs;
   }
 

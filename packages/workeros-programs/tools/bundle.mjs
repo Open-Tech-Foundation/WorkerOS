@@ -14,7 +14,7 @@
 // in the browser).
 import { build, context } from "esbuild";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { programs } from "../src/index.js";
 
 const srcDir = fileURLToPath(new URL("../src", import.meta.url));
@@ -29,6 +29,32 @@ const guestLibPlugin = {
     b.onResolve({ filter: /^\/lib\/workeros-/ }, (args) => ({
       path: join(srcDir, args.path.slice("/lib/workeros-".length)),
     }));
+  },
+};
+
+// `node:stream` is vendored from `readable-stream` (see src/node/stream.js). That
+// package pulls its own userland copies of buffer/events/string_decoder/process/
+// abort-controller — but the guest already provides these as builtins. Remap each
+// bare specifier, ONLY when the importer sits inside readable-stream, to WorkerOS's
+// own module so a single Buffer/EventEmitter identity is shared across
+// fs ↔ stream ↔ net (otherwise `Buffer.isBuffer(streamChunk)` would be false).
+// WorkerOS source uses relative imports, so this never shadows first-party code.
+const nodeDir = join(srcDir, "node");
+const rsAlias = {
+  buffer: join(nodeDir, "buffer.js"),
+  events: join(nodeDir, "events.js"),
+  string_decoder: join(nodeDir, "string_decoder.js"),
+  process: join(nodeDir, "vendor", "process.cjs"),
+  "abort-controller": join(nodeDir, "vendor", "abort-controller.cjs"),
+};
+const readableStreamAliasPlugin = {
+  name: "workeros-readable-stream-alias",
+  setup(b) {
+    // `string_decoder/` and `process/` carry a trailing slash in readable-stream.
+    b.onResolve({ filter: /^(buffer|events|string_decoder|process|abort-controller)\/?$/ }, (args) => {
+      if (!args.importer.includes(`${sep}readable-stream${sep}`)) return null;
+      return { path: rsAlias[args.path.replace(/\/$/, "")] };
+    });
   },
 };
 
@@ -47,7 +73,7 @@ const opts = {
   minify: process.argv.includes("--minify"),
   legalComments: "none",
   logLevel: "info",
-  plugins: [guestLibPlugin],
+  plugins: [readableStreamAliasPlugin, guestLibPlugin],
 };
 
 if (process.argv.includes("--watch")) {

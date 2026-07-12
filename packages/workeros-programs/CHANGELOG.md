@@ -8,6 +8,24 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **`node:stream` is now the real streams core, vendored from `readable-stream`**
+  (`src/node/stream.js`). The previous ~440-line hand-rolled subset is replaced by
+  Node's own `lib/internal/streams/*` — the exact implementation a large share of
+  npm already `require('readable-stream')` directly — so packages get battle-tested
+  **objectMode**, **highWaterMark backpressure** (`write()` → `true`/`false` +
+  `drain`), `cork`/`uncork`, `destroy`/`_destroy`/`_final`/`_construct`, the
+  async-iterator operators (`.map`/`.filter`/`.take`/`.drop`/`.reduce`/`.toArray`/
+  `compose`), `addAbortSignal`, `getDefaultHighWaterMark`, and the `isDisturbed`/
+  `isErrored`/`isReadable` predicates. `node:stream/promises`, `node:stream/web`
+  (WHATWG streams over the platform globals), and `node:stream/consumers` are
+  registered too. readable-stream's bare deps (`buffer`/`events`/`string_decoder`/
+  `process`/`abort-controller`) are remapped to WorkerOS's own builtins at bundle
+  time (`tools/bundle.mjs` `readableStreamAliasPlugin`) so a single `Buffer`/
+  `EventEmitter` identity is shared across `fs` ↔ `stream` ↔ `net`. `fs`'s
+  `createReadStream` is rebuilt on pull-based `_read` for real backpressure. INV-1
+  holds: pure userland over EventEmitter. (`Readable.toWeb`/`fromWeb` remain
+  limited — the standalone package's lazy web-streams bridge only wires up inside
+  Node core.)
 - **Uncaught-exception / unhandled-rejection semantics** (`src/node/node-program.js`).
   `/bin/node` now mirrors Node's fatal-error path: an exception that escapes an
   async callback — a timer, a socket `'data'` handler, a resolved-promise
