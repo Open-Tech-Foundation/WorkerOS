@@ -56,7 +56,17 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
   );
 
   function load(absPath, isMain = false) {
-    if (cache.has(absPath)) return cache.get(absPath);
+    if (cache.has(absPath)) {
+      // A cyclic require of a module that is still evaluating must see its CURRENT
+      // `module.exports`: a module may reassign `module.exports = X` and only then
+      // require the dependents that cycle back to it (pacote's fetcher.js exports
+      // its base class, then requires the subclasses that `extends` it). The value
+      // seeded in `cache` before eval is stale after such a reassignment — Node
+      // returns the live exports, so read them off the in-flight module object.
+      const inflight = moduleObjs.get(absPath);
+      if (inflight && inflight.loaded === false) return inflight.exports;
+      return cache.get(absPath);
+    }
     if (absPath.endsWith(".json")) {
       const val = JSON.parse(fs.readFileSync(absPath, "utf8"));
       cache.set(absPath, val);
@@ -99,7 +109,17 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
     }
     const source = transformModule(raw, absPath, { staticUrl: () => undefined });
     const fn = new Function("require", "module", "exports", "__dirname", "__filename", source);
-    fn(require, module, module.exports, module.path, absPath);
+    try {
+      fn(require, module, module.exports, module.path, absPath);
+    } catch (e) {
+      // Name the failing module — eval'd modules are anonymous blobs, so a raw
+      // "Class extends value ..." otherwise gives no clue which file threw.
+      if (e instanceof Error && !e._wosModule) {
+        e._wosModule = absPath;
+        try { e.message += ` [loading ${absPath}]`; } catch { /* frozen message */ }
+      }
+      throw e;
+    }
     module.loaded = true;
     cache.set(absPath, module.exports);
     return module.exports;

@@ -7,7 +7,39 @@ guest runtime. Format:
 
 ## [Unreleased]
 
+### Added
+- **Outbound `node:https` + the npm-install network stack** (`src/node/https.js`,
+  `http.js`, `tls.js`, `dns.js`, `http2.js`, `v8.js`). The browser can't open raw
+  TCP, so outbound HTTP(S) rides the worker's `fetch` (which owns DNS/TLS): the
+  http client is refactored into a shared streaming factory that `https` reuses
+  with an `https:` default, presenting a real streaming `IncomingMessage` so
+  `minipass-fetch` can consume large responses. `tls`/`dns`/`http2` are load-only
+  stubs (the fetch path never touches a socket, so npm's `@npmcli/agent` constructs
+  its agents but never connects); `v8` reports a plausible `getHeapStatistics()` so
+  arborist can size its cache. The client also: forwards only CORS-safelisted
+  request headers (npm's `npm-*` telemetry headers would otherwise force a preflight
+  the registry rejects under cross-origin isolation → "Failed to fetch"); drops
+  `content-encoding`/`content-length` from responses (fetch already decoded the
+  body); and holds an event-loop ref for the request's lifetime (a `fetch` is a host
+  promise the guest loop can't see — without the ref the loop drains mid-request and
+  npm exits early with "Exit handler never called!"). registry.npmjs.org serves
+  `Access-Control-Allow-Origin: *`, so no proxy is needed.
+- **`path.win32`** (`src/node/path.js`). A real Windows-semantics variant
+  (separators `/` and `\`, drive letters, `\` output) alongside the posix default —
+  npm destructures `path.win32.isAbsolute` and uses `path.win32.parse` at load.
+
 ### Fixed
+- **Cyclic `require` returns the live `module.exports`** (`src/node/module.js`). A
+  module that reassigns `module.exports = X` and *then* requires dependents that
+  cycle back to it (pacote's fetcher.js exports its base class, then requires the
+  subclasses that `extends` it) must hand those dependents the reassigned value.
+  The seed placed in the require cache before eval was stale after such a
+  reassignment, so the cycle saw the initial `{}` — `class extends {}` threw. Now an
+  in-flight module resolves to its current `module.exports`, as in Node. Module eval
+  errors are also annotated with the offending file path.
+- **`require('.')` / `require('..')`** (`src/node/resolve.js`) now resolve to the
+  directory's package main/index (Node treats them as relative), not bare
+  specifiers — `@sigstore/tuf` and others do `require('.')`.
 - **ESM named imports of function-shaped builtins** (`src/node/node-program.js`).
   The synthetic re-export module for a `node:` builtin only enumerated named
   exports when the runtime value was a plain object, so `import { Readable } from

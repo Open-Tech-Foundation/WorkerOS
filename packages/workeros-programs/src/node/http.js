@@ -271,61 +271,167 @@ export function createHttp(sys, EventEmitter, net) {
   const createServer = (opts, requestListener) => new Server(opts, requestListener);
 
   // ---- client: mapped onto `fetch` (outbound, CORS-bound — ADR-008) ----------
-  // A minimal ClientRequest whose `end()` fires a fetch and replays the response
-  // as an IncomingMessage. Covers `http.get`/`http.request` for absolute URLs.
-  class ClientRequest extends EventEmitter {
-    constructor(options, cb) {
-      super();
-      this._opts = normalizeClientOptions(options);
-      if (cb) this.once("response", cb);
-      this._chunks = [];
+  // The browser cannot open raw TCP, so an outbound request rides the worker's
+  // `fetch` (which does the DNS/TLS/HTTP). This is what makes `node:https` reach
+  // registry.npmjs.org: `minipass-fetch` calls `https.request(options)` and reads
+  // the response as a stream, so `ClientRequest` presents a streaming
+  // `IncomingMessage`. Any `agent` option is accepted but ignored — fetch owns the
+  // connection, so @npmcli/agent's tls/net.connect path is never exercised.
+  //
+  // A shared factory so `node:http` and `node:https` differ only in the default
+  // protocol; `minipass-fetch` passes `protocol` explicitly, so both are identical
+  // in practice.
+  // Under cross-origin isolation the browser enforces CORS on every outbound
+  // fetch: any non-safelisted request header triggers a preflight OPTIONS, which
+  // the npm registry (and most hosts) don't answer — the request then fails with
+  // "Failed to fetch". npm attaches telemetry headers (`npm-command`,
+  // `npm-session`, `user-agent`, …) that aren't needed to fetch a public package,
+  // so forward only the CORS-safelisted set plus `authorization` (essential when a
+  // token is configured; an authenticated registry must support its own preflight).
+  const SAFELISTED_HEADERS = new Set([
+    "accept", "accept-language", "content-language", "content-type", "range", "authorization",
+  ]);
+  const corsSafeHeaders = (headers) => {
+    const out = {};
+    for (const k of Object.keys(headers || {})) {
+      if (SAFELISTED_HEADERS.has(k.toLowerCase())) out[k] = headers[k];
     }
-    setHeader(name, value) { (this._opts.headers ||= {})[name] = value; return this; }
-    write(chunk) { this._chunks.push(typeof chunk === "string" ? enc.encode(chunk) : chunk); return true; }
-    end(chunk) {
-      if (chunk != null) this.write(chunk);
-      const o = this._opts;
-      const body = o.method !== "GET" && o.method !== "HEAD" && this._chunks.length
-        ? Buffer.concat(this._chunks.map((c) => Buffer.from(c))) : undefined;
-      fetch(o.url, { method: o.method, headers: o.headers, body })
-        .then(async (r) => {
-          const res = new IncomingMessage(null);
-          res.statusCode = r.status;
-          res.statusMessage = r.statusText;
-          r.headers.forEach((v, k) => { res.headers[k] = v; });
-          this.emit("response", res);
-          const bytes = new Uint8Array(await r.arrayBuffer());
-          if (bytes.length) res.emit("data", Buffer.from(bytes));
-          res.complete = true;
-          res.emit("end");
-        })
-        .catch((e) => this.emit("error", e instanceof Error ? e : new Error(String(e))));
-      return this;
-    }
-    abort() { this.emit("abort"); }
-    setTimeout(_ms, cb) { if (cb) this.once("timeout", cb); return this; }
-  }
+    return out;
+  };
 
-  function normalizeClientOptions(options) {
-    if (typeof options === "string") return { url: options, method: "GET", headers: {} };
-    const protocol = options.protocol || "http:";
-    const host = options.hostname || options.host || "localhost";
-    const port = options.port ? ":" + options.port : "";
-    const path = options.path || "/";
-    return {
-      url: options.url || `${protocol}//${host}${port}${path}`,
-      method: options.method || "GET",
-      headers: options.headers || {},
+  // A pending request must hold the event loop open exactly as a live socket does
+  // in Node (ADR-021) — a `fetch` is a host promise the guest loop can't see, so
+  // without an explicit ref the loop drains mid-request and the process exits
+  // early (npm's "Exit handler never called!"). Ref synchronously in `end()`,
+  // release once the response fully settles or errors.
+  const loop = () => globalThis.__workerosLoop; // undefined outside /bin/node
+
+  const makeClient = (defaultProtocol) => {
+    // http.request(url[, options][, cb]) and http.request(options[, cb]).
+    const normalize = (a, b, c) => {
+      let urlArg = null, opts = {}, cb;
+      if (typeof a === "string" || a instanceof URL) {
+        urlArg = String(a);
+        if (typeof b === "function") cb = b;
+        else { opts = b || {}; cb = c; }
+      } else {
+        opts = a || {};
+        cb = typeof b === "function" ? b : undefined;
+      }
+      const headers = { ...(opts.headers || {}) };
+      if (opts.auth && !headers.Authorization && !headers.authorization) {
+        headers.Authorization = "Basic " + btoa(opts.auth);
+      }
+      let url;
+      if (urlArg) {
+        const u = new URL(urlArg);
+        if (opts.path) { const p = new URL(opts.path, u); u.pathname = p.pathname; u.search = p.search; }
+        url = u.toString();
+      } else if (opts.url) {
+        url = opts.url;
+      } else {
+        const protocol = opts.protocol || defaultProtocol;
+        const host = opts.hostname || opts.host || "localhost";
+        const port = opts.port ? ":" + opts.port : "";
+        url = `${protocol}//${host}${port}${opts.path || "/"}`;
+      }
+      return { url, method: (opts.method || "GET").toUpperCase(), headers, signal: opts.signal };
     };
-  }
 
-  const request = (options, cb) => new ClientRequest(options, cb);
-  const get = (options, cb) => { const r = new ClientRequest(options, cb); r.end(); return r; };
+    class ClientRequest extends EventEmitter {
+      constructor(a, b, c) {
+        super();
+        this._opts = normalize(a, b, c);
+        this._chunks = [];
+        this._ac = new AbortController();
+        // Node fires 'socket' before 'response'; some clients wait on it.
+        this._socket = new EventEmitter();
+        this._socket.setTimeout = () => this._socket;
+        this._socket.setKeepAlive = () => this._socket;
+        this._socket.setNoDelay = () => this._socket;
+        this._socket.ref = this._socket.unref = () => this._socket;
+        for (const x of [a, b, c]) if (typeof x === "function") this.once("response", x);
+      }
+      setHeader(name, value) { this._opts.headers[name] = value; return this; }
+      getHeader(name) { return this._opts.headers[name]; }
+      removeHeader(name) { delete this._opts.headers[name]; }
+      getHeaders() { return { ...this._opts.headers }; }
+      hasHeader(name) { return name in this._opts.headers; }
+      flushHeaders() {}
+      setNoDelay() {}
+      setSocketKeepAlive() {}
+      write(chunk, enc2, cb) {
+        this._chunks.push(typeof chunk === "string" ? enc.encode(chunk) : chunk);
+        if (typeof enc2 === "function") enc2(); else if (typeof cb === "function") cb();
+        return true;
+      }
+      end(chunk, enc2, cb) {
+        if (typeof chunk === "function") { cb = chunk; chunk = undefined; }
+        else if (typeof enc2 === "function") { cb = enc2; }
+        if (chunk != null) this.write(chunk);
+        const o = this._opts;
+        const body = o.method !== "GET" && o.method !== "HEAD" && this._chunks.length
+          ? Buffer.concat(this._chunks.map((c) => Buffer.from(c))) : undefined;
+        // Hold the loop open for the whole request/response, released exactly once.
+        loop()?.ref();
+        let released = false;
+        const release = () => { if (!released) { released = true; loop()?.unref(); } };
+        queueMicrotask(() => this.emit("socket", this._socket));
+        fetch(o.url, { method: o.method, headers: corsSafeHeaders(o.headers), body, signal: o.signal || this._ac.signal, redirect: "follow" })
+          .then((r) => {
+            const res = new IncomingMessage(this._socket);
+            res.statusCode = r.status;
+            res.statusMessage = r.statusText;
+            res.url = r.url;
+            // `fetch` has already decoded the transfer/content encoding and given
+            // us the plaintext body, so DON'T forward `content-encoding` (the Node
+            // layer, e.g. minipass-fetch, would try to gunzip already-plain data)
+            // or `content-length` (it describes the compressed size — now wrong).
+            r.headers.forEach((v, k) => {
+              const lk = k.toLowerCase();
+              if (lk === "content-encoding" || lk === "content-length") return;
+              res.headers[k] = v;
+              res.rawHeaders.push(k, v);
+            });
+            res.pause = () => res;
+            res.resume = () => res;
+            res.destroy = (e) => { try { r.body?.cancel?.(); } catch { /* */ } release(); if (e) res.emit("error", e); return res; };
+            this.emit("response", res);
+            // Stream the body chunk-by-chunk so large tarballs never fully buffer.
+            const reader = r.body && r.body.getReader ? r.body.getReader() : null;
+            if (!reader) { res.complete = true; release(); res.emit("end"); return; }
+            const pump = () => reader.read().then(({ done, value }) => {
+              if (done) { res.complete = true; release(); res.emit("end"); return; }
+              res.emit("data", Buffer.from(value));
+              return pump();
+            });
+            pump().catch((e) => { release(); res.emit("error", e instanceof Error ? e : new Error(String(e))); });
+          })
+          .catch((e) => {
+            release();
+            if (this._aborted) return;
+            this.emit("error", e instanceof Error ? e : new Error(String(e)));
+          });
+        if (typeof cb === "function") cb();
+        return this;
+      }
+      abort() { this._aborted = true; try { this._ac.abort(); } catch { /* */ } this.emit("abort"); }
+      destroy(e) { this._aborted = true; try { this._ac.abort(); } catch { /* */ } if (e) this.emit("error", e); return this; }
+      setTimeout(_ms, cb) { if (cb) this.once("timeout", cb); return this; }
+    }
+
+    const request = (a, b, c) => new ClientRequest(a, b, c);
+    const get = (a, b, c) => { const r = new ClientRequest(a, b, c); r.end(); return r; };
+    return { ClientRequest, request, get };
+  };
+
+  const { ClientRequest, request, get } = makeClient("http:");
 
   const http = {
     Server, ServerResponse, IncomingMessage, ClientRequest,
     createServer, request, get, STATUS_CODES, METHODS,
-    globalAgent: {}, Agent: class Agent {},
+    makeClient, // consumed by node:https
+    globalAgent: {}, Agent: class Agent extends EventEmitter {},
   };
   http.default = http;
   return http;

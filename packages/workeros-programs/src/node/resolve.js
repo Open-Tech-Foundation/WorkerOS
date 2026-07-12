@@ -44,6 +44,12 @@ export const NODE_BUILTINS = new Set([
   "readline",
   "net",
   "http",
+  "https",
+  "tls",
+  "dns",
+  "dns/promises",
+  "http2",
+  "v8",
   "crypto",
   "zlib",
   "child_process",
@@ -60,7 +66,9 @@ export const isBuiltinSpec = (spec) => spec.startsWith("node:") || NODE_BUILTINS
 export const builtinKey = (spec) =>
   spec.startsWith("node:") ? spec.slice(5) : NODE_BUILTINS.has(spec) ? spec : null;
 
-const isRelative = (s) => s.startsWith("./") || s.startsWith("../");
+// `.` and `..` are directory self/parent references (`require('.')` → the current
+// dir's package main/index), not bare specifiers — Node treats them as relative.
+const isRelative = (s) => s === "." || s === ".." || s.startsWith("./") || s.startsWith("../");
 
 // A resolved-but-blocked target (`"exports": { "./x": null }`) — distinct from
 // "no match" so it stops condition/array fallback the way Node's null target does.

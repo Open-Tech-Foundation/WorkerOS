@@ -21,6 +21,11 @@ import { EventEmitter } from "./events.js";
 import { util as utilModule } from "./util.js";
 import { createNet } from "./net.js";
 import { createHttp } from "./http.js";
+import { createHttps } from "./https.js";
+import { createTls } from "./tls.js";
+import { createDns } from "./dns.js";
+import { createHttp2 } from "./http2.js";
+import { createV8 } from "./v8.js";
 import { crypto as cryptoModule } from "./crypto.js";
 import { stream as streamModule, web as streamWeb, consumers as streamConsumers } from "./stream.js";
 import { createTimers } from "./timers.js";
@@ -54,6 +59,13 @@ export function makeBuiltins(sys, extras) {
   // pure over `sys` (async `otf:net_*` calls) — the kernel only moves bytes.
   const net = createNet(sys, EventEmitter);
   const http = createHttp(sys, EventEmitter, net);
+  // Outbound HTTPS rides fetch (browser owns TLS/DNS/TCP); tls/dns/http2 are
+  // load-only stubs so npm's fetch stack constructs its (unused) agents. ADR-008.
+  const https = createHttps(EventEmitter, http);
+  const tls = createTls(EventEmitter);
+  const dns = createDns();
+  const http2 = createHttp2();
+  const v8 = createV8();
   const timers = createTimers(globalThis);
   const timersPromises = createTimersPromises(globalThis);
   const readline = createReadline(sys);
@@ -83,6 +95,12 @@ export function makeBuiltins(sys, extras) {
     ["readline", readline],
     ["net", net],
     ["http", http],
+    ["https", https],
+    ["tls", tls],
+    ["dns", dns],
+    ["dns/promises", dns.promises],
+    ["http2", http2],
+    ["v8", v8],
     ["crypto", cryptoModule],
     ["zlib", zlibModule],
     ["child_process", childProcess],
