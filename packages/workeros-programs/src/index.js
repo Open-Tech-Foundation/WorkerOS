@@ -55,7 +55,11 @@ export const programs = [
     type: "js",
     entry: "./node/node-program.js",
   },
-  { bin: "/bin/npm", type: "js", entry: "./npm/npm-program.js" },
+  // `npm` — a thin launcher for the *real* npm CLI, which is vendored into the OS
+  // image (tools/vendor-npm.mjs) rather than reimplemented. The launcher unpacks
+  // it into /usr/lib/npm on first use and execs it on /bin/node. (The old
+  // hand-written client stays at ./npm/npm-program.js, unwired, as a fallback.)
+  { bin: "/bin/npm", type: "js", entry: "./npm/npm-launcher.js" },
   { bin: "/bin/curl", type: "js", entry: "./curl/curl-program.js" },
   // Archive/compression tools — day-to-day CLIs over node:zlib + the shared
   // /lib/workeros-archive framing. `gzip`/`gunzip`/`zcat` are one program that
@@ -144,4 +148,9 @@ export const libraries = [
   // zip takes the node:zlib codec by injection (no cross-tree import).
   { path: "/lib/workeros-archive/tar.js", source: () => fetchText("./archive/tar.js") },
   { path: "/lib/workeros-archive/zip.js", source: () => fetchText("./archive/zip.js") },
+  // The vendored real npm CLI tarball (tools/vendor-npm.mjs). Shipped ephemerally;
+  // /bin/npm unpacks it into persistent /usr/lib/npm on first use. `fetchBytes`
+  // returns null when it isn't vendored, so boot still works (npm just reports it
+  // isn't installed until `npm run build:vendor-npm` runs).
+  { path: "/lib/workeros-npm/npm.tgz", source: () => fetchBytes("./vendor/npm.tgz") },
 ];

@@ -92,8 +92,13 @@ export function createEventLoop(native) {
   api.clearImmediate = api.clearTimeout;
 
   // Resolves once no ref'd timers remain — the script's event loop has drained.
-  const whenIdle = () =>
-    refCount <= 0 ? Promise.resolve() : new Promise((r) => { notifyIdle = r; });
+  // Always settle on a *deferred* macrotask (via scheduleIdleCheck), never
+  // synchronously on `refCount <= 0` at call time: an entry's top-level can return
+  // with async work still queued as microtasks that haven't ref'd the loop yet —
+  // e.g. an async CLI like npm that fires its command (`cli(process)`) without
+  // awaiting it. Deferring one macrotask lets those microtasks run and re-ref
+  // first, so we don't declare the loop drained before it has even started.
+  const whenIdle = () => new Promise((r) => { notifyIdle = r; scheduleIdleCheck(); });
   const install = (target) => { for (const k of Object.keys(api)) target[k] = api[k]; };
 
   // Manual keep-alive for non-timer work (an open network listener/connection —

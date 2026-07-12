@@ -11,7 +11,8 @@
     "build:grep": "cargo build --manifest-path ../../crates/wsh-grep/Cargo.toml --release --target wasm32-wasip1 && mkdir -p src/grep && cp ../../crates/wsh-grep/target/wasm32-wasip1/release/grep.wasm src/grep/grep.wasm",
     "build:wasm": "npm run build:codec && npm run build:bundler && npm run build:grep",
     "build:programs": "node tools/bundle.mjs",
-    "build": "npm run build:wasm && npm run build:programs",
+    "build:vendor-npm": "node tools/vendor-npm.mjs",
+    "build": "npm run build:wasm && npm run build:vendor-npm && npm run build:programs",
     "prepack": "npm run build",
     "pretest": "npm run build:codec",
     "test": "node --import ./tools/codec-setup.mjs --import ./tools/guest-lib-setup.mjs --test tools/*.test.js"

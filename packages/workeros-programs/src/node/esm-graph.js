@@ -12,6 +12,12 @@ import { createResolver, isBuiltinSpec, builtinKey } from "./resolve.js";
 // loaders so the "what is TypeScript" rule lives in one place.
 export const isTsPath = (p) => /\.(ts|mts|cts|tsx)$/.test(p);
 
+// Drop a leading `#!…` shebang line, as Node does before compiling a module. The
+// engine allows a hashbang in a real Script/Module, but our CJS evaluator wraps
+// source in `new Function(...)` (a FunctionBody, where `#!` is a SyntaxError) and
+// the ESM runner wraps it in an AsyncFunction — so we strip it for both.
+export const stripShebang = (src) => (src.charCodeAt(0) === 35 && src[1] === "!" ? src.replace(/^#![^\n]*/, "") : src);
+
 // ---- import scanner --------------------------------------------------------
 // A minimal ES-module token stream: identifiers, string literals, and single
 // punctuation, with comments and string internals skipped — so `import` inside a

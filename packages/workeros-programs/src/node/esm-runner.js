@@ -15,6 +15,7 @@
 // runtime already uses for `require` cycles.
 
 import { isBuiltinSpec, builtinKey } from "./resolve.js";
+import { stripShebang } from "./esm-graph.js";
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
@@ -58,7 +59,7 @@ export function createEsmRunner({ fs, path, resolver, transform, detectFormat, m
   const load = async (abs) => {
     const existing = registry.get(abs);
     if (existing) return existing; // cached, or a cycle → the seeded (partial) exports
-    const source = fs.readFileSync(abs, "utf8");
+    const source = stripShebang(fs.readFileSync(abs, "utf8"));
     if (detectFormat(source, abs, { fs, path }) === "cjs") {
       const ns = interopNamespace(loadCjs(abs));
       registry.set(abs, ns);
@@ -108,7 +109,7 @@ export function createEsmRunner({ fs, path, resolver, transform, detectFormat, m
   const loadSync = (abs) => {
     const existing = registry.get(abs);
     if (existing) return existing;
-    const source = fs.readFileSync(abs, "utf8");
+    const source = stripShebang(fs.readFileSync(abs, "utf8"));
     if (detectFormat(source, abs, { fs, path }) === "cjs") {
       const ns = interopNamespace(loadCjs(abs));
       registry.set(abs, ns);

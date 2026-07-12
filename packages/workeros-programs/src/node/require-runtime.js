@@ -31,6 +31,7 @@ import { createChildProcess } from "./child-process.js";
 import querystringModule from "./querystring.js";
 import perfHooksModule from "./perf-hooks.js";
 import { vm as vmModule } from "./vm.js";
+import constantsModule from "./constants.js";
 
 // ---- core builtins --------------------------------------------------------
 // `require('fs')` / `require('node:fs')` and friends resolve to guest builtins,
@@ -85,6 +86,7 @@ export function makeBuiltins(sys, extras) {
     ["querystring", querystringModule],
     ["perf_hooks", perfHooksModule],
     ["vm", vmModule],
+    ["constants", constantsModule],
   ]);
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.

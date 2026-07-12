@@ -188,12 +188,19 @@ const process = emitter({
   arch: "wasm32",
   config: processConfig,
   features: Object.freeze({ debug: false, inspector: false }),
-  // A truthful, non-Node-fidelity version tag (INV-5): we are not Node.
-  version: "workeros-node/0.0.0",
-  // `versions.node` is what packages feature-detect on; we report a recent value
-  // so they take modern code paths (which our builtins target) rather than throw
-  // "unsupported Node". We are still not Node — see `version`/`release` (INV-5).
+  // `process.version` MUST be a Node-compatible semver: real tools (npm, and
+  // anything using `semver.satisfies(process.version, engines.node)`) parse it to
+  // gate the engine, and a non-semver value makes them bail (npm exits silently).
+  // We match `versions.node`. Our true identity — that we are NOT Node — lives in
+  // `process.release.name` below (Node reports "node"; we say "workeros"), the same
+  // way Bun/Deno report a Node semver here while identifying themselves elsewhere.
+  version: "v22.23.1",
+  // `versions.node` is what packages feature-detect on; a recent value makes them
+  // take modern code paths (which our builtins target) rather than throw
+  // "unsupported Node".
   versions: { node: "22.23.1", workeros: "0.0.0", v8: "0.0" },
+  // Truthful runtime identity (INV-5): a real Node reports `release.name === "node"`.
+  release: { name: "workeros", lts: false, sourceUrl: "", headersUrl: "" },
   cwd: () => cwd,
   chdir: (d) => { cwd = resolveCwd(String(d)); },
   hrtime,
