@@ -22,23 +22,31 @@ export function bundlerFromExports(ex) {
   const mem = () => new Uint8Array(ex.memory.buffer);
   const enc = new TextEncoder();
   const dec = new TextDecoder();
+  // Run one of the wasm transforms: copy `source` in, call `fn(ptr, len, ...extra)`,
+  // copy the packed (ptr<<32)|len result out. All three transforms share this ABI.
+  const call = (fn, source, ...extra) => {
+    const data = enc.encode(source);
+    const ptr = ex.nb_alloc(data.length) >>> 0;
+    mem().set(data, ptr);
+    let packed;
+    try {
+      packed = fn(ptr, data.length, ...extra);
+    } finally {
+      ex.nb_dealloc(ptr, data.length);
+    }
+    const outPtr = Number(packed >> 32n) >>> 0;
+    const outLen = Number(packed & 0xffffffffn) >>> 0;
+    const out = dec.decode(mem().slice(outPtr, outPtr + outLen));
+    ex.nb_dealloc(outPtr, outLen);
+    return out;
+  };
   return {
-    transform(source) {
-      const data = enc.encode(source);
-      const ptr = ex.nb_alloc(data.length) >>> 0;
-      mem().set(data, ptr);
-      let packed;
-      try {
-        packed = ex.nb_transform(ptr, data.length);
-      } finally {
-        ex.nb_dealloc(ptr, data.length);
-      }
-      const outPtr = Number(packed >> 32n) >>> 0;
-      const outLen = Number(packed & 0xffffffffn) >>> 0;
-      const out = dec.decode(mem().slice(outPtr, outPtr + outLen));
-      ex.nb_dealloc(outPtr, outLen);
-      return out;
-    },
+    // JS ESM → module-runner JS.
+    transform: (source) => call(ex.nb_transform, source),
+    // TypeScript ESM → module-runner JS (strip types + import/export rewrite).
+    transformTs: (source, tsx = false) => call(ex.nb_transform_ts, source, tsx ? 1 : 0),
+    // TypeScript CJS → plain JS (strip types only; keep require/module.exports).
+    stripTs: (source, tsx = false) => call(ex.nb_strip_ts, source, tsx ? 1 : 0),
   };
 }
 

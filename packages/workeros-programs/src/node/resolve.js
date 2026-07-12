@@ -34,6 +34,7 @@ export const NODE_BUILTINS = new Set([
   "string_decoder",
   "events",
   "util",
+  "util/types",
   "stream",
   "timers",
   "timers/promises",
@@ -177,8 +178,17 @@ export function createResolver({ fs, path, conditions = ["node", "import"] } = {
 
   const resolveFile = (p) => {
     if (kind(p) === "file") return p;
-    for (const ext of [".js", ".mjs", ".cjs", ".json"]) {
+    for (const ext of [".js", ".mjs", ".cjs", ".json", ".ts", ".tsx", ".mts", ".cts"]) {
       if (kind(p + ext) === "file") return p + ext;
+    }
+    // TypeScript writes `import './x.js'` for a source file that is actually `x.ts`
+    // (the emitted extension). When the literal `.js` sibling is absent, fall back
+    // to the matching TS source — so a TS graph resolves without `.ts` in specifiers.
+    const tsSwap = { ".js": ".ts", ".mjs": ".mts", ".cjs": ".cts", ".jsx": ".tsx" };
+    for (const [js, ts] of Object.entries(tsSwap)) {
+      if (p.endsWith(js) && kind(p.slice(0, -js.length) + ts) === "file") {
+        return p.slice(0, -js.length) + ts;
+      }
     }
     if (kind(p) === "dir") return resolveDir(p);
     return null;
@@ -193,7 +203,7 @@ export function createResolver({ fs, path, conditions = ["node", "import"] } = {
         if (r) return r;
       }
     }
-    for (const idx of ["index.js", "index.mjs", "index.cjs", "index.json"]) {
+    for (const idx of ["index.js", "index.mjs", "index.cjs", "index.json", "index.ts", "index.tsx"]) {
       const r = path.join(dir, idx);
       if (kind(r) === "file") return r;
     }

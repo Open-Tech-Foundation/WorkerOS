@@ -34,7 +34,8 @@ export function interopNamespace(exports) {
  * @param deps.fs           sync fs (readFileSync)
  * @param deps.path         posix path
  * @param deps.resolver     createResolver(...) with import conditions
- * @param deps.transform    (source) => module-runner JS (the node-bundler wasm)
+ * @param deps.transform    (source, abs) => module-runner JS (the node-bundler wasm);
+ *                          `abs` lets it pick the TypeScript transform for `.ts`/`.mts`/`.tsx`
  * @param deps.detectFormat (source, abs, {fs,path}) => "esm" | "cjs"
  * @param deps.makeMeta     (abs) => import.meta object
  * @param deps.loadCjs      (abs) => module.exports  (the sync CJS loader)
@@ -65,7 +66,7 @@ export function createEsmRunner({ fs, path, resolver, transform, detectFormat, m
     }
     const exports = Object.create(null);
     registry.set(abs, exports); // seed BEFORE running the body (cycle safety)
-    const code = transform(source);
+    const code = transform(source, abs);
     const dir = path.dirname(abs);
     const fn = new AsyncFunction(
       "__workeros_import__",
@@ -115,7 +116,7 @@ export function createEsmRunner({ fs, path, resolver, transform, detectFormat, m
     }
     const exports = Object.create(null);
     registry.set(abs, exports);
-    const code = transform(source).replaceAll("await __workeros_import__(", "__workeros_import__(");
+    const code = transform(source, abs).replaceAll("await __workeros_import__(", "__workeros_import__(");
     const dir = path.dirname(abs);
     // eslint-disable-next-line no-new-func
     const fn = new Function(

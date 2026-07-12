@@ -12,7 +12,7 @@
 // the core `node:` builtins. Pure over an injected `fs`/`path`/`url` — unit-testable.
 
 import { createResolver, builtinKey } from "./resolve.js";
-import { transformModule } from "./esm-graph.js";
+import { transformModule, isTsPath } from "./esm-graph.js";
 
 function moduleNotFound(spec, fromDir) {
   const e = new Error(`Cannot find module '${spec}' from '${fromDir}'`);
@@ -90,7 +90,14 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
     // Route dynamic `import()` to the fs-backed loader so a CJS module can import an
     // ESM one (as in Node). CJS has no static import/import.meta, so for ordinary
     // modules `transformModule` returns the source untouched.
-    const source = transformModule(fs.readFileSync(absPath, "utf8"), absPath, { staticUrl: () => undefined });
+    let raw = fs.readFileSync(absPath, "utf8");
+    // A CommonJS TypeScript module (`.cts`, or `.ts` in a commonjs scope): strip
+    // types with oxc before evaluating — `require`/`module.exports` stay intact
+    // (strip-only, no ESM rewrite). `/bin/node` installs the stripper.
+    if (isTsPath(absPath) && globalThis.__workerosStripTs) {
+      raw = globalThis.__workerosStripTs(raw, absPath.endsWith(".tsx"));
+    }
+    const source = transformModule(raw, absPath, { staticUrl: () => undefined });
     const fn = new Function("require", "module", "exports", "__dirname", "__filename", source);
     fn(require, module, module.exports, module.path, absPath);
     module.loaded = true;

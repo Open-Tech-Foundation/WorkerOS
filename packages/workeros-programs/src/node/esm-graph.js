@@ -5,6 +5,13 @@
 
 import { createResolver, isBuiltinSpec, builtinKey } from "./resolve.js";
 
+// A TypeScript module path (`.ts`/`.mts`/`.cts`/`.tsx`). TypeScript can't run on
+// the engine natively and the JS import scanner below would mis-read its
+// type-only syntax, so these are never blob-stitched or tokenized here — they go
+// through the oxc runner (which strips types with a real parser). Shared by the
+// loaders so the "what is TypeScript" rule lives in one place.
+export const isTsPath = (p) => /\.(ts|mts|cts|tsx)$/.test(p);
+
 // ---- import scanner --------------------------------------------------------
 // A minimal ES-module token stream: identifiers, string literals, and single
 // punctuation, with comments and string internals skipped — so `import` inside a
@@ -183,6 +190,14 @@ export function buildEsmGraph({ fs, path, resolver }, entryPath, entrySource) {
     const [p, src] = queue.shift();
     if (seen.has(p)) continue;
     seen.add(p);
+    // A TypeScript module can't be scanned by the JS tokenizer (type-only imports
+    // would look like real edges) nor blob-stitched (the engine can't run TS). Mark
+    // it and stop walking here: `evalEsm` sees any `ts` module and hands the whole
+    // graph to the oxc runner, which reads + type-strips + links it itself.
+    if (isTsPath(p)) {
+      modules.push({ path: p, source: src, imports: [], ts: true });
+      continue;
+    }
     const dir = path.dirname(p);
     const imports = [];
     for (const spec of scanEsmImports(src)) {

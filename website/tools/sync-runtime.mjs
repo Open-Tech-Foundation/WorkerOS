@@ -12,6 +12,7 @@
 // first if that directory is missing.
 
 import { cp, rm, mkdir, access } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +22,13 @@ const dest = join(siteRoot, "public", "workeros", "packages");
 
 // The three packages that make up the bootable runtime. Order is cosmetic.
 const packages = ["workeros-web", "workeros-coreutils", "workeros-programs"];
+
+// Packages whose `/bin` and `/sbin` programs are esbuild-bundled into
+// `src/bundles/` (gitignored). We build them here — pure JS, esbuild is each
+// package's own devDep, no Rust toolchain — so a plain `npm run dev`/`build`
+// always serves current, self-contained program sources. (The kernel wasm is the
+// exception: it needs cargo, so we require it pre-built rather than build it.)
+const bundledPackages = ["workeros-programs", "workeros-coreutils"];
 
 async function exists(p) {
   try {
@@ -40,6 +48,13 @@ async function main() {
         "    cd packages/workeros-web && npm install && npm run build:wasm\n",
     );
     process.exit(1);
+  }
+
+  // Build the program bundles into each package's src/bundles/ before copying,
+  // so the mirrored tree carries current, self-contained /bin + /sbin programs.
+  for (const pkg of bundledPackages) {
+    const bundler = join(repoRoot, "packages", pkg, "tools", "bundle.mjs");
+    execFileSync(process.execPath, [bundler], { stdio: "inherit" });
   }
 
   await rm(dest, { recursive: true, force: true });

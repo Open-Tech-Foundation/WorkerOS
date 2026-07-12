@@ -38,3 +38,27 @@ test("dynamic import() and import.meta become runner hooks", opts, () => {
   assert.match(out, /__workeros_dynamic_import__\(/);
   assert.match(out, /__workeros_import_meta__/);
 });
+
+test("transformTs strips TS ESM and rewrites imports to runner calls", opts, () => {
+  const out = bundler.transformTs(
+    "import type { T } from './t';\nimport { v } from './v.js';\n" +
+      "export const x: number = v as number;\nlet y: string = 'hi';",
+  );
+  // type-only import elided; value import rewritten; annotations gone.
+  assert.doesNotMatch(out, /'\.\/t'|"\.\/t"/);
+  assert.match(out, /__workeros_import__\("\.\/v\.js"/);
+  assert.doesNotMatch(out, /: *number|: *string/);
+  assert.match(out, /__workeros_exports__/);
+});
+
+test("stripTs erases TS CJS types, lowers enum, keeps require/module.exports", opts, () => {
+  const out = bundler.stripTs(
+    "const os = require('os');\nenum Color { Red, Green }\n" +
+      "export const c: Color = Color.Red;\nmodule.exports = { c };",
+  );
+  assert.match(out, /require\(/);
+  assert.match(out, /module\.exports/);
+  assert.match(out, /Color/); // enum lowered to runtime JS, not dropped
+  assert.doesNotMatch(out, /: *Color/);
+  assert.doesNotMatch(out, /__workeros_import__/); // strip-only: no ESM rewrite
+});

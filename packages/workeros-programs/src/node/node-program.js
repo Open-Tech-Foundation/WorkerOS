@@ -18,7 +18,7 @@
 
 import { createNodeRuntime, detectFormat, makeBuiltins } from "/lib/workeros-node/require-runtime.js";
 import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
-import { buildEsmGraph, transformModule } from "/lib/workeros-node/esm-graph.js";
+import { buildEsmGraph, transformModule, isTsPath } from "/lib/workeros-node/esm-graph.js";
 import { createResolver, isBuiltinSpec, builtinKey } from "/lib/workeros-node/resolve.js";
 import { createEsmRunner } from "/lib/workeros-node/esm-runner.js";
 import { getBundler } from "/lib/workeros-node/node-bundler.js";
@@ -425,7 +425,10 @@ const getRunner = () =>
     fs,
     path,
     resolver,
-    transform: (src) => getBundler().transform(src),
+    transform: (src, abs) =>
+      isTsPath(abs)
+        ? getBundler().transformTs(src, abs.endsWith(".tsx"))
+        : getBundler().transform(src),
     detectFormat,
     makeMeta: (abs) => globalThis.__workerosMeta(abs),
     loadCjs: (abs) => globalThis.__workerosLoadCjs(abs),
@@ -437,8 +440,13 @@ const getRunner = () =>
 // the runner. `isFile` is false only for the synthetic `-e`/`-p` entry, which has no
 // VFS file for the runner to read (and no cycle to speak of).
 const evalEsm = async (abs, source, isFile = true) => {
+  const graph = buildEsmGraph({ fs, path, resolver }, abs, source);
+  // TypeScript anywhere in the graph → the oxc runner, which type-strips with a real
+  // parser and links the rest (the native blob stitch can't run TS, and the JS import
+  // scanner can't read it). buildEsmGraph marks such modules `ts` without scanning them.
+  if (graph.modules.some((m) => m.ts)) return await getRunner().load(abs);
   try {
-    return await import(stitchGraph(buildEsmGraph({ fs, path, resolver }, abs, source)));
+    return await import(stitchGraph(graph));
   } catch (e) {
     if (e !== CYCLE) throw e;
     if (!isFile) { err("node: unresolvable or cyclic module graph\n"); sys.exit(1); }
@@ -452,6 +460,11 @@ const evalEsm = async (abs, source, isFile = true) => {
 // returns its namespace. A module with real top-level await surfaces as a require
 // failure, as in Node.
 globalThis.__workerosRequireEsm = (abs) => getRunner().loadSync(abs);
+
+// Strip TypeScript from a CommonJS module's source before the CJS evaluator runs it
+// (module.js). Strip-only: types (and `import type`) go, `enum`/`namespace`/parameter
+// properties are lowered, `require`/`module.exports` are untouched. `tsx` picks JSX.
+globalThis.__workerosStripTs = (src, tsx) => getBundler().stripTs(src, tsx);
 
 // `import.meta` for a module: a real `file://` URL plus fs-derived
 // filename/dirname and a `resolve()` that runs the same resolver (as Node's

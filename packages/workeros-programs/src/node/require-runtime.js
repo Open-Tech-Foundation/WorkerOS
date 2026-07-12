@@ -101,8 +101,8 @@ export function makeBuiltins(sys, extras) {
  * `.cjs`/`.mjs` extensions are authoritative.
  */
 export function usesCommonjs(source, p = "") {
-  if (p.endsWith(".cjs")) return true;
-  if (p.endsWith(".mjs")) return false;
+  if (p.endsWith(".cjs") || p.endsWith(".cts")) return true;
+  if (p.endsWith(".mjs") || p.endsWith(".mts")) return false;
   // Static ESM syntax wins: a module with `import`/`export` (or `import.meta`) is
   // ESM even when it also calls a `require` — e.g. one made via
   // `createRequire(import.meta.url)`. Such source can't run in the CJS evaluator.
@@ -143,8 +143,10 @@ function nearestType(absPath, { fs, path }) {
  * `deps` = `{ fs, path }`; omit it to force the syntax-only fallback.
  */
 export function detectFormat(source, absPath, deps) {
-  if (absPath.endsWith(".mjs")) return "esm";
-  if (absPath.endsWith(".cjs") || absPath.endsWith(".json")) return "cjs";
+  if (absPath.endsWith(".mjs") || absPath.endsWith(".mts")) return "esm";
+  if (absPath.endsWith(".cjs") || absPath.endsWith(".cts") || absPath.endsWith(".json")) return "cjs";
+  // `.ts`/`.tsx` follow the nearest package.json `"type"`, exactly like `.js`
+  // (handled below) — no special case needed here.
   // Inside a package, `"type"` is authoritative (Node's rule) — `.js` is ESM iff the
   // enclosing package is `"type":"module"`, regardless of what the source looks like.
   const type = deps ? nearestType(absPath, deps) : null;
