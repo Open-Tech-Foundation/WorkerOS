@@ -223,3 +223,40 @@ test("text coreutils pipelines: seq/sort/uniq/wc/tail/cut end-to-end", opts, asy
   assert.equal(result.headCut.out, "ada\nbob\n");
   assert.equal(result.pipeline.out, "10\n9\n8\n");
 });
+
+test("Tab completion at the interactive prompt: commands, dirs, and ambiguous matches", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      // Seed a tree with two files sharing the prefix "read" under a directory.
+      await os.exec("mkdir -p project/src", {});
+      await os.exec("sh -c 'echo x > project/readme.md; echo y > project/readline.js'", {});
+
+      const dec = new TextDecoder();
+      let term = "";
+      os.onOutput((b) => (term += dec.decode(b)));
+      os.startTerminal();
+      const type = async (s) => { os.input(s); await window.sleep(120); };
+      await window.sleep(300); // let the first prompt paint
+
+      const r = {};
+      term = ""; await type("ech"); await type("\t"); r.cmd = term; await type("\x15");
+      term = ""; await type("ls pro"); await type("\t"); r.dir = term; await type("\x15");
+      // "ls project/rea" → extends to the common prefix "read" (no bell)...
+      term = ""; await type("ls project/rea"); await type("\t"); r.lcp = term;
+      // ...and the next Tab lists the matches by basename (bash's double-Tab).
+      term = ""; await type("\t"); r.list = term;
+      await type("\x15");
+      return r;
+    }),
+  );
+  assert.deepEqual(pageErrors, []);
+  assert.ok(result.cmd.includes("echo "), "unique command completes to 'echo ' with a trailing space");
+  assert.ok(result.dir.includes("project/"), "directory completes to 'project/' (trailing slash, no space)");
+  assert.ok(result.lcp.includes("project/read"), "ambiguous match extends to the common prefix 'read'");
+  assert.ok(
+    result.list.includes("readme.md") && result.list.includes("readline.js"),
+    "the follow-up Tab lists the candidate basenames",
+  );
+  assert.ok(!result.list.includes("project/readme.md"), "the listing shows basenames, not full paths");
+});

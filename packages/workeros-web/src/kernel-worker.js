@@ -202,6 +202,62 @@ function prompt() {
   return `${session.cwd === "/" ? "/" : session.cwd} $ `;
 }
 
+// Shell builtins that have no on-disk program (mirrors interp.js BUILTINS) —
+// offered alongside PATH programs when completing a command name.
+const SHELL_BUILTINS = [
+  ":", "true", "false", "echo", "printf", "pwd", "cd", "export", "unset", "local",
+  "shift", "exit", "return", "break", "continue", "read", "test", "[", "[[", "set",
+  "trap", "eval", "source", ".", "command", "type", "uname",
+];
+
+// Tab-completion for the interactive prompt. Completes the token under the
+// cursor against the live VFS: a command name (PATH programs + builtins) when
+// the token is in command position, or a filesystem path otherwise (directory
+// candidates carry a trailing "/" so the editor keeps completing into them).
+// Runs through the injector's kernel context (a valid pid) with absolute paths,
+// so its own cwd is irrelevant — paths resolve against the shell session's cwd.
+function completeLine(line, pos) {
+  // The token under the cursor: from the previous whitespace up to the cursor.
+  let start = pos;
+  while (start > 0 && !/\s/.test(line[start - 1])) start--;
+  const token = line.slice(start, pos);
+
+  const readdir = (absDir) => {
+    try { return kernel.sys_readdir(injectorPid, absDir) || []; } catch { return []; }
+  };
+
+  // Command position: only whitespace or a pipeline/list separator precedes the
+  // token, and it names a bare command (no slash → not an explicit path).
+  if (!token.includes("/") && /(^|[|&;(])\s*$/.test(line.slice(0, start))) {
+    const items = new Set();
+    for (const name of SHELL_BUILTINS) if (name.startsWith(token)) items.add(name);
+    const path = (session.env && session.env.PATH) || "/bin:/sbin";
+    for (const dir of path.split(":")) {
+      if (!dir) continue;
+      for (const e of readdir(dir)) if (!e.is_dir && e.name.startsWith(token)) items.add(e.name);
+    }
+    return { start, items: [...items].sort() };
+  }
+
+  // Filesystem path: split into the directory part (kept verbatim in each
+  // candidate) and the basename being matched; a leading ~ expands to $HOME
+  // only for resolution, so the candidate still shows the ~ the user typed.
+  const HOME = ((session.env && session.env.HOME) || "/").replace(/\/$/, "");
+  const slash = token.lastIndexOf("/");
+  const dirPart = slash < 0 ? "" : token.slice(0, slash + 1);
+  const base = slash < 0 ? token : token.slice(slash + 1);
+  const resolveTarget = dirPart.replace(/^~\//, HOME + "/");
+  let absDir;
+  try { absDir = kernel.resolve_dir(session.cwd, resolveTarget || "."); } catch { return { start, items: [] }; }
+  const items = [];
+  for (const e of readdir(absDir)) {
+    if (e.name.startsWith(".") && !base.startsWith(".")) continue; // hide dotfiles
+    if (!e.name.startsWith(base)) continue;
+    items.push(dirPart + e.name + (e.is_dir ? "/" : ""));
+  }
+  return { start, items: items.sort() };
+}
+
 // Read one command line through the raw-mode line editor (history + cursor
 // editing). Resolves with the editor's result: a submitted line, an abort (^C),
 // or EOF (^D on an empty line).
@@ -212,6 +268,7 @@ function readCommandLine() {
       history,
       write: (s) => termOut(enc.encode(s)),
       columns: () => (kernel.tty_get_winsize() || {}).cols || 80,
+      complete: completeLine,
       done: (r) => { activeReadline = null; resolve(r); },
     });
     activeReadline = editor;

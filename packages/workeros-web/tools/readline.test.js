@@ -185,3 +185,76 @@ test("resizing narrower re-wraps the line being edited", () => {
   ed.feed(enc("\r"));
   assert.deepEqual(result, { line });
 });
+
+// ---- Tab completion --------------------------------------------------------
+
+// Drive the editor with a completion source. `complete` is (line, pos) => result.
+function runWith(complete, script) {
+  let out = "";
+  let result = null;
+  const ed = createLineEditor({
+    prompt: "$ ",
+    write: (s) => (out += s),
+    done: (r) => (result = r),
+    complete,
+  });
+  ed.start();
+  for (const chunk of script) ed.feed(typeof chunk === "string" ? enc(chunk) : chunk);
+  return { result, out };
+}
+
+test("Tab inserts a unique completion and a trailing space", () => {
+  // Typed "ec"; the only match is "echo" → line becomes "echo " (cursor after).
+  const { result } = runWith(() => ({ start: 0, items: ["echo"] }), ["ec", "\t", "hi", "\r"]);
+  assert.deepEqual(result, { line: "echo hi" });
+});
+
+test("Tab on a directory match completes without a trailing space", () => {
+  // A single directory candidate keeps the cursor at the slash so you can dive in.
+  const { result } = runWith(() => ({ start: 0, items: ["src/"] }), ["s", "\t", "main.js", "\r"]);
+  assert.deepEqual(result, { line: "src/main.js" });
+});
+
+test("Tab extends to the longest common prefix when matches are ambiguous", () => {
+  // "read..." — both share "read", so Tab fills that in but adds no space.
+  const { result } = runWith(() => ({ start: 0, items: ["readme.md", "readline.js"] }), ["re", "\t", "\r"]);
+  assert.deepEqual(result, { line: "read" });
+});
+
+test("an ambiguous Tab beeps first, then lists on the second consecutive Tab", () => {
+  // bash behavior: the first Tab that can't extend rings the bell; the next lists.
+  const items = ["readme.md", "readline.js"];
+  const first = runWith(() => ({ start: 0, items }), ["read", "\t"]);
+  assert.ok(first.out.endsWith("\x07"), "first ambiguous Tab rings the bell, lists nothing");
+  assert.ok(!first.out.includes("readline.js"), "nothing listed yet on the first Tab");
+  const second = runWith(() => ({ start: 0, items }), ["read", "\t", "\t"]);
+  assert.ok(second.out.includes("readme.md") && second.out.includes("readline.js"), "second Tab lists");
+});
+
+test("a Tab that extended the prefix lets the next Tab list without a bell", () => {
+  // "re" → extends to "read" (progress, no bell); the next Tab lists immediately.
+  const { out } = runWith(() => ({ start: 0, items: ["readme.md", "readline.js"] }), ["re", "\t", "\t"]);
+  assert.ok(out.includes("readme.md") && out.includes("readline.js"), "listed after the extending Tab");
+});
+
+test("the listing shows basenames, not the dir-prefixed replacement", () => {
+  // Completing "src/re" → candidates carry "src/", but the listing shows basenames.
+  const items = ["src/readme.md", "src/readline.js"];
+  const { out } = runWith((line, pos) => ({ start: 0, items }), ["src/read", "\t", "\t"]);
+  assert.ok(out.includes("readme.md") && out.includes("readline.js"), "basenames listed");
+  assert.ok(!out.includes("src/readme.md"), "the dir prefix is not shown in the listing");
+});
+
+test("Tab with no candidates rings the bell and leaves the line untouched", () => {
+  const { result } = runWith(() => ({ start: 0, items: [] }), ["xyz", "\t", "\r"]);
+  assert.deepEqual(result, { line: "xyz" });
+});
+
+test("Tab replaces only the token under the cursor, keeping the directory part", () => {
+  // "cat src/re" → completer returns candidates carrying the "src/" prefix.
+  const { result } = runWith(
+    (line, pos) => ({ start: line.lastIndexOf(" ", pos - 1) + 1, items: ["src/readme.md"] }),
+    ["cat src/re", "\t", "\r"],
+  );
+  assert.deepEqual(result, { line: "cat src/readme.md " });
+});

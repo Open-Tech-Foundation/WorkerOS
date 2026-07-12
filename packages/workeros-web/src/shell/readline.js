@@ -20,16 +20,21 @@ const dec = new TextDecoder();
  * @param {(s: string) => void} o.write  emit terminal bytes/ANSI (as a string)
  * @param {() => number} [o.columns]  current terminal width (re-read every render,
  *   so a mid-edit resize re-wraps correctly). Defaults to 80.
+ * @param {(line: string, pos: number) => ({ start: number, items: string[] } | null)} [o.complete]
+ *   Tab-completion source. Given the full line and cursor index, returns the buffer
+ *   index where the completed token begins and the candidate replacements for it
+ *   (directory candidates end in "/"); null/empty means "nothing to complete".
  * @param {(r: {line?: string, aborted?: boolean, eof?: boolean}) => void} o.done
  * @returns {{ start: () => void, feed: (bytes: Uint8Array) => void, resize: () => void }}
  */
-export function createLineEditor({ prompt, history = [], write, done, columns = () => 80 }) {
+export function createLineEditor({ prompt, history = [], write, done, columns = () => 80, complete = null }) {
   let buf = []; // the line as an array of characters (one JS char each)
   let pos = 0; // cursor index within buf
   let hist = history.length; // history cursor; === length means "editing a new line"
   let stash = ""; // the new line saved while browsing history
   let escBuf = null; // chars of an in-progress ESC sequence, or null
   let finished = false;
+  let prevWasTab = false; // was the last processed byte a Tab? (for bash's two-Tab list)
 
   // The prompt is written already-styled; its *display* width ignores ANSI SGR.
   const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
@@ -113,11 +118,79 @@ export function createLineEditor({ prompt, history = [], write, done, columns = 
 
   const insertStr = (s) => { for (const ch of s) buf.splice(pos++, 0, ch); render(); };
 
+  // Longest common prefix of the candidate strings (used for partial completion).
+  const commonPrefix = (items) => {
+    let p = items[0];
+    for (let k = 1; k < items.length && p; k++) {
+      const s = items[k];
+      let i = 0;
+      while (i < p.length && i < s.length && p[i] === s[i]) i++;
+      p = p.slice(0, i);
+    }
+    return p;
+  };
+
+  // A candidate's display form for the listing: its basename (bash shows the last
+  // path segment, not the whole "dir/name" replacement), with a directory's
+  // trailing "/" preserved.
+  const displayName = (s) => {
+    const bare = s.endsWith("/") ? s.slice(0, -1) : s;
+    const base = bare.slice(bare.lastIndexOf("/") + 1);
+    return s.endsWith("/") ? base + "/" : base;
+  };
+
+  // Print the candidates (as basenames) in aligned columns below the line, then
+  // repaint the prompt fresh underneath — bash's listing of an ambiguous Tab.
+  const listItems = (items) => {
+    const names = items.map(displayName);
+    const cols = Math.max(1, columns() | 0);
+    const colw = names.reduce((m, s) => Math.max(m, s.length), 0) + 2;
+    const ncols = Math.max(1, Math.floor(cols / colw));
+    let out = "\r\n";
+    for (let i = 0; i < names.length; i++) {
+      out += names[i].padEnd(colw);
+      if ((i + 1) % ncols === 0 || i === names.length - 1) out += "\r\n";
+    }
+    write(out);
+    maxrows = 0; // the listing sits above; repaint the prompt on a fresh row
+    render();
+  };
+
+  // Tab: ask the completer for candidates for the token under the cursor. A
+  // unique match is inserted (with a trailing space, unless it's a directory);
+  // an ambiguous one extends to the longest common prefix. When no prefix can be
+  // added, bash beeps on the first Tab and lists on the next — `repeat` is true
+  // when the immediately-preceding keystroke was also a completion.
+  const doComplete = (repeat) => {
+    if (!complete) { write("\x07"); return; }
+    const r = complete(buf.join(""), pos);
+    if (!r || !r.items || r.items.length === 0) { write("\x07"); return; }
+    const { start, items } = r;
+    const tokenLen = pos - start;
+    if (items.length === 1) {
+      const rep = [...items[0]];
+      buf.splice(start, tokenLen, ...rep);
+      pos = start + rep.length;
+      if (!items[0].endsWith("/")) { buf.splice(pos++, 0, " "); }
+      render();
+      return;
+    }
+    const lcp = [...commonPrefix(items)];
+    if (lcp.length > tokenLen) { buf.splice(start, tokenLen, ...lcp); pos = start + lcp.length; render(); }
+    else if (repeat) listItems(items); // second consecutive Tab → list matches
+    else write("\x07"); // first ambiguous Tab → ring the bell
+  };
+
   const feed = (bytes) => {
     if (finished) return;
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     for (let i = 0; i < u8.length && !finished; i++) {
       const b = u8[i];
+      // Track Tab-repeats for completion: was the *previous* byte a Tab, and is
+      // this one? (Set for every byte, incl. escape/continuation, so any other
+      // key between two Tabs disarms the "list on the second Tab" behavior.)
+      const wasTab = prevWasTab;
+      prevWasTab = b === 0x09;
 
       // Inside an escape sequence: accumulate until a final byte, then dispatch.
       if (escBuf !== null) {
@@ -133,6 +206,7 @@ export function createLineEditor({ prompt, history = [], write, done, columns = 
         continue;
       }
 
+      if (b === 0x09) { doComplete(wasTab); continue; } // Tab: complete files/commands
       if (b === 0x1b) { escBuf = []; continue; } // ESC: begin a sequence
       // Enter / Ctrl-C: park the cursor at the end of the (possibly wrapped) line
       // first, so the newline breaks below the whole command, not mid-row.
