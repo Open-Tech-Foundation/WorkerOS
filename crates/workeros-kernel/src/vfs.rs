@@ -295,8 +295,15 @@ pub trait Vfs {
     /// Remove an empty directory.
     fn rmdir(&mut self, path: &str) -> SysResult<()>;
     /// Rename/move an entry from `from` to `to` within the same VFS. Overwrites
-    /// an existing regular file at `to`; refuses to overwrite a directory.
+    /// an existing regular file at `to`, or an existing *empty* directory when
+    /// `from` is itself a directory (POSIX `rename(2)`); mismatched kinds error.
     fn rename(&mut self, from: &str, to: &str) -> SysResult<()>;
+
+    /// Set a file's modification time (ms since epoch), following symlinks, as
+    /// `utimes(2)`. atime is not separately modeled (reported as mtime — INV-5),
+    /// so its argument is accepted but only mtime is stored; ctime is bumped to
+    /// the current clock since this is a metadata change.
+    fn utimes(&mut self, path: &str, atime_ms: u64, mtime_ms: u64) -> SysResult<()>;
 
     /// Open a file, optionally creating it. Returns its inode and bumps the
     /// open count; the caller must later [`Vfs::close`] it exactly once.
@@ -1438,13 +1445,26 @@ impl Vfs for MemVfs {
             .ok_or(Errno::Noent)?;
         let (to_parent, to_name) = self.resolve_parent(to)?;
         path::validate_component(to_name)?;
-        // If the destination exists, it must be a regular file we can replace.
+        let from_is_dir = self.get(child)?.is_dir();
+        // If the destination exists, we replace it — but the kinds must be
+        // compatible, matching POSIX rename(2): a directory may only be
+        // clobbered by another directory and only when it is empty, and a
+        // non-directory may not be clobbered by a directory.
         if let Some(&existing) = self.dir_entries(to_parent)?.get(to_name) {
             if existing == child {
                 return Ok(()); // renaming onto itself
             }
-            if self.get(existing)?.is_dir() {
-                return Err(Errno::Isdir);
+            match &self.get(existing)?.kind {
+                Kind::Dir { entries } => {
+                    if !from_is_dir {
+                        return Err(Errno::Isdir);
+                    }
+                    if !entries.is_empty() {
+                        return Err(Errno::Notempty);
+                    }
+                }
+                _ if from_is_dir => return Err(Errno::Notdir),
+                _ => {}
             }
             if let Kind::Dir { entries } = &mut self.get_mut(to_parent)?.kind {
                 entries.remove(to_name);
@@ -1461,6 +1481,18 @@ impl Vfs for MemVfs {
         self.touch_mtime(from_parent);
         self.touch_mtime(to_parent);
         self.touch_ctime(child);
+        self.bump();
+        Ok(())
+    }
+
+    fn utimes(&mut self, path: &str, _atime_ms: u64, mtime_ms: u64) -> SysResult<()> {
+        // Follow symlinks (like stat/utimes); atime isn't modeled, so only mtime
+        // is stored. Bump ctime — changing timestamps is itself a metadata change.
+        let ino = self.resolve_ino(path)?;
+        let now = self.now;
+        let inode = self.get_mut(ino)?;
+        inode.mtime = mtime_ms;
+        inode.ctime = now;
         self.bump();
         Ok(())
     }
@@ -1822,13 +1854,70 @@ mod tests {
     }
 
     #[test]
-    fn rename_onto_directory_fails() {
+    fn rename_file_onto_directory_fails() {
         let mut vfs = fs();
         vfs.open("/f", OpenOptions { create: true, ..Default::default() })
             .and_then(|i| vfs.close(i))
             .unwrap();
         vfs.mkdir("/d").unwrap();
         assert_eq!(vfs.rename("/f", "/d").unwrap_err(), Errno::Isdir);
+    }
+
+    #[test]
+    fn rename_dir_onto_empty_dir_replaces() {
+        // POSIX: renaming a directory onto an existing *empty* directory
+        // succeeds and replaces it (what npm/pacote does when moving a
+        // staged package dir into place).
+        let mut vfs = fs();
+        vfs.mkdir("/src").unwrap();
+        vfs.open("/src/f", OpenOptions { create: true, ..Default::default() })
+            .and_then(|i| vfs.close(i))
+            .unwrap();
+        vfs.mkdir("/dst").unwrap(); // empty destination directory
+        vfs.rename("/src", "/dst").unwrap();
+        assert_eq!(vfs.resolve("/src").unwrap_err(), Errno::Noent);
+        assert!(vfs.resolve("/dst/f").is_ok(), "moved contents live under dst");
+    }
+
+    #[test]
+    fn rename_dir_onto_nonempty_dir_fails() {
+        let mut vfs = fs();
+        vfs.mkdir("/src").unwrap();
+        vfs.mkdir("/dst").unwrap();
+        vfs.open("/dst/keep", OpenOptions { create: true, ..Default::default() })
+            .and_then(|i| vfs.close(i))
+            .unwrap();
+        assert_eq!(vfs.rename("/src", "/dst").unwrap_err(), Errno::Notempty);
+    }
+
+    #[test]
+    fn rename_dir_onto_file_fails() {
+        let mut vfs = fs();
+        vfs.mkdir("/src").unwrap();
+        vfs.open("/f", OpenOptions { create: true, ..Default::default() })
+            .and_then(|i| vfs.close(i))
+            .unwrap();
+        assert_eq!(vfs.rename("/src", "/f").unwrap_err(), Errno::Notdir);
+    }
+
+    #[test]
+    fn utimes_sets_mtime_and_reads_back() {
+        // The mtime must round-trip through stat — npm's advisory lock keeps
+        // itself alive by utimes-ing a dir and re-reading the mtime each tick.
+        let mut vfs = fs();
+        vfs.set_time(500);
+        vfs.mkdir("/lock").unwrap();
+        vfs.set_time(900);
+        vfs.utimes("/lock", 12_000, 34_000).unwrap();
+        let m = vfs.stat("/lock").unwrap();
+        assert_eq!(m.mtime, 34_000, "mtime is the value we set");
+        assert_eq!(m.ctime, 900, "ctime bumped to current clock");
+    }
+
+    #[test]
+    fn utimes_missing_path_is_noent() {
+        let mut vfs = fs();
+        assert_eq!(vfs.utimes("/nope", 1, 2).unwrap_err(), Errno::Noent);
     }
 
     #[test]

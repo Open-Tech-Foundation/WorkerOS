@@ -428,6 +428,15 @@ impl ProcessCtx {
         Ok(())
     }
 
+    /// Set a path's times (confined to the process root). `utimes(2)`.
+    pub fn utimes(&mut self, vfs: &mut dyn Vfs, path: &str, atime_ms: u64, mtime_ms: u64) -> SysResult<()> {
+        let abs = self.resolve_path(path)?;
+        vfs.utimes(&abs, atime_ms, mtime_ms)?;
+        // A timestamp change is content-adjacent metadata — a "change" event.
+        vfs.note_event(&abs, crate::vfs::FsEventKind::Change);
+        Ok(())
+    }
+
     pub fn fd_readdir(&self, vfs: &dyn Vfs, fd: Fd) -> SysResult<Vec<DirEntry>> {
         match self.fds.get(&fd) {
             Some(Handle::Dir { ino }) => vfs.readdir_ino(*ino),

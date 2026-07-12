@@ -39,7 +39,7 @@ let lastAutoSnap = 0;
 // Syscalls that mutate the filesystem — before servicing one we stamp the kernel
 // clock (ADR-020) so the resulting inode mtimes/ctimes are real wall-clock times.
 const MUTATING_CALLS = new Set([
-  "write", "open", "mkdir", "unlink", "rmdir", "rename", "symlink", "link",
+  "write", "open", "mkdir", "unlink", "rmdir", "rename", "symlink", "link", "utimes",
 ]);
 
 // Persist the durable tree to the content-addressed block store if it changed
@@ -665,6 +665,10 @@ function serviceSync(pid) {
         kernel.sys_rename(pid, req.from, req.to);
         writeResponse(rec.syncSab, 0, {});
         break;
+      case "utimes":
+        kernel.sys_utimes(pid, req.path, req.atime, req.mtime);
+        writeResponse(rec.syncSab, 0, {});
+        break;
       case "execCapture": {
         // node:child_process synchronous forms (execSync/spawnSync/…). The guest
         // thread is parked on Atomics.wait; the shell driver runs async on *this*
@@ -830,6 +834,10 @@ function handleSyscall(pid, msg) {
         break;
       case "rename":
         kernel.sys_rename(pid, args.from, args.to);
+        reply(pid, id, true, null);
+        break;
+      case "utimes":
+        kernel.sys_utimes(pid, args.path, args.atime, args.mtime);
         reply(pid, id, true, null);
         break;
       // ---- otf:net_* — port-keyed loopback sockets (ADR-021) ----

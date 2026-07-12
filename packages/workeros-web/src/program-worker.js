@@ -107,6 +107,7 @@ function makeSyncFs(syncCall) {
     unlink: (path) => { json("unlink", { path }); },
     rmdir: (path) => { json("rmdir", { path }); },
     rename: (from, to) => { json("rename", { from, to }); },
+    utimes: (path, atime, mtime) => { json("utimes", { path, atime, mtime }); },
     // fs.watch: register/unregister synchronously (events arrive async via FS_EVENT).
     watchAdd: (path, recursive) => json("watchAdd", { path, recursive }).id,
     watchRemove: (id) => { json("watchRemove", { id }); },

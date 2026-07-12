@@ -844,6 +844,15 @@ impl Kernel {
         ctx.rename(vfs, from, to)
     }
 
+    /// `utimes` — set a path's modification time (ms since epoch).
+    pub fn sys_utimes(&mut self, pid: Pid, path: &str, atime_ms: u64, mtime_ms: u64) -> SysResult<()> {
+        let (ctx, vfs) = match self.contexts.get_mut(&pid) {
+            Some(ctx) => (ctx, &mut self.vfs),
+            None => return Err(Errno::Badf),
+        };
+        ctx.utimes(vfs, path, atime_ms, mtime_ms)
+    }
+
     // ---- process introspection (`ps`) ----
 
     /// A snapshot of the process table for `ps`.

@@ -742,6 +742,13 @@ impl WebKernel {
         self.inner.sys_rename(pid, &from, &to).map_err(errno_to_js)
     }
 
+    #[wasm_bindgen]
+    pub fn sys_utimes(&mut self, pid: Pid, path: String, atime_ms: f64, mtime_ms: f64) -> Result<(), JsError> {
+        self.inner
+            .sys_utimes(pid, &path, atime_ms as u64, mtime_ms as u64)
+            .map_err(errno_to_js)
+    }
+
     // ---- process lifecycle ----
 
     #[wasm_bindgen]
