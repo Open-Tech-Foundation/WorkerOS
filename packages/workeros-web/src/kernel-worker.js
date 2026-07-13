@@ -390,7 +390,10 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
   worker.postMessage({
     type: MSG.START,
     interpreter: spawned.interpreter,
-    argv,
+    // The kernel may have rewritten argv (a `#!` shebang runs the script through
+    // its interpreter); start the worker with that effective argv so `sys.argv`
+    // matches what actually runs. Falls back to the caller's argv.
+    argv: spawned.argv || argv,
     env,
     cwd,
     pid: spawned.pid,

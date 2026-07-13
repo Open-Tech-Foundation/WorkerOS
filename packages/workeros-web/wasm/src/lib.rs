@@ -45,6 +45,9 @@ struct SpawnDto {
     pid: Pid,
     interpreter: &'static str,
     graph: GraphDto,
+    /// The effective argv (a `#!` shebang may have rewritten the caller's argv).
+    /// The host starts the worker with this so `sys.argv` matches what runs.
+    argv: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -412,6 +415,7 @@ impl WebKernel {
             pid: spawned.pid,
             interpreter: spawned.interpreter.as_str(),
             graph: GraphDto::from(&spawned.graph),
+            argv: spawned.argv,
         })
     }
 

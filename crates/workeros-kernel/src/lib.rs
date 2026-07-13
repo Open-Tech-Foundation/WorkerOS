@@ -73,13 +73,16 @@ pub enum WriteEffect {
     File { nwritten: usize },
 }
 
-/// A successful spawn: the new pid, the interpreter to run under, and the
-/// resolved module graph the host hands to the program worker.
+/// A successful spawn: the new pid, the interpreter to run under, the resolved
+/// module graph the host hands to the program worker, and the effective argv (a
+/// `#!` shebang may have rewritten it — the host must start the worker with this,
+/// not the caller's argv, so `sys.argv` inside matches what actually runs).
 #[derive(Debug, Clone)]
 pub struct Spawned {
     pub pid: Pid,
     pub interpreter: Interpreter,
     pub graph: ModuleGraph,
+    pub argv: Vec<String>,
 }
 
 /// Why a spawn failed.
@@ -381,6 +384,9 @@ impl Kernel {
         let inv = resolver::resolve_invocation(&self.vfs, &cwd, &argv, &env, DEFAULT_PATH)
             .map_err(SpawnError::Resolve)?;
         let graph = resolver::resolve_graph(&self.vfs, &inv.entry).map_err(SpawnError::Resolve)?;
+        // A `#!` shebang rewrites argv (the interpreter + the script slide in); use
+        // the invocation's argv so the process — and `sys.argv` inside it — reflect it.
+        let argv = inv.argv;
         let pid = self.processes.create(SpawnRequest {
             ppid,
             argv: argv.clone(),
@@ -389,7 +395,7 @@ impl Kernel {
             start_time,
             caps: caps.clone(),
         });
-        let mut ctx = ProcessCtx::new(pid, argv, env, cwd, caps, self.limits.max_open_fds);
+        let mut ctx = ProcessCtx::new(pid, argv.clone(), env, cwd, caps, self.limits.max_open_fds);
         // Apply the stdio plan (redirects / pipe ends). A binding failure (e.g. a
         // missing input file) fails the spawn cleanly.
         if let Err(e) = Self::apply_stdio(&mut ctx, &mut self.vfs, &mut self.pipes, &plan) {
@@ -401,6 +407,7 @@ impl Kernel {
             pid,
             interpreter: inv.interpreter,
             graph,
+            argv,
         })
     }
 

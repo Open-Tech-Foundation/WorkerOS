@@ -351,12 +351,20 @@ globalThis.Buffer = builtins.get("buffer").Buffer;
 
 // For `-e`/`-p`, the entry is synthetic (rooted at cwd so relative requires and
 // imports resolve there); otherwise read the script file from the VFS.
-const entryAbs =
+let entryAbs =
   evalSource != null
     ? path.join(sys.cwd, "[eval]")
     : path.isAbsolute(script)
       ? path.normalize(script)
       : path.join(sys.cwd, script);
+// Node resolves a symlinked main script to its real path (unless
+// `--preserve-symlinks-main`), so `import.meta.url`, `__dirname`, and every
+// relative `import`/`require` resolve against the *real* directory. This is what
+// lets a `node_modules/.bin/<tool>` symlink — how the real npm's bin-links installs
+// a package's bin — find the package's own `./dist/...` rather than `.bin/dist/...`.
+if (evalSource == null) {
+  try { entryAbs = fs.realpathSync(entryAbs); } catch { /* missing → readFileSync below reports it */ }
+}
 let entrySource;
 if (evalSource != null) {
   entrySource = evalSource;

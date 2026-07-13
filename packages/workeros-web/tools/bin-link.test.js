@@ -86,3 +86,46 @@ test("an installed bin runs as a bare command through the shell (PATH), from a s
   assert.equal(result.out.trim(), "mytool args: a,b");
   assert.equal(result.code, 3, "the bin's exit code is forwarded");
 });
+
+test("a #!/usr/bin/env node symlinked bin runs under node, resolving relative imports", opts, async () => {
+  // How the *real* npm's bin-links installs a package bin: a `node_modules/.bin/<name>`
+  // symlink to a `#!/usr/bin/env node` script (this is the `npm create vite` path).
+  // The kernel must honor the shebang (run it through /bin/node, not the bare `sys`
+  // surface) and /bin/node must realpath the symlinked entry so the script's own
+  // `import './dist/...'` resolves against the real package dir, not `.bin/`.
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const dec = new TextDecoder();
+      await os.fs.write("/proj/node_modules/tool/package.json", '{"type":"module"}');
+      await os.fs.write(
+        "/proj/node_modules/tool/index.js",
+        "#!/usr/bin/env node\nimport './dist/main.js'\n",
+      );
+      await os.fs.write(
+        "/proj/node_modules/tool/dist/main.js",
+        "import { styleText } from 'node:util';\n" +
+          "console.log('tool-ran', styleText('none', process.argv.slice(2).join(',')));\n",
+      );
+      // The relative symlink, as bin-links writes it.
+      await os.fs.write(
+        "/mk.js",
+        "import { symlinkSync, mkdirSync } from 'node:fs';\n" +
+          "mkdirSync('/proj/node_modules/.bin', { recursive: true });\n" +
+          "symlinkSync('../tool/index.js', '/proj/node_modules/.bin/tool');\n",
+      );
+      const p = await os.spawn(["node", "/mk.js"], {});
+      await p.exited;
+      let out = "";
+      const { code } = await os.exec("cd /proj && tool one two", {
+        onStdout: (b) => (out += dec.decode(b)),
+        onStderr: (b) => (out += dec.decode(b)),
+      });
+      return { out: out.trim(), code };
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.out, "tool-ran one,two", "ran under node; relative import + node:util resolved");
+  assert.equal(result.code, 0);
+});

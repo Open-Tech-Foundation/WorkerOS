@@ -90,11 +90,42 @@ impl Interpreter {
 /// kept apart so they read as untouchable OS internals).
 pub const DEFAULT_PATH: &[&str] = &["/bin", "/sbin"];
 
-/// A resolved invocation: the interpreter to run under and the entry file.
+/// A resolved invocation: the interpreter surface, the entry file to load, and
+/// the argv the process runs with. `argv` normally equals the caller's argv, but a
+/// `#!` shebang rewrites it — the entry becomes the named interpreter and the
+/// script slides in as its first argument (exactly like `node <script>`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
     pub interpreter: Interpreter,
     pub entry: String,
+    pub argv: Vec<String>,
+}
+
+/// The basename of a (possibly absolute) path — the part after the last `/`.
+fn basename(p: &str) -> &str {
+    p.rsplit('/').next().unwrap_or(p)
+}
+
+/// Parse a `#!` interpreter line from a program's leading bytes into the command
+/// words to run it under. Generic exec(2) behavior — no language policy: the
+/// interpreter is reduced to its basename so both `#!/usr/bin/env node` and an
+/// absolute `#!/usr/bin/node` resolve to whatever `node` is on `$PATH`, and the
+/// `env` wrapper is unwrapped. `None` when there is no shebang.
+fn parse_shebang(bytes: &[u8]) -> Option<Vec<String>> {
+    if !bytes.starts_with(b"#!") {
+        return None;
+    }
+    let end = bytes.iter().position(|&b| b == b'\n').unwrap_or(bytes.len());
+    let line = std::str::from_utf8(bytes.get(2..end)?).ok()?.trim();
+    let mut toks: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    if !toks.is_empty() && basename(&toks[0]) == "env" {
+        toks.remove(0); // `/usr/bin/env CMD …` → CMD is the interpreter
+    }
+    if toks.is_empty() {
+        return None;
+    }
+    toks[0] = basename(&toks[0]).to_string(); // resolve the interpreter via $PATH
+    Some(toks)
 }
 
 /// Resolve a bare command `name` to an existing program file: a path containing
@@ -137,6 +168,7 @@ pub fn resolve_invocation(
             Ok(Invocation {
                 interpreter: Interpreter::Js,
                 entry: path::normalize(cwd, script),
+                argv: argv.to_vec(),
             })
         }
         Some(name) => {
@@ -157,9 +189,32 @@ pub fn resolve_invocation(
             };
             let entry = resolve_command(vfs, cwd, name, &dirs)
                 .ok_or_else(|| ResolveError::NotFound(name.to_string()))?;
+            // Honor a `#!` shebang (generic exec(2)): if the resolved program is a
+            // script naming an interpreter, run *that* interpreter with the script as
+            // its first argument — so a `#!/usr/bin/env node` bin (e.g. the real npm's
+            // symlinked `node_modules/.bin/*`) runs under /bin/node instead of the bare
+            // `sys` surface. One level only; the interpreter must resolve to a *different*
+            // file (guards against a program shebang-pointing at itself).
+            if let Ok(bytes) = read_file(vfs, &entry) {
+                if let Some(interp) = parse_shebang(&bytes) {
+                    if let Some(interp_entry) = resolve_command(vfs, cwd, &interp[0], &dirs) {
+                        if interp_entry != entry {
+                            let mut new_argv = interp;
+                            new_argv.push(entry);
+                            new_argv.extend(argv.iter().skip(1).cloned());
+                            return Ok(Invocation {
+                                interpreter: Interpreter::Js,
+                                entry: interp_entry,
+                                argv: new_argv,
+                            });
+                        }
+                    }
+                }
+            }
             Ok(Invocation {
                 interpreter: Interpreter::Js,
                 entry,
+                argv: argv.to_vec(),
             })
         }
     }
@@ -255,18 +310,44 @@ mod tests {
         // `js` is the kernel's native execution keyword: run argv[1] directly.
         assert_eq!(
             resolve_invocation(&vfs, "/proj", &["js".into(), "main.js".into()], &[], DEFAULT_PATH).unwrap(),
-            Invocation { interpreter: Interpreter::Js, entry: "/proj/main.js".into() }
+            Invocation { interpreter: Interpreter::Js, entry: "/proj/main.js".into(), argv: vec!["js".into(), "main.js".into()] }
         );
         // `node` is just a user program: it resolves through PATH to /bin/node and
         // runs in place. Loading `main.js` is /bin/node's own job at runtime.
         assert_eq!(
             resolve_invocation(&vfs, "/proj", &["node".into(), "main.js".into()], &[], DEFAULT_PATH).unwrap(),
-            Invocation { interpreter: Interpreter::Js, entry: "/bin/node".into() }
+            Invocation { interpreter: Interpreter::Js, entry: "/bin/node".into(), argv: vec!["node".into(), "main.js".into()] }
         );
         // Any other bare program runs in place under the native surface too.
         assert_eq!(
             resolve_invocation(&vfs, "/proj", &["ls".into(), "-a".into()], &[], DEFAULT_PATH).unwrap(),
-            Invocation { interpreter: Interpreter::Js, entry: "/bin/ls".into() }
+            Invocation { interpreter: Interpreter::Js, entry: "/bin/ls".into(), argv: vec!["ls".into(), "-a".into()] }
+        );
+    }
+
+    #[test]
+    fn shebang_runs_a_script_through_its_interpreter() {
+        let mut vfs = MemVfs::new();
+        vfs.mkdir("/bin").unwrap();
+        vfs.mkdir("/nm").unwrap();
+        vfs.mkdir("/nm/.bin").unwrap();
+        write(&mut vfs, "/bin/node", "var x=1;"); // the interpreter (no shebang)
+        write(&mut vfs, "/nm/.bin/tool", "#!/usr/bin/env node\nimport './dist/x.js'\n");
+        // A `#!/usr/bin/env node` bin on PATH runs under /bin/node, with itself as
+        // argv[1] and the caller's args following — exactly like `node <script>`.
+        assert_eq!(
+            resolve_invocation(&vfs, "/", &["tool".into(), "--yes".into()], &[("PATH".into(), "/nm/.bin:/bin".into())], DEFAULT_PATH).unwrap(),
+            Invocation {
+                interpreter: Interpreter::Js,
+                entry: "/bin/node".into(),
+                argv: vec!["node".into(), "/nm/.bin/tool".into(), "--yes".into()],
+            }
+        );
+        // A program without a shebang still runs in place (no rewrite).
+        write(&mut vfs, "/bin/plain", "console.log(1)");
+        assert_eq!(
+            resolve_invocation(&vfs, "/", &["plain".into()], &[], DEFAULT_PATH).unwrap(),
+            Invocation { interpreter: Interpreter::Js, entry: "/bin/plain".into(), argv: vec!["plain".into()] }
         );
     }
 
