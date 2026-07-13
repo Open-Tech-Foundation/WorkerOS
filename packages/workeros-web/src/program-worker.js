@@ -15,7 +15,7 @@
 import { MSG } from "./protocol.js";
 import { ProcessExit } from "../../workeros-programs/src/node/process-shim.js";
 import { createWasiImports } from "../../workeros-programs/src/wasi/host.js";
-import { makeSyncCaller } from "./sync-syscall.js";
+import { makeSyncCaller, MAX_SYNC_PAYLOAD } from "./sync-syscall.js";
 import { unframeExecResult } from "./exec-frame.js";
 
 const kernel = self; // the kernel worker created us; postMessage talks back to it.
@@ -89,7 +89,12 @@ function makeSyncFs(syncCall) {
   return {
     open: (path, opts) => json("open", { path, opts }).fd,
     read: (fd, max) => {
-      const r = syncCall("read", { fd, max }, true);
+      // The kernel advances the fd offset by the bytes it reads, but the sync
+      // channel only carries MAX_SYNC_PAYLOAD back. Requesting more would advance
+      // past — and drop — the remainder, so clamp here and let the caller loop
+      // (fs.readSync does). This is why a single read of a >1 MiB cache entry used
+      // to come back truncated, breaking npm's integrity check on large packuments.
+      const r = syncCall("read", { fd, max: Math.min(max, MAX_SYNC_PAYLOAD) }, true);
       if (r.status < 0) fail(r);
       return r.bytes;
     },

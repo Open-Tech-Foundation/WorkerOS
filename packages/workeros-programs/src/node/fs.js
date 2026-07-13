@@ -321,9 +321,22 @@ export function createFs(syncFs, onFsEvent) {
     assertRange("offset", offset, 0, buffer.length);
     assertRange("length", length, 0, buffer.length - offset);
     if (position != null && position >= 0) guard(() => syncFs.seek(fd, position, SEEK_SET), "read", openPaths.get(fd));
-    const bytes = guard(() => syncFs.read(fd, length), "read", openPaths.get(fd));
-    buffer.set(bytes.subarray(0, length), offset);
-    return bytes.length;
+    // Node fills the buffer from a regular file in a single call (a short read
+    // means EOF), but the sync channel caps one `syncFs.read` at its 1 MiB
+    // payload. Loop from the current offset so a request for >1 MiB is fully
+    // satisfied: npm's cacache reads cached content back with one large
+    // `fs.read` and trusts the returned count, so a short read there truncates
+    // the content and the integrity check fails (EBADSIZE — the bug that made
+    // installs of large packuments/tarballs, e.g. a Vite scaffold, break).
+    const path = openPaths.get(fd);
+    let got = 0;
+    while (got < length) {
+      const bytes = guard(() => syncFs.read(fd, length - got), "read", path);
+      if (bytes.length === 0) break; // EOF
+      buffer.set(bytes, offset + got);
+      got += bytes.length;
+    }
+    return got;
   }
 
   function writeSync(fd, data, offOrPos, lengthOrEnc, position) {

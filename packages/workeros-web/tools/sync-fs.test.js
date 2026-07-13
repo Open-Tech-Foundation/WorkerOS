@@ -201,3 +201,51 @@ test("readFileSync on a missing file throws ENOENT with a Node-shaped error", op
   assert.deepEqual(pageErrors, []);
   assert.equal(result.out.trim(), "ENOENT open");
 });
+
+// A file larger than the sync channel's 1 MiB payload must read back WHOLE. The
+// kernel advances the fd offset by what it reads, so a single `read` request for
+// more than the channel can carry would silently skip the remainder — the bug
+// that truncated npm's cached packuments at exactly 1 MiB and broke installs of
+// large trees (a Vite scaffold) with EBADSIZE. Every read path must reassemble
+// the full file: readFileSync (loops), a single big readSync (fills the buffer),
+// and createReadStream (drains).
+test("files larger than the 1 MiB sync channel read back whole (no truncation)", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      await os.fs.write(
+        "/big.js",
+        [
+          "const fs = require('fs');",
+          "const N = 3 * 1024 * 1024 + 12345;", // ~3 MiB, not a channel multiple
+          "const buf = Buffer.alloc(N, 0xab);",
+          "fs.writeFileSync('/big.bin', buf);",
+          "const stat = fs.statSync('/big.bin').size;",
+          "const rfs = fs.readFileSync('/big.bin');",
+          "const fd = fs.openSync('/big.bin', 'r');",
+          "const one = Buffer.alloc(N);",
+          "const br = fs.readSync(fd, one, 0, N, 0);",
+          "fs.closeSync(fd);",
+          "let streamed = 0, ok = true;",
+          "const rs = fs.createReadStream('/big.bin');",
+          "rs.on('data', (c) => { streamed += c.length; });",
+          "rs.on('end', () => {",
+          "  ok = ok && rfs.length === N && rfs.every((b) => b === 0xab);",
+          "  ok = ok && one.every((b) => b === 0xab);",
+          "  console.log(JSON.stringify({ stat, rfs: rfs.length, br, streamed, N, ok }));",
+          "});",
+        ].join("\n"),
+      );
+      return await window.run(os, ["node", "big.js"]);
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  const r = JSON.parse(result.out.trim());
+  assert.equal(r.stat, r.N, "statSync size");
+  assert.equal(r.rfs, r.N, "readFileSync length");
+  assert.equal(r.br, r.N, "single readSync bytesRead fills the buffer");
+  assert.equal(r.streamed, r.N, "createReadStream drains fully");
+  assert.equal(r.ok, true, "every byte intact");
+});

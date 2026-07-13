@@ -28,6 +28,11 @@ export const S_REQ = 1;
 export const S_RESP = 2;
 
 const DATA_BYTES = 1 << 20; // 1 MiB payload region (max single read)
+// The most a single sync read can carry back. A caller asking for more must chunk
+// (exactly as writes do) — the kernel advances the fd offset by what it reads, so
+// requesting more than this and getting a truncated payload would silently skip
+// the remainder of the file. Exported so the guest clamps each read to it.
+export const MAX_SYNC_PAYLOAD = DATA_BYTES;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
