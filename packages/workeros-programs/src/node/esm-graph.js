@@ -62,17 +62,22 @@ function tokenize(src) {
   let depth = 0;
 
   // Scan a template-string span from `start` (just past a backtick or the `}` that
-  // closed an interpolation). Emits one `str` token; returns "expr" when it stopped
-  // at `${` (code follows) or "end" at the closing backtick.
+  // closed an interpolation). Emits one `tmpl` token — deliberately NOT `str`: a
+  // template span is never a static import specifier, and treating it as one is a
+  // real bug. A `}` closing an interpolation pushes no punct token, so the span
+  // right after it lands with the interpolation's last token as its predecessor;
+  // when that token is the identifier `from` (e.g. `` `…${opts.from}…` ``), a
+  // `str`-typed span would be misread as `import … from ""`. Returns "expr" when it
+  // stopped at `${` (code follows) or "end" at the closing backtick.
   const readTemplateSpan = (start) => {
     while (i < n) {
       const c = src[i];
       if (c === "\\") { i += 2; continue; }
-      if (c === "`") { i++; toks.push({ t: "str", v: "", start, end: i }); return "end"; }
-      if (c === "$" && src[i + 1] === "{") { i += 2; toks.push({ t: "str", v: "", start, end: i }); return "expr"; }
+      if (c === "`") { i++; toks.push({ t: "tmpl", v: "", start, end: i }); return "end"; }
+      if (c === "$" && src[i + 1] === "{") { i += 2; toks.push({ t: "tmpl", v: "", start, end: i }); return "expr"; }
       i++;
     }
-    toks.push({ t: "str", v: "", start, end: i });
+    toks.push({ t: "tmpl", v: "", start, end: i });
     return "end";
   };
 
@@ -270,9 +275,15 @@ export function buildEsmGraph({ fs, path, resolver }, entryPath, entrySource) {
   const seen = new Set();
   const queue = [[entryPath, entrySource]];
   while (queue.length) {
-    const [p, src] = queue.shift();
+    const [p, raw] = queue.shift();
     if (seen.has(p)) continue;
     seen.add(p);
+    // A `#!…` shebang is legal at the top of an executable module (the entry — a
+    // package `bin` — routinely has one, e.g. `#!/usr/bin/env node`), but `#!` is a
+    // SyntaxError inside the blob/`new Function` the stitch evaluates. Strip it from
+    // every module's source (entry and deps alike) before scanning + storing, so the
+    // scan offsets and the evaluated text stay in sync.
+    const src = stripShebang(raw);
     // A TypeScript module can't be scanned by the JS tokenizer (type-only imports
     // would look like real edges) nor blob-stitched (the engine can't run TS). Mark
     // it and stop walking here: `evalEsm` sees any `ts` module and hands the whole

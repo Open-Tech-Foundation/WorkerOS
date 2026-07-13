@@ -126,6 +126,29 @@ test("scanner: a static specifier after a nested template is still found", () =>
   assert.deepEqual(scanEsmImports(src), ["./dep.js"]);
 });
 
+// A template interpolation ending in an identifier named `from`/`import` must not
+// be misread as `import … from ""`. The `}` closing `${…}` emits no punct token,
+// so the continuation span lands with `from` as its predecessor — a `str`-typed
+// span would produce a phantom empty specifier (this is exactly what broke
+// `npm create hono`: create-hono's bundle contains
+// `` `unexpected parse option { from: '${parseOptions.from}' }` ``).
+test("scanner: `${x.from}` inside a template is not a phantom empty specifier", () => {
+  const src = "throw new Error(`opt { from: '${parseOptions.from}' }`);\nimport y from './dep.js';\n";
+  assert.deepEqual(scanEsmImports(src), ["./dep.js"]);
+});
+
+test("scanner: no phantom edge from a template ending in `import` either", () => {
+  const src = "const s = `use ${dynamic.import}`;\nexport { a } from './x.js';\n";
+  assert.deepEqual(scanEsmImports(src), ["./x.js"]);
+});
+
+test("transformModule: a template ending in `.from` is left intact (no bad rewrite)", () => {
+  const src = "const s = `${o.from}`;\nimport y from './dep.js';\n";
+  const out = transformModule(src, "/a/b.js", { staticUrl: (s) => (s === "./dep.js" ? "blob:dep" : null) });
+  assert.match(out, /`\$\{o\.from\}`/); // template untouched
+  assert.match(out, /import y from "blob:dep"/); // real specifier rewritten
+});
+
 test("hasEsmSyntax: import/export declarations and import.meta are ESM", () => {
   assert.equal(hasEsmSyntax("import x from './a.js';"), true);
   assert.equal(hasEsmSyntax("export const y = 1;"), true);
