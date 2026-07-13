@@ -1,21 +1,19 @@
 # WorkerOS
 
 An operating system that boots inside a Web Worker and runs JavaScript or
-WebAssembly programs as real processes — spawned, streamed, killable, and visible
-in `ps`.
+WebAssembly programs as real processes — killable and visible in `ps`.
 
-> The executable format is a JS or WASM module instead of a native binary, and the
-> "CPU" is the host's own JS/WASM engine.
+> The executable format is a JS or WASM module, not a native binary; the "CPU" is
+> the host's own JS/WASM engine.
 
-The kernel is written in **Rust** (compiled to WASM) and is the sole authority for
-the VFS, the process table, module resolution, and capability granting. It is
-**Node-agnostic**: Node compatibility is a swappable guest-side tenant layer, never
-part of the kernel. A `wsh` shell (bash-subset scripting), POSIX-style coreutils, a
-real `npm` + `node`, and unmodified `wasm32-wasip1` binaries all run as ordinary
-processes on top of it.
+The kernel is written in **Rust** (compiled to WASM) and owns the VFS, the process
+table, module resolution, and capability granting.
 
-For current capabilities and the milestone map, see [`PLAN.md`](./PLAN.md); for the
-design, [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`DECISIONS.md`](./DECISIONS.md).
+It is **Node-agnostic** — Node compatibility is a swappable guest-side layer, never
+baked into the kernel.
+
+On top run a `wsh` shell with bash-subset scripting, POSIX-style coreutils, a real
+`npm` + `node`, and unmodified `wasm32-wasip1` binaries — all as ordinary processes.
 
 ## Layout
 
