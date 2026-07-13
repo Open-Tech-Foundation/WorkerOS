@@ -60,6 +60,9 @@ export const programs = [
   // it into /usr/lib/npm on first use and execs it on /bin/node. (The old
   // hand-written client stays at ./npm/npm-program.js, unwired, as a fallback.)
   { bin: "/bin/npm", type: "js", entry: "./npm/npm-launcher.js" },
+  // `npx` — the same launcher, invoked as `npx`; it execs the npx CLI that ships
+  // inside npm's own tarball (bin/npx-cli.js). `npm exec`/`npm create X` route here.
+  { bin: "/bin/npx", type: "js", entry: "./npm/npm-launcher.js" },
   { bin: "/bin/curl", type: "js", entry: "./curl/curl-program.js" },
   // Archive/compression tools — day-to-day CLIs over node:zlib + the shared
   // /lib/workeros-archive framing. `gzip`/`gunzip`/`zcat` are one program that

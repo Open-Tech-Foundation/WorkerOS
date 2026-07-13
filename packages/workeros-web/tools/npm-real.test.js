@@ -76,3 +76,26 @@ test("real npm: vendored CLI boots and runs `--version` + `config get`", opts, a
   assert.equal(res.registry.code, 0, res.registry.err);
   assert.equal(res.registry.out.trim(), "https://registry.npmjs.org/");
 });
+
+test("real npx: /bin/npx launcher execs the npx CLI bundled in npm's tarball", opts, async () => {
+  const res = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const flags = ["--no-update-notifier", "--cache", "/tmp/npmc"];
+      const NPX = "/usr/lib/npm/bin/npx-cli.js";
+      // First `npx` invocation shares npm's launcher and drives the unpack (its
+      // own stdout goes to the TTY, so assert the CLI landed + the exit code).
+      const viaBin = await window.run(os, ["npx", "--version", ...flags], { cwd: "/" });
+      let present = false;
+      try { present = !!(await os.fs.read(NPX)); } catch {}
+      // Run the real npx CLI directly so its stdout is the captured process.
+      const version = await window.run(os, ["node", NPX, "--version", ...flags], { cwd: "/" });
+      return { present, viaBin, version };
+    }),
+  );
+
+  assert.ok(res.present, "launcher should unpack npx-cli.js alongside npm-cli.js");
+  assert.equal(res.viaBin.code, 0, res.viaBin.err);
+  assert.equal(res.version.code, 0, res.version.err);
+  assert.match(res.version.out.trim(), /^\d+\.\d+\.\d+$/);
+});

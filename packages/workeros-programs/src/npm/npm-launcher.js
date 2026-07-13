@@ -1,13 +1,15 @@
-// /bin/npm — launcher for the *real* npm CLI (vendored into the OS image; see
-// tools/vendor-npm.mjs). npm is a third-party userland program, not something we
-// reimplement: this stands up its file tree and hands off to it.
+// /bin/npm and /bin/npx — launcher for the *real* npm/npx CLIs (vendored into the
+// OS image; see tools/vendor-npm.mjs). npm is a third-party userland program, not
+// something we reimplement: this stands up its file tree and hands off to it. The
+// same file backs both bins and dispatches on its invoked name (argv[0]), the way
+// gzip/gunzip/zcat share one program — npx ships inside the same npm tarball.
 //
 // The vendored tarball ships (ephemerally, reinstalled each boot) at
 // `/lib/workeros-npm/npm.tgz`. On first use we unpack it once into the
 // **persistent** `/usr/lib/npm` (so the ~1800-file cost is paid once, not per
 // boot — /usr is durable, unlike the /bin,/sbin,/lib,/tmp OS trees), then exec
-// `node /usr/lib/npm/bin/npm-cli.js`, forwarding argv and the exit code. A new
-// vendored asset (different byte size) triggers a re-unpack, so version bumps
+// `node /usr/lib/npm/bin/{npm,npx}-cli.js`, forwarding argv and the exit code. A
+// new vendored asset (different byte size) triggers a re-unpack, so version bumps
 // take effect. INV-1: npm only places files; the kernel learns nothing.
 import { parseTar } from "/lib/workeros-archive/tar.js";
 
@@ -17,7 +19,11 @@ const err = (s) => sys.write(2, enc.encode(s));
 
 const TGZ = "/lib/workeros-npm/npm.tgz";
 const ROOT = "/usr/lib/npm";
-const CLI = ROOT + "/bin/npm-cli.js";
+// Which CLI to run is decided by how we were invoked: `npx …` runs npx-cli.js,
+// anything else runs npm-cli.js. argv[0] is the program name the shell exec'd.
+const invokedAs = (sys.argv[0] || "npm").split("/").pop();
+const CLI = ROOT + "/bin/" + (invokedAs === "npx" ? "npx-cli.js" : "npm-cli.js");
+const PROBE = ROOT + "/bin/npm-cli.js"; // presence proves the tree is unpacked
 const MARKER = ROOT + "/.workeros-src-size"; // vendored asset size we unpacked from
 
 async function statOr(p) {
@@ -70,7 +76,7 @@ async function ensureUnpacked() {
     sys.exit(127);
   }
   const want = String(tgz.size);
-  const cli = await statOr(CLI);
+  const cli = await statOr(PROBE);
   if (cli) {
     const have = await readText(MARKER).catch(() => null);
     if (have === want) return; // already unpacked at this version
