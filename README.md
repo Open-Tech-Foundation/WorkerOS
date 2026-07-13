@@ -65,6 +65,10 @@ Open a demo at
 Cross-origin isolation (COOP: `same-origin`, COEP: `require-corp`) is required
 for `SharedArrayBuffer`; the dev server sets these headers (ADR-010).
 
+To debug a guest program (a hang, a bad `fs` access), enable the kernel tracer
+(`os.trace(...)`) or drive real programs with the e2e harness — see
+[DEBUGGING.md](DEBUGGING.md).
+
 ## License
 
 Apache-2.0. See [NOTICE](./NOTICE) for attribution details.

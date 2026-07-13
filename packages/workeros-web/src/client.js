@@ -120,6 +120,7 @@ export class WorkerOS {
       case MSG.FS_WRITE:
       case MSG.FS_FLUSH:
       case MSG.FS_READ:
+      case MSG.TRACE_RESULT:
       case MSG.PS_RESULT: {
         const p = this._pending.get(msg.id);
         if (p) {
@@ -127,6 +128,7 @@ export class WorkerOS {
           if (msg.type === MSG.SPAWNED) p.resolve(msg.pid);
           else if (msg.type === MSG.FS_READ) p.resolve(msg.data);
           else if (msg.type === MSG.PS_RESULT) p.resolve(msg.procs);
+          else if (msg.type === MSG.TRACE_RESULT) p.resolve({ on: msg.on, events: msg.events, procs: msg.procs });
           else p.resolve();
         }
         break;
@@ -223,6 +225,16 @@ export class WorkerOS {
   /** `ps` — a snapshot of the live process table. */
   ps() {
     return this._request(MSG.PS, {});
+  }
+
+  /**
+   * Kernel tracing (debugging). `trace({ on })` toggles the strace-style tracer;
+   * `trace({ dump: true, procs: true, limit })` reads back the recent syscall/
+   * spawn/exit events and a live process snapshot. Resolves with
+   * `{ on, events?, procs? }`. Events are `{ seq, t, pid, kind, call, info }`.
+   */
+  trace(opts = {}) {
+    return this._request(MSG.TRACE, opts);
   }
 
   /**

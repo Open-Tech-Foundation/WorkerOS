@@ -43,6 +43,12 @@ export const MSG = Object.freeze({
   // as { id, ok, bytes?, error? }.
   PREVIEW_RESPONSE: "preview_response",
   ERROR: "error",
+  // main ⇆ kernel: opt-in kernel tracing (strace-style). The request carries
+  // { on?, dump?, clear?, procs?, limit? }; the reply { on, events?, procs? }
+  // returns the recent syscall/spawn/exit ring buffer and/or a live process
+  // snapshot. Off by default (zero cost); a debugging aid, not a boot dependency.
+  TRACE: "trace",
+  TRACE_RESULT: "trace_result",
 
   // kernel worker → program worker
   START: "start",

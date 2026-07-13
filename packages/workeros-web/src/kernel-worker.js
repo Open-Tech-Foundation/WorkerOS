@@ -332,6 +332,40 @@ function post(msg) {
   self.postMessage(msg);
 }
 
+// ---- kernel tracer (opt-in, off by default) --------------------------------
+// A strace-style ring buffer of recent kernel events — every syscall (the sync
+// SAB path and the async postMessage path), plus process spawn/exit. This is the
+// primary way to see what a guest program is *doing* when it hangs or misbehaves
+// (which fd it's stuck reading, which path it can't find, whether it ever spawned
+// a child). Off by default so it costs nothing; the main thread flips it on and
+// reads the buffer via MSG.TRACE. When on, each event is also `console.debug`'d so
+// a live/Playwright session sees it stream in real time.
+const tracer = {
+  on: false,
+  seq: 0,
+  max: 8000,
+  buf: [],
+  record(kind, pid, call, info) {
+    if (!this.on) return;
+    const ev = { seq: ++this.seq, t: Math.round(performance.now()), pid, kind, call, info: info || "" };
+    this.buf.push(ev);
+    if (this.buf.length > this.max) this.buf.shift();
+    console.debug(`[wos] #${ev.seq} +${ev.t}ms pid=${pid} ${kind}:${call}${ev.info ? " " + ev.info : ""}`);
+  },
+};
+// Summarize a syscall's fields into a short, log-safe string (never dump payload
+// bytes — just their length). Covers the fields worth seeing at a glance.
+function traceSumm(o) {
+  if (!o) return "";
+  const parts = [];
+  for (const k of ["path", "fd", "max", "port", "offset", "whence", "signal", "target"]) {
+    if (o[k] !== undefined && o[k] !== null) parts.push(`${k}=${o[k]}`);
+  }
+  if (o.data && o.data.length != null) parts.push(`bytes=${o.data.length}`);
+  if (o.opts && typeof o.opts === "object") { const f = Object.keys(o.opts).filter((k) => o.opts[k]); if (f.length) parts.push(`opts=${f.join(",")}`); }
+  return parts.join(" ");
+}
+
 // Monotonic id for node:child_process stdin temp files (see `spawnChild`).
 let childTmpSeq = 0;
 
@@ -377,6 +411,7 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
   // environment (notably the PATH npm augments with node_modules/.bin), not the
   // shell driver's persistent session.
   programs.set(spawned.pid, { worker, sink, onExit, resolveExit, done: false, syncSab, env, cwd });
+  tracer.record("proc", spawned.pid, "spawn", (spawned.argv || argv || []).join(" ") + (cwd ? ` cwd=${cwd}` : ""));
   worker.onmessage = (e) => onProgramMessage(spawned.pid, e.data);
   worker.onerror = (e) => {
     try {
@@ -418,6 +453,7 @@ function handleExit(pid, code) {
   const rec = programs.get(pid);
   if (!rec || rec.done) return;
   rec.done = true;
+  tracer.record("proc", pid, "exit", `code=${code}`);
   kernel.mark_exited(pid, code); // idempotent; closes its pipe/file fds → EOF downstream
   kernel.watchClosePid(pid); // drop this process's fs.watch registrations
   retryPendingReads(); // downstream pipe readers may now see EOF
@@ -587,6 +623,7 @@ function serviceSync(pid) {
   // Stamp the kernel's wall clock before a mutating call so inode mtimes/ctimes
   // reflect real time (the kernel is clock-less per ADR-020).
   if (MUTATING_CALLS.has(req.call)) kernel.setTime(Date.now());
+  tracer.record("sync", pid, req.call, traceSumm(req));
   try {
     switch (req.call) {
       case "read": {
@@ -752,6 +789,7 @@ function relayWorkerError(workerPid, info) {
 function handleSyscall(pid, msg) {
   const { id, call, args } = msg;
   if (MUTATING_CALLS.has(call)) kernel.setTime(Date.now());
+  tracer.record("async", pid, call, traceSumm(args));
   try {
     switch (call) {
       case "write": {
@@ -1123,6 +1161,18 @@ self.onmessage = async (ev) => {
         break;
       }
 
+      // Opt-in tracing control (debugging). Toggle the tracer, read the recent
+      // event ring buffer, and/or snapshot the live process table — then reply.
+      case MSG.TRACE: {
+        if (msg.on !== undefined) tracer.on = !!msg.on;
+        const events = msg.dump ? tracer.buf.slice(-(msg.limit || tracer.max)) : undefined;
+        let procs;
+        if (msg.procs) { try { procs = kernel.list_processes(); } catch { procs = null; } }
+        if (msg.clear) { tracer.buf = []; tracer.seq = 0; }
+        post({ type: MSG.TRACE_RESULT, id: msg.id, on: tracer.on, events, procs });
+        break;
+      }
+
       case MSG.FS_FLUSH:
         // Best-effort durable flush (tab hidden/closing). Awaited so a caller
         // that can delay unload (visibilitychange) gives the write a chance.
@@ -1175,6 +1225,7 @@ self.onmessage = async (ev) => {
       }
 
       case MSG.STDIN:
+        tracer.record("stdin", msg.pid, "feed", `bytes=${msg.data?.length ?? 0}`);
         kernel.feed_stdin(msg.pid, msg.data);
         retryPendingReads();
         retrySyncPending();
