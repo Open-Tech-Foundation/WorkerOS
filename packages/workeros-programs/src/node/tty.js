@@ -209,10 +209,27 @@ export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, re
     }
 
     pipe(dest) {
-      this.on("data", (chunk) => dest.write(chunk));
-      this.once("end", () => { if (typeof dest.end === "function") dest.end(); });
+      const onData = (chunk) => dest.write(chunk);
+      const onEnd = () => { if (typeof dest.end === "function") dest.end(); };
+      (this._pipes || (this._pipes = [])).push({ dest, onData, onEnd });
+      this.on("data", onData);
+      this.once("end", onEnd);
       this.resume();
       return dest;
+    }
+
+    // Node's `unpipe([dest])`: detach one piped destination, or all when omitted.
+    // Prompt libraries (@clack/prompts, inquirer) call `stdin.unpipe()` during
+    // teardown — without it their cleanup throws and the prompt never resolves.
+    unpipe(dest) {
+      const pipes = this._pipes || [];
+      this._pipes = [];
+      for (const p of pipes) {
+        if (dest && p.dest !== dest) { this._pipes.push(p); continue; }
+        this.off("data", p.onData);
+        this.off("end", p.onEnd);
+      }
+      return this;
     }
 
     ref() { this._ref(); return this; }

@@ -38,6 +38,59 @@ test("createInterface question reads one line from a data-emitting input stream"
   assert.equal(writes.join(""), "name? ");
 });
 
+function mockTty() {
+  const em = new EventEmitter();
+  em.isTTY = true;
+  em.resume = () => {};
+  em.pause = () => {};
+  em.setRawMode = () => {};
+  return em;
+}
+
+test("terminal Interface maintains line/cursor from keypresses and emits 'line' on Enter", () => {
+  // What @clack/prompts, inquirer, and prompts read back to build the prompt.
+  const input = mockTty();
+  const rl = readline.createInterface({ input, terminal: true });
+  const type = (ch) => input.emit("keypress", ch, { name: /^[a-z]$/.test(ch) ? ch : undefined, sequence: ch });
+  for (const ch of "abc") type(ch);
+  assert.equal(rl.line, "abc");
+  assert.equal(rl.cursor, 3);
+  input.emit("keypress", "\x7f", { name: "backspace" });
+  assert.equal(rl.line, "ab");
+  input.emit("keypress", "", { name: "left" });
+  assert.equal(rl.cursor, 1);
+  let submitted;
+  rl.on("line", (l) => (submitted = l));
+  input.emit("keypress", "\r", { name: "return" });
+  assert.equal(submitted, "ab");
+  assert.equal(rl.line, "");
+});
+
+test("rl.write drives the editor: insert text, Ctrl-H backspace, Ctrl-U kill line", () => {
+  const input = mockTty();
+  const rl = readline.createInterface({ input, terminal: true });
+  rl.write("hello");
+  assert.equal(rl.line, "hello");
+  rl.write(null, { ctrl: true, name: "h" });
+  assert.equal(rl.line, "hell");
+  rl.write(null, { ctrl: true, name: "u" });
+  assert.equal(rl.line, "");
+  rl.write("hi");
+  assert.equal(rl.line, "hi");
+});
+
+test("terminal Interface detaches and pauses input on close (so the process can exit)", () => {
+  const input = mockTty();
+  let paused = false;
+  input.pause = () => { paused = true; };
+  const rl = readline.createInterface({ input, terminal: true });
+  rl.write("x");
+  rl.close();
+  assert.equal(paused, true);
+  input.emit("keypress", "y", { name: "y", sequence: "y" });
+  assert.equal(rl.line, "x", "keypresses after close are ignored");
+});
+
 test("cursor helpers delegate to the output stream methods", () => {
   const calls = [];
   const out = {

@@ -87,6 +87,45 @@ test("transformModule: a module with nothing to rewrite is returned unchanged", 
   assert.equal(transformModule(src, "/proj/m.js", { staticUrl: tag }), src);
 });
 
+test("tokenizer: nested template literals don't desync later import.meta / imports", () => {
+  // A `${…}` interpolation containing another backtick template used to flip the
+  // string-vs-code balance and silently drop everything after it — which is how a
+  // real bundle (create-vite) lost the `import.meta.url` it computes its template
+  // dir from. The interpolation stack must scan `${…}` as code and resume the
+  // template at the matching brace, leaving trailing real code intact.
+  const src = [
+    "const cmd = `npm exec -- ${pkg(`@scope/${name}`)} run`;",
+    "const dir = fileURLToPath(import.meta.url);",
+    "const m = await import('./late.js');",
+  ].join("\n");
+  const out = transformModule(src, "/proj/m.js", { staticUrl: tag });
+  // The nested-template value expressions stay untouched (they are runtime code).
+  assert.match(out, /`npm exec -- \$\{pkg\(`@scope\/\$\{name\}`\)\} run`/);
+  // …but the real code AFTER the template is still rewritten.
+  assert.match(out, /globalThis\.__workerosMeta\("\/proj\/m\.js"\)/);
+  assert.match(out, /fileURLToPath\(__workeros_import_meta\.url\)/);
+  assert.match(out, /globalThis\.__workerosImport\("\/proj\/m\.js", '\.\/late\.js'\)/);
+});
+
+test("tokenizer: regex literals containing quotes/slashes don't desync the scan", () => {
+  // A regex like /['\"]/ or a division that looks like a regex must not swallow the
+  // rest of the file as a string. Both a regex and a real division precede the
+  // trailing import that still has to be found.
+  const src = [
+    "const re = /['\"]\\/[a-z]+/g;",   // regex with quotes + an escaped slash
+    "const half = count / 2;",           // division (not a regex)
+    "import x from './a.js';",
+  ].join("\n");
+  const out = transformModule(src, "/proj/m.js", { staticUrl: tag });
+  assert.match(out, /import x from "URL\(\.\/a\.js\)"/);
+  assert.equal(scanEsmImports(src).sort().join(","), "./a.js");
+});
+
+test("scanner: a static specifier after a nested template is still found", () => {
+  const src = "const t = `a${`b${c}d`}e`;\nimport y from './dep.js';\n";
+  assert.deepEqual(scanEsmImports(src), ["./dep.js"]);
+});
+
 test("hasEsmSyntax: import/export declarations and import.meta are ESM", () => {
   assert.equal(hasEsmSyntax("import x from './a.js';"), true);
   assert.equal(hasEsmSyntax("export const y = 1;"), true);

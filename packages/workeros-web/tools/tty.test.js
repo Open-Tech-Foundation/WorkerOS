@@ -376,3 +376,70 @@ test("child_process spawn stdio:'inherit' shares the terminal both ways", opts, 
   assert.match(buf, /CHILD-GOT\[hello\]/, "the inherited-stdin child read the terminal line");
   assert.match(buf, /DRIVER-DONE/, "the parent observed the child's exit");
 });
+
+test("readline terminal interface powers a prompt-library flow (the create-vite path)", opts, async () => {
+  // The @clack/prompts / inquirer pattern that `npm create vite` runs on: a
+  // terminal readline interface must (1) keep the process alive waiting for keys,
+  // (2) maintain rl.line/rl.cursor as the user types, and (3) survive the library's
+  // teardown — `input.unpipe()` then `rl.close()` — for each of two sequential
+  // prompts. Any gap (idle-exit, empty rl.line, a missing `unpipe`) breaks the
+  // scaffolder; this exercises all three end to end over the real kernel TTY.
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    await os.fs.write("/prompt.js", [
+      "import readline from 'node:readline';",
+      "function ask(tag) {",
+      "  return new Promise((resolve) => {",
+      "    const rl = readline.createInterface({ input: process.stdin, prompt: '', terminal: true });",
+      "    let value = '';",
+      "    const onKey = (s, key) => {",
+      "      if (key && key.name === 'return') {",
+      "        process.stdin.removeListener('keypress', onKey);",
+      "        process.stdin.unpipe();",           // clack's teardown — must not throw
+      "        rl.close();",
+      "        process.stdout.write(tag + '=' + value + '\\n');",
+      "        resolve(value);",
+      "      } else {",
+      "        value = rl.line;",                   // track the buffer live, like clack
+      "      }",
+      "    };",
+      "    process.stdin.on('keypress', onKey);",
+      "    if (process.stdin.isTTY) process.stdin.setRawMode(true);",
+      "    process.stdout.write('[' + tag + ']');",  // ready marker
+      "  });",
+      "}",
+      "await ask('NAME'); await ask('FRAMEWORK');",
+      "process.stdout.write('SCAFFOLDED\\n');",
+    ].join("\n"));
+    os.startTerminal();
+    const waitFor = async (s, ms = 12000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out.slice(-300)));
+    };
+    await waitFor("$");
+    os.input("node /prompt.js\r");
+    // First prompt: type a name (proves the editor tracks rl.line), then submit.
+    await waitFor("[NAME]");
+    for (const ch of "my-app") { os.input(ch); await new Promise((r) => setTimeout(r, 30)); }
+    os.input("\r");
+    await waitFor("NAME=my-app");
+    // Second prompt: proves the interface re-arms after the first close/unpipe.
+    await waitFor("[FRAMEWORK]");
+    for (const ch of "vanilla") { os.input(ch); await new Promise((r) => setTimeout(r, 30)); }
+    os.input("\r");
+    await waitFor("FRAMEWORK=vanilla");
+    await waitFor("SCAFFOLDED");
+    return out;
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.match(buf, /NAME=my-app/, "the line editor captured the typed value from rl.line");
+  assert.match(buf, /FRAMEWORK=vanilla/, "a second interface re-armed after unpipe + close");
+  assert.match(buf, /SCAFFOLDED/, "the flow ran to completion");
+});

@@ -28,48 +28,125 @@ export const stripShebang = (src) => (src.charCodeAt(0) === 35 && src[1] === "!"
 // precisely (a specifier string, a dynamic `import(`, an `import.meta`) without
 // disturbing anything else. Comments and whitespace produce no token, so the
 // "next token" after `import` is the meaningful one (`(` → dynamic, `.` → meta).
+// Keywords after which a `/` begins a regex literal (an operand is expected),
+// rather than the division operator. Enough to disambiguate minified bundles.
+const REGEX_KEYWORDS = new Set([
+  "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
+  "do", "else", "yield", "await", "case",
+]);
+
 function tokenize(src) {
   const toks = [];
   let i = 0;
   const n = src.length;
   const isIdentStart = (c) => /[A-Za-z_$]/.test(c);
   const isIdent = (c) => /[A-Za-z0-9_$]/.test(c);
+  const isDigit = (c) => c >= "0" && c <= "9";
+
+  // `/` is a regex literal when the previous significant token can't end an
+  // expression (a punctuator other than `)`/`]`, or a keyword expecting an
+  // operand); otherwise it's division. Governs regex-vs-divide disambiguation.
+  const regexAllowed = () => {
+    const t = toks[toks.length - 1];
+    if (!t) return true;
+    if (t.t === "punct") return t.v !== ")" && t.v !== "]";
+    if (t.t === "id") return REGEX_KEYWORDS.has(t.v);
+    return false; // after a string/number/regex/template → division
+  };
+
+  // Template-literal interpolation stack: entering `${` records the brace depth to
+  // return to template-string scanning at the matching `}`. Without this, a nested
+  // template (`` `a${`b`}c` ``) flips string-vs-code and desyncs the rest of the
+  // file — silently dropping later imports, `import.meta`, and dynamic `import()`.
+  const tmpl = [];
+  let depth = 0;
+
+  // Scan a template-string span from `start` (just past a backtick or the `}` that
+  // closed an interpolation). Emits one `str` token; returns "expr" when it stopped
+  // at `${` (code follows) or "end" at the closing backtick.
+  const readTemplateSpan = (start) => {
+    while (i < n) {
+      const c = src[i];
+      if (c === "\\") { i += 2; continue; }
+      if (c === "`") { i++; toks.push({ t: "str", v: "", start, end: i }); return "end"; }
+      if (c === "$" && src[i + 1] === "{") { i += 2; toks.push({ t: "str", v: "", start, end: i }); return "expr"; }
+      i++;
+    }
+    toks.push({ t: "str", v: "", start, end: i });
+    return "end";
+  };
+
   while (i < n) {
     const c = src[i];
     const start = i;
-    if (c === "/" && src[i + 1] === "/") {
-      i += 2;
-      while (i < n && src[i] !== "\n") i++;
-    } else if (c === "/" && src[i + 1] === "*") {
-      i += 2;
-      while (i < n && !(src[i] === "*" && src[i + 1] === "/")) i++;
-      i += 2;
-    } else if (c === '"' || c === "'" || c === "`") {
+    // Comments.
+    if (c === "/" && src[i + 1] === "/") { i += 2; while (i < n && src[i] !== "\n") i++; continue; }
+    if (c === "/" && src[i + 1] === "*") { i += 2; while (i < n && !(src[i] === "*" && src[i + 1] === "/")) i++; i += 2; continue; }
+    // Regex literal (only where an operand is expected).
+    if (c === "/" && regexAllowed()) {
+      i++;
+      let inClass = false;
+      while (i < n) {
+        const d = src[i];
+        if (d === "\\") { i += 2; continue; }
+        if (d === "\n") break; // unterminated → bail (treat what we consumed as regex)
+        if (d === "[") inClass = true;
+        else if (d === "]") inClass = false;
+        else if (d === "/" && !inClass) { i++; break; }
+        i++;
+      }
+      while (i < n && isIdent(src[i])) i++; // flags
+      toks.push({ t: "regex", v: "", start, end: i });
+      continue;
+    }
+    // Single/double-quoted string.
+    if (c === '"' || c === "'") {
       const quote = c;
       i++;
       let s = "";
       while (i < n && src[i] !== quote) {
-        if (src[i] === "\\") {
-          s += src[i + 1] ?? "";
-          i += 2;
-        } else {
-          s += src[i];
-          i++;
-        }
+        if (src[i] === "\\") { s += src[i + 1] ?? ""; i += 2; }
+        else { s += src[i]; i++; }
       }
-      i++; // closing quote
+      i++;
       toks.push({ t: "str", v: s, start, end: i });
-    } else if (isIdentStart(c)) {
+      continue;
+    }
+    // Template literal.
+    if (c === "`") {
+      i++;
+      if (readTemplateSpan(start) === "expr") tmpl.push(depth);
+      continue;
+    }
+    // Identifier / keyword.
+    if (isIdentStart(c)) {
       let j = i + 1;
       while (j < n && isIdent(src[j])) j++;
       toks.push({ t: "id", v: src.slice(i, j), start, end: j });
       i = j;
-    } else if (/\s/.test(c)) {
-      i++;
-    } else {
-      toks.push({ t: "punct", v: c, start, end: i + 1 });
-      i++;
+      continue;
     }
+    // Numeric literal (so a following `/` reads as division, not a regex).
+    if (isDigit(c) || (c === "." && isDigit(src[i + 1]))) {
+      let j = i + 1;
+      while (j < n && (isIdent(src[j]) || src[j] === ".")) j++;
+      toks.push({ t: "num", v: src.slice(i, j), start, end: j });
+      i = j;
+      continue;
+    }
+    // Whitespace.
+    if (/\s/.test(c)) { i++; continue; }
+    // Punctuation, tracking brace depth so `${…}` interpolations close correctly.
+    if (c === "}" && tmpl.length && tmpl[tmpl.length - 1] === depth) {
+      tmpl.pop();
+      i++; // consume `}`
+      if (readTemplateSpan(i) === "expr") tmpl.push(depth);
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") depth--;
+    toks.push({ t: "punct", v: c, start, end: i + 1 });
+    i++;
   }
   return toks;
 }

@@ -104,6 +104,98 @@ class Interface extends EventEmitter {
     this._prompt = String(prompt);
     this._sys = sys;
     this.closed = false;
+    // Node's readline maintains an editable input buffer + cursor that prompt
+    // libraries read back: @clack/prompts, inquirer, and prompts all drive the
+    // prompt off `rl.line`/`rl.cursor` and feed it with `rl.write(...)`.
+    this.line = "";
+    this.cursor = 0;
+    // A terminal interface consumes the tty as a Node `keypress` stream — what
+    // those libraries listen for — and, like Node, holds the event loop open while
+    // open. Start the decoder + flowing read now (so keypresses flow and the
+    // process doesn't idle-exit before the first key) and run the line editor
+    // ahead of the user's own keypress handler (registered later), so their
+    // handler sees an up-to-date `rl.line`. `close()` tears both down.
+    if (this.terminal && this.input && typeof this.input.on === "function") {
+      emitKeypressEvents(this.input, this);
+      this._onKeypress = (str, key) => this._editKeypress(str, key);
+      this.input.on("keypress", this._onKeypress);
+      if (typeof this.input.resume === "function") this.input.resume();
+    }
+  }
+
+  // Apply one decoded keypress to the line buffer, mirroring Node's readline line
+  // discipline (the subset prompt libraries rely on). Editing is silent — a
+  // terminal interface created without an `output` (as @clack does) renders the
+  // prompt itself; we only maintain `line`/`cursor` and emit `line` on Enter.
+  _editKeypress(str, key) {
+    if (this.closed) return;
+    key = key || {};
+    const name = key.name;
+    if (key.ctrl && !key.meta) {
+      switch (name) {
+        case "c": this.emit("SIGINT"); if (this.listenerCount("SIGINT") === 0) this.close(); return;
+        case "h": this._backspace(); return;               // Ctrl-H → backspace
+        case "d": if (this.line === "") this.close(); return; // Ctrl-D on empty → EOF
+        case "u": this.line = this.line.slice(this.cursor); this.cursor = 0; return; // kill to start
+        case "k": this.line = this.line.slice(0, this.cursor); return;               // kill to end
+        case "a": this.cursor = 0; return;
+        case "e": this.cursor = this.line.length; return;
+        case "b": if (this.cursor > 0) this.cursor--; return;
+        case "f": if (this.cursor < this.line.length) this.cursor++; return;
+        case "w": this._deleteWordLeft(); return;
+        default: return; // other control combos: no line edit
+      }
+    }
+    if (key.meta) return;
+    switch (name) {
+      case "return":
+      case "enter": {
+        const line = this.line;
+        this.line = ""; this.cursor = 0;
+        this.emit("line", line);
+        return;
+      }
+      case "backspace": this._backspace(); return;
+      case "delete": this.line = this.line.slice(0, this.cursor) + this.line.slice(this.cursor + 1); return;
+      case "left": if (this.cursor > 0) this.cursor--; return;
+      case "right": if (this.cursor < this.line.length) this.cursor++; return;
+      case "home": this.cursor = 0; return;
+      case "end": this.cursor = this.line.length; return;
+      case "up": case "down": case "tab": case "escape":
+      case "pageup": case "pagedown": case "insert":
+        return; // navigation/history: not part of the buffer
+      default:
+        // A printable key (letter, digit, punctuation, or Space) — insert its text.
+        if (str) {
+          this.line = this.line.slice(0, this.cursor) + str + this.line.slice(this.cursor);
+          this.cursor += str.length;
+        }
+    }
+  }
+
+  _backspace() {
+    if (this.cursor > 0) {
+      this.line = this.line.slice(0, this.cursor - 1) + this.line.slice(this.cursor);
+      this.cursor--;
+    }
+  }
+
+  _deleteWordLeft() {
+    let i = this.cursor;
+    while (i > 0 && this.line[i - 1] === " ") i--;
+    while (i > 0 && this.line[i - 1] !== " ") i--;
+    this.line = this.line.slice(0, i) + this.line.slice(this.cursor);
+    this.cursor = i;
+  }
+
+  // `rl.write(data[, key])` — programmatically drive the editor: a string is
+  // inserted as typed text; `write(null, key)` applies one key action (Ctrl-U to
+  // clear, Ctrl-H to backspace, etc.). This is how @clack seeds/replaces a value.
+  write(data, key) {
+    if (this.closed) return;
+    if (key) { this._editKeypress(typeof data === "string" ? data : "", key); return; }
+    if (data == null) return;
+    for (const ch of String(data)) this._editKeypress(ch, keyFromChar(ch));
   }
 
   setPrompt(prompt) {
@@ -128,6 +220,15 @@ class Interface extends EventEmitter {
   close() {
     if (this.closed) return;
     this.closed = true;
+    // Stop consuming the tty and release the event-loop hold (undo what the
+    // constructor armed for a terminal interface) so the process can exit.
+    const inp = this.input;
+    if (inp && this._onKeypress) { inp.off?.("keypress", this._onKeypress); this._onKeypress = null; }
+    if (inp && inp._keypressDecoder) {
+      inp.off?.("data", inp._keypressDecoder);
+      inp._keypressDecoder = null;
+    }
+    if (this.terminal && inp && typeof inp.pause === "function") inp.pause();
     this.emit("close");
   }
 

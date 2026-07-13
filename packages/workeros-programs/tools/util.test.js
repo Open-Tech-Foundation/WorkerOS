@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import * as nodeUtil from "node:util";
 import util, {
   inspect, format, promisify, callbackify, inherits, deprecate,
-  isDeepStrictEqual, types,
+  isDeepStrictEqual, types, styleText,
 } from "../src/node/util.js";
 
 test("format handles the standard specifiers like Node", () => {
@@ -122,4 +122,24 @@ test("legacy is* predicates + module shape", () => {
   assert.equal(util.isNullOrUndefined(null), true);
   assert.equal(util.isFunction(() => {}), true);
   assert.equal(util.TextEncoder, globalThis.TextEncoder);
+});
+
+test("styleText wraps text in ANSI SGR codes (create-vite's colored prompts)", () => {
+  // Cross-check the code table and the composed open/close ordering against Node's
+  // real util.styleText, applying colors unconditionally (validateStream:false).
+  assert.equal(styleText("red", "x"), nodeUtil.styleText("red", "x", { validateStream: false }));
+  assert.equal(
+    styleText(["bold", "cyan"], "hi"),
+    nodeUtil.styleText(["bold", "cyan"], "hi", { validateStream: false }),
+  );
+  assert.equal(styleText("red", "x"), "\x1b[31mx\x1b[39m");
+  assert.equal(styleText(["bold", "underline"], "hi"), "\x1b[1m\x1b[4mhi\x1b[24m\x1b[22m");
+  // 'none' is the documented no-op; it's also exposed on the module surface.
+  assert.equal(styleText("none", "plain"), "plain");
+  assert.equal(util.styleText, styleText);
+});
+
+test("styleText validates its arguments like Node", () => {
+  assert.throws(() => styleText("nosuchcolor", "x"), { code: "ERR_INVALID_ARG_VALUE" });
+  assert.throws(() => styleText("red", 42), { code: "ERR_INVALID_ARG_TYPE" });
 });
