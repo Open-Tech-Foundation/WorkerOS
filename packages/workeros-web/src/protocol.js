@@ -87,6 +87,17 @@ export const MSG = Object.freeze({
   // the shared buffer" (WASI blocking calls; the reply travels via the SAB).
   SYNC: "sync",
   PROC_EXIT: "proc_exit",
+  // kernel worker ⇆ program worker: watchdog liveness probe (INV-6, ADR-020).
+  // A worker whose event loop is alive answers PING with PONG; a synchronous
+  // spin never does (its SAB slot idle all the while) and is reaped after the
+  // budget. A worker parked in a kernel-serviced blocking call is exempt (the
+  // kernel worker reads its SAB state directly).
+  PING: "ping",
+  PONG: "pong",
+  // program worker → kernel worker: periodic self-measured memory footprint
+  // ({ bytes }, via performance.measureUserAgentSpecificMemory where available).
+  // Breaching the high-water ceiling reaps with reason "out of memory".
+  MEM_SAMPLE: "mem_sample",
   // kernel worker → program worker (syscall reply)
   SYSCALL_RESULT: "syscall_result",
 });

@@ -153,6 +153,9 @@ pub struct ProcInfo {
     pub cwd: String,
     pub state: &'static str,
     pub exit_code: Option<i32>,
+    /// Why the process was killed (watchdog/limit breach) — `None` for an
+    /// ordinary exit (INV-6, ADR-020).
+    pub kill_reason: Option<String>,
     pub start_time: u64,
 }
 
@@ -589,6 +592,17 @@ impl Kernel {
         self.mark_exited(pid, 128 + signal)
     }
 
+    /// A watchdog/limit kill (INV-6, ADR-020): record the honest *why* on the
+    /// process record, then mark it exited with `code`. The host follows with
+    /// `worker.terminate()` exactly as for `kill`. Returns `false` if the pid
+    /// is unknown.
+    pub fn mark_killed(&mut self, pid: Pid, code: i32, reason: &str) -> bool {
+        if !self.processes.set_kill_reason(pid, reason) {
+            return false;
+        }
+        self.mark_exited(pid, code)
+    }
+
     /// `wait(pid)`: the exit code if the process has exited, else `None`.
     pub fn wait(&self, pid: Pid) -> Option<i32> {
         match self.processes.get(pid) {
@@ -888,6 +902,7 @@ impl Kernel {
                     ProcState::Zombie => "zombie",
                 },
                 exit_code: p.exit_code,
+                kill_reason: p.kill_reason.clone(),
                 start_time: p.start_time,
             })
             .collect()
@@ -1149,6 +1164,28 @@ mod tests {
         // Writer exits → reader sees EOF.
         k.mark_exited(w, 0);
         assert_eq!(k.sys_read(r, 0, 16).unwrap(), ReadResult::Eof);
+    }
+
+    #[test]
+    fn mark_killed_records_the_reason_on_the_zombie() {
+        let mut k = boot();
+        let pid = spawn_with(&mut k, "hog.js", StdioPlan::default());
+        assert!(k.mark_killed(pid, 137, "out of memory"));
+        let info = k
+            .list_processes()
+            .into_iter()
+            .find(|p| p.pid == pid)
+            .expect("zombie still listed until reaped");
+        assert_eq!(info.state, "zombie");
+        assert_eq!(info.exit_code, Some(137));
+        assert_eq!(info.kill_reason.as_deref(), Some("out of memory"));
+        // An ordinary exit carries no reason.
+        let pid2 = spawn_with(&mut k, "ok.js", StdioPlan::default());
+        k.mark_exited(pid2, 0);
+        let info2 = k.list_processes().into_iter().find(|p| p.pid == pid2).unwrap();
+        assert_eq!(info2.kill_reason, None);
+        // Unknown pid: refused.
+        assert!(!k.mark_killed(9999, 152, "CPU time"));
     }
 
     #[test]

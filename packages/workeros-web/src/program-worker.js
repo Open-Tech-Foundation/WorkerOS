@@ -330,6 +330,12 @@ self.onmessage = async (ev) => {
     }
     return;
   }
+  if (msg.type === MSG.PING) {
+    // Watchdog liveness probe (ADR-020): answering proves this worker's event
+    // loop turns. A synchronous spin never reaches here — that's the signal.
+    kernel.postMessage({ type: MSG.PONG });
+    return;
+  }
   if (msg.type === MSG.SIGNAL) {
     // Cooperative delivery: hand the signal to the guest's dispatcher (if any).
     try { signalDispatch?.(msg.signal); } catch (e) {
@@ -388,6 +394,24 @@ self.onmessage = async (ev) => {
   };
   const sys = makeSys(msg, syncCall);
   installGlobals(msg, sys);
+
+  // Memory self-sampling for the watchdog (ADR-020) where the browser exposes
+  // it to workers (Chromium under cross-origin isolation). Soft/sampled by
+  // design (INV-5): a synchronous allocation burst lands between samples. The
+  // measurement is async and may take a while (it can wait for GC) — one in
+  // flight at a time.
+  if (typeof performance !== "undefined" && performance.measureUserAgentSpecificMemory) {
+    let measuring = false;
+    setInterval(async () => {
+      if (measuring) return;
+      measuring = true;
+      try {
+        const m = await performance.measureUserAgentSpecificMemory();
+        kernel.postMessage({ type: MSG.MEM_SAMPLE, bytes: m.bytes });
+      } catch { /* API refused (e.g. isolation lost); sampling just stops mattering */ }
+      measuring = false;
+    }, 3000);
+  }
 
   try {
     // A wasm32-wasip1 binary: run it through the WASI host bound to the kernel.

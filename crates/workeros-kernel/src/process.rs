@@ -37,6 +37,11 @@ pub struct Process {
     pub cwd: String,
     pub state: ProcState,
     pub exit_code: Option<i32>,
+    /// Why the process was killed, when the exit was a watchdog/limit kill
+    /// rather than an ordinary exit — e.g. `"CPU time"` / `"out of memory"`
+    /// (INV-6, ADR-020). `None` for a normal exit. Gives `ps`/`wait`/the shell
+    /// an honest *why*.
+    pub kill_reason: Option<String>,
     /// Wall-clock start time in milliseconds since the epoch (host-supplied).
     pub start_time: u64,
     pub caps: CapabilitySet,
@@ -89,6 +94,7 @@ impl ProcessTable {
                 cwd: req.cwd,
                 state: ProcState::Running,
                 exit_code: None,
+                kill_reason: None,
                 start_time: req.start_time,
                 caps: req.caps,
             },
@@ -148,6 +154,19 @@ impl ProcessTable {
             Some(p) => {
                 p.state = ProcState::Zombie;
                 p.exit_code = Some(exit_code);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Record why a process is being killed (a watchdog/limit breach — INV-6,
+    /// ADR-020). Set before the exit so the zombie carries the reason. Returns
+    /// `false` if the pid is unknown.
+    pub fn set_kill_reason(&mut self, pid: Pid, reason: &str) -> bool {
+        match self.procs.get_mut(&pid) {
+            Some(p) => {
+                p.kill_reason = Some(reason.to_string());
                 true
             }
             None => false,

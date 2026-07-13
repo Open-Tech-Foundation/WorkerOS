@@ -116,6 +116,9 @@ struct ProcDto {
     cwd: String,
     state: &'static str,
     exit_code: Option<i32>,
+    /// Why the process was killed (watchdog/limit breach, ADR-020); null for an
+    /// ordinary exit.
+    kill_reason: Option<String>,
     start_time: u64,
 }
 
@@ -791,10 +794,18 @@ impl WebKernel {
                 cwd: p.cwd,
                 state: p.state,
                 exit_code: p.exit_code,
+                kill_reason: p.kill_reason,
                 start_time: p.start_time,
             })
             .collect();
         to_js(&dtos)
+    }
+
+    /// A watchdog/limit kill (INV-6, ADR-020): record the reason on the process
+    /// record, then mark it exited; the host follows with `worker.terminate()`.
+    #[wasm_bindgen]
+    pub fn mark_killed(&mut self, pid: Pid, code: i32, reason: &str) -> bool {
+        self.inner.mark_killed(pid, code, reason)
     }
 
     // ---- client fs ----

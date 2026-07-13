@@ -60,7 +60,10 @@ export function boot(opts = {}) {
     worker.addEventListener("error", (e) =>
       reject(new Error(`kernel worker error: ${e.message}`)),
     );
-    worker.postMessage({ type: MSG.BOOT, wasmUrl });
+    // `opts.watchdog` optionally overrides the temporal limits (ADR-020):
+    // { wallTimeMs, graceMs, sampleMs, memHighWaterBytes } — e.g. a tight
+    // profile for untrusted/AI-agent code, or fast budgets in tests.
+    worker.postMessage({ type: MSG.BOOT, wasmUrl, watchdog: opts.watchdog });
   });
 }
 

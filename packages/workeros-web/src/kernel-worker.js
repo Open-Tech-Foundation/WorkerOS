@@ -13,7 +13,7 @@ import { createShell } from "./shell-exec.js";
 import { createLineEditor } from "./shell/readline.js";
 import { bundledCoreutils } from "../../workeros-coreutils/src/index.js";
 import { programs as osPrograms, libraries as osLibraries } from "../../workeros-programs/src/index.js";
-import { allocSyncBuffer, readRequest, requestBytes, writeResponse } from "./sync-syscall.js";
+import { allocSyncBuffer, readRequest, requestBytes, writeResponse, views, STATE, S_IDLE } from "./sync-syscall.js";
 import { frameExecResult } from "./exec-frame.js";
 import { openPersistence } from "./persistence.js";
 
@@ -35,6 +35,82 @@ const AUTOSAVE_MS = 2000;
 // first checkpoint is one interval in, not on the first change.
 const AUTO_SNAPSHOT_MS = 5 * 60 * 1000;
 let lastAutoSnap = 0;
+
+// ---- watchdog: the temporal half of the sandbox (INV-6, ADR-020) -----------
+//
+// The kernel worker is the only agent with a clock and worker.terminate(), so
+// it enforces the two limits the wasm kernel cannot (the kernel still records
+// the kill reason — mark_killed — so ps/wait/the shell report an honest why).
+//
+// "CPU time" is measured as *continuous unresponsiveness*, not lifetime — a dev
+// server must be allowed to run forever. A process counts as alive if it (a)
+// makes any syscall, (b) answers the periodic PING with a PONG (its event loop
+// turns), or (c) sits parked in a kernel-serviced blocking call (its SAB slot
+// is non-idle — the kernel worker reads it directly; that wait is the kernel's,
+// not a spin). Only a worker showing none of these for `wallTimeMs` — a
+// synchronous `for(;;)` — is escalated: cooperative SIGTERM, a grace period,
+// then terminate() with exit 152 (128+SIGXCPU) and reason "CPU time".
+//
+// Memory is a *soft, sampled* high-water mark (INV-5): each program worker
+// self-reports performance.measureUserAgentSpecificMemory() where the API
+// exists; a breach terminates with exit 137 and reason "out of memory". A
+// synchronous allocation burst between samples can still OOM the tab — stated
+// openly; a hard cap needs the future Wasm/Boa level (§7.1).
+//
+// Defaults mirror workeros-kernel/limits.rs WATCHDOG (the documented source of
+// truth); a host override rides the BOOT message (used by tests, and the seam
+// for a tight untrusted/AI-agent profile).
+const watchdog = {
+  wallTimeMs: 30_000,
+  graceMs: 2_000,
+  sampleMs: 2_000,
+  memHighWaterBytes: 512 * 1024 * 1024,
+};
+
+const SIGXCPU_EXIT = 128 + 24;
+const OOM_EXIT = 137; // 128 + SIGKILL, the conventional OOM-kill code
+
+/** A watchdog/limit kill: record the reason in the kernel's process table,
+ *  tell the process's stderr why (the shell-visible "Killed (…)"), then reap
+ *  through the ordinary exit seam (fds close → EOF/EPIPE downstream, TTY
+ *  restored, worker terminated). */
+function killWithReason(pid, code, reason) {
+  const rec = programs.get(pid);
+  if (!rec || rec.done) return;
+  kernel.mark_killed(pid, code, reason);
+  tracer.record("proc", pid, "watchdog-kill", reason);
+  try { rec.sink.stderr(enc.encode(`Killed (${reason})\n`)); } catch {}
+  handleExit(pid, code);
+}
+
+function watchdogTick() {
+  if (!kernel || !watchdog.wallTimeMs) return; // 0 disables (like idle_time_ms)
+  const now = Date.now();
+  for (const [pid, rec] of programs) {
+    if (rec.done) continue;
+    // Parked in a blocking syscall (Atomics.wait on its SAB): the kernel owes
+    // it a response — that is waiting, not spinning.
+    if (Atomics.load(views(rec.syncSab).i32, STATE) !== S_IDLE) {
+      rec.lastActivity = now;
+      rec.warnedAt = 0;
+      continue;
+    }
+    const idle = now - rec.lastActivity;
+    if (idle < watchdog.wallTimeMs) {
+      rec.warnedAt = 0;
+      rec.worker.postMessage({ type: MSG.PING }); // a live event loop PONGs back
+      continue;
+    }
+    if (!rec.warnedAt) {
+      // Cooperative first (the Ctrl-C two-phase): a guest that can still act
+      // gets SIGTERM; a true synchronous spin can't — the grace covers both.
+      rec.warnedAt = now;
+      deliverSignal(pid, "SIGTERM");
+      continue;
+    }
+    if (now - rec.warnedAt >= watchdog.graceMs) killWithReason(pid, SIGXCPU_EXIT, "CPU time");
+  }
+}
 
 // Syscalls that mutate the filesystem — before servicing one we stamp the kernel
 // clock (ADR-020) so the resulting inode mtimes/ctimes are real wall-clock times.
@@ -410,7 +486,12 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
   // `sh -c`) resolves its command line against the *calling* process's
   // environment (notably the PATH npm augments with node_modules/.bin), not the
   // shell driver's persistent session.
-  programs.set(spawned.pid, { worker, sink, onExit, resolveExit, done: false, syncSab, env, cwd });
+  programs.set(spawned.pid, {
+    worker, sink, onExit, resolveExit, done: false, syncSab, env, cwd,
+    // Watchdog liveness (ADR-020): refreshed by any message from the worker
+    // (syscalls, PONGs); `warnedAt` marks a delivered SIGTERM awaiting grace.
+    lastActivity: Date.now(), warnedAt: 0,
+  });
   tracer.record("proc", spawned.pid, "spawn", (spawned.argv || argv || []).join(" ") + (cwd ? ` cwd=${cwd}` : ""));
   worker.onmessage = (e) => onProgramMessage(spawned.pid, e.data);
   worker.onerror = (e) => {
@@ -950,12 +1031,26 @@ function deliverWatchEvents() {
 }
 
 function onProgramMessage(pid, msg) {
+  // Any message from the worker is proof of life (ADR-020).
+  const rec = programs.get(pid);
+  if (rec) {
+    rec.lastActivity = Date.now();
+    rec.warnedAt = 0;
+  }
   switch (msg.type) {
     case MSG.SYSCALL:
       handleSyscall(pid, msg);
       break;
     case MSG.SYNC:
       serviceSync(pid);
+      break;
+    case MSG.PONG:
+      break; // liveness already recorded above
+    case MSG.MEM_SAMPLE:
+      // Self-reported footprint (soft/sampled, INV-5). Breach → OOM kill.
+      if (watchdog.memHighWaterBytes && Number(msg.bytes) > watchdog.memHighWaterBytes) {
+        killWithReason(pid, OOM_EXIT, "out of memory");
+      }
       break;
     case MSG.PROC_EXIT:
       handleExit(pid, msg.code | 0);
@@ -1358,6 +1453,10 @@ self.onmessage = async (ev) => {
         lastPersistedGen = kernel.fsGeneration();
         lastAutoSnap = Date.now(); // first auto-snapshot is one interval out
         setInterval(persistNow, AUTOSAVE_MS);
+        // Start the watchdog (INV-6, ADR-020). Host overrides (embedder policy,
+        // tests) ride the boot message; defaults mirror limits.rs WATCHDOG.
+        if (msg.watchdog) Object.assign(watchdog, msg.watchdog);
+        setInterval(watchdogTick, watchdog.sampleMs);
         shell = createShell({ kernel, startProcess, session, readLine: readLineFromTty });
         // Apply the login profiles (PATH etc.) before any command can run, so
         // both the interactive REPL and programmatic exec see the global bin dir.

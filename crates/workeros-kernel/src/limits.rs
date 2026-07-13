@@ -22,12 +22,14 @@
 //!
 //! # What the kernel does NOT enforce (host-side, ADR-020)
 //!
-//! The two **temporal** limits — wall-clock/CPU time and a memory high-water
-//! ceiling — need a clock and `worker.terminate()`, which only the kernel-worker
-//! (JS) has. Their *recommended* values live in [`WATCHDOG`] as the single source
-//! of truth the host watchdog mirrors; enforcement is the kernel-worker's job and
-//! is tracked in PLAN Phase 8. They are intentionally *not* fields of
-//! [`ResourceLimits`] so this struct has no field the kernel cannot honor.
+//! The two **temporal** limits — CPU time (continuous unresponsiveness) and a
+//! memory high-water ceiling — need a clock and `worker.terminate()`, which only
+//! the kernel-worker (JS) has. Their *recommended* values live in [`WATCHDOG`] as
+//! the single source of truth the host watchdog mirrors; enforcement is the
+//! kernel-worker's job (`kernel-worker.js` `watchdogTick`, implemented — the
+//! kernel records the honest *why* via [`crate::Kernel::mark_killed`]). They are
+//! intentionally *not* fields of [`ResourceLimits`] so this struct has no field
+//! the kernel cannot honor.
 //!
 //! # v1: recommended defaults, host override later
 //!
@@ -88,9 +90,14 @@ impl Default for ResourceLimits {
 /// documented home the host mirrors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchdogLimits {
-    /// Per-process wall-clock budget in milliseconds before the watchdog escalates
-    /// to a cooperative signal then `terminate()`. A generous default so ordinary
-    /// long builds are unaffected; the host tightens it for untrusted code.
+    /// Per-process budget of *continuous unresponsiveness* in milliseconds
+    /// before the watchdog escalates (cooperative SIGTERM → grace →
+    /// `terminate()`, exit 152, reason "CPU time"). A process is responsive if
+    /// it makes syscalls, answers the liveness ping, or is parked in a
+    /// kernel-serviced blocking call — so servers and blocked readers live
+    /// forever; only a synchronous spin (`for(;;)`) burns this budget. (This is
+    /// deliberately *not* total wall-clock lifetime: that would kill every
+    /// long-lived process. Deviation logged in ADR-020.) `0` disables.
     pub wall_time_ms: u64,
     /// Per-process idle timeout in milliseconds (no syscall/heartbeat) before the
     /// watchdog reaps a wedged worker. `0` disables the idle check.
@@ -103,8 +110,11 @@ pub struct WatchdogLimits {
 
 /// Recommended v1 watchdog values (host-enforced; see [`WatchdogLimits`]).
 pub const WATCHDOG: WatchdogLimits = WatchdogLimits {
-    // 30s wall-clock: comfortably covers real builds/installs; a runaway
-    // synchronous loop is caught well before it looks like a hang to a user.
+    // 30s of *continuous unresponsiveness*: no legitimate guest computes that
+    // long without one syscall or event-loop turn, while a runaway synchronous
+    // loop is caught well before it looks like a hang to a user. (Caveat: a
+    // guest blocked in its *own* Atomics.wait — user-level sync IPC — is
+    // indistinguishable from a spin; hosts running such workloads set 0.)
     wall_time_ms: 30_000,
     // Idle detection off by default (a backgrounded server legitimately idles);
     // the host opts in for batch/AI-agent runs.
