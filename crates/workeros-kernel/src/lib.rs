@@ -153,6 +153,8 @@ pub enum ReadResult {
 pub struct ProcInfo {
     pub pid: Pid,
     pub ppid: Pid,
+    /// Process-group id (job control, ADR-025).
+    pub pgid: Pid,
     pub argv: Vec<String>,
     pub cwd: String,
     pub state: &'static str,
@@ -182,6 +184,9 @@ pub struct Kernel {
     /// The single controlling terminal: line discipline, termios, and winsize.
     /// Every process whose stdin is the terminal (`Inherit`) reads from here.
     tty: Tty,
+    /// The terminal's foreground process group (`tcgetpgrp`; 0 = the shell) —
+    /// where control-key signals are delivered (job control, ADR-025).
+    foreground_pgid: Pid,
     /// The resource caps this instance enforces (INV-6, ADR-020). Hardcoded to
     /// [`ResourceLimits::default`] in v1; a host-override API is post-v1.
     limits: ResourceLimits,
@@ -259,6 +264,7 @@ impl Kernel {
                 pipes: PipeTable::new(),
                 ports: PortTable::new(),
                 tty: Tty::new(),
+                foreground_pgid: 0,
                 limits,
                 mounts: vfs::mount::MountTable::default(),
                 watches: Vec::new(),
@@ -385,6 +391,7 @@ impl Kernel {
         start_time: u64,
         caps: Option<CapabilitySet>,
         ppid: Pid,
+        pgid: Option<Pid>,
         plan: StdioPlan,
     ) -> Result<Spawned, SpawnError> {
         // Fork-bomb guard (INV-6/ADR-020): refuse once the live-process cap is
@@ -398,6 +405,14 @@ impl Kernel {
         // regain it); an explicit set is host policy at the trust boundary. An
         // unknown/host ppid inherits the ordinary-program default.
         let caps = caps.unwrap_or_else(|| self.child_caps(ppid));
+        // Process-group placement (POSIX setpgid shape, ADR-025): `None`
+        // inherits the parent's group (or becomes a leader when the parent is
+        // unknown); `Some(0)` becomes a leader of a new group (the pipeline
+        // head); `Some(p)` joins group `p` (the rest of the pipeline).
+        let pgid = match pgid {
+            None => self.processes.get(ppid).map(|p| p.pgid).unwrap_or(0),
+            Some(g) => g,
+        };
         let inv = resolver::resolve_invocation(&self.vfs, &cwd, &argv, &env, DEFAULT_PATH)
             .map_err(SpawnError::Resolve)?;
         let graph = resolver::resolve_graph(&self.vfs, &inv.entry).map_err(SpawnError::Resolve)?;
@@ -406,6 +421,7 @@ impl Kernel {
         let argv = inv.argv;
         let pid = self.processes.create(SpawnRequest {
             ppid,
+            pgid,
             argv: argv.clone(),
             env: env.clone(),
             cwd: cwd.clone(),
@@ -574,9 +590,34 @@ impl Kernel {
     }
 
     /// Update the terminal window size when the host terminal is resized. The
-    /// host follows this with a `SIGWINCH` to the foreground process.
+    /// host follows this with a `SIGWINCH` to the foreground process group.
     pub fn tty_set_winsize(&mut self, winsize: Winsize) {
         self.tty.winsize = winsize;
+    }
+
+    // ---- process groups & the foreground pgrp (job control, ADR-025) ---------
+
+    /// `tcsetpgrp`: make `pgid` the controlling terminal's foreground process
+    /// group — the group ^C/^Z/SIGWINCH are delivered to. `0` returns the
+    /// terminal to the shell (no foreground job).
+    pub fn tty_set_foreground(&mut self, pgid: Pid) {
+        self.foreground_pgid = pgid;
+    }
+
+    /// `tcgetpgrp`: the current foreground process group (`0` = none — the
+    /// interactive prompt owns the terminal).
+    pub fn tty_foreground(&self) -> Pid {
+        self.foreground_pgid
+    }
+
+    /// The live members of process group `pgid` (signal-delivery set).
+    pub fn pgrp_members(&self, pgid: Pid) -> Vec<Pid> {
+        self.processes.pgrp_members(pgid)
+    }
+
+    /// The process group `pid` belongs to (`0` if unknown).
+    pub fn proc_pgid(&self, pid: Pid) -> Pid {
+        self.processes.get(pid).map(|p| p.pgid).unwrap_or(0)
     }
 
     /// Mark a process exited with `code` (normal return or `proc_exit`), moving
@@ -683,6 +724,7 @@ impl Kernel {
         let caps = CapabilitySet::default();
         let pid = self.processes.create(SpawnRequest {
             ppid: 0,
+            pgid: 0,
             argv: vec!["net-injector".into()],
             env: Vec::new(),
             cwd: "/".into(),
@@ -915,6 +957,7 @@ impl Kernel {
             .map(|p| ProcInfo {
                 pid: p.pid,
                 ppid: p.ppid,
+                pgid: p.pgid,
                 argv: p.argv.clone(),
                 cwd: p.cwd.clone(),
                 state: match p.state {
@@ -974,6 +1017,7 @@ mod tests {
             0,
             None,
             0,
+            None,
             StdioPlan::default(),
         )
         .unwrap()
@@ -994,7 +1038,7 @@ mod tests {
         // module (the entry) and never walks an import graph.
         k.fs_write("/proj/main.js", b"console.log('x')").unwrap();
         let spawned = k
-            .spawn(argv(&["js", "main.js"]), vec![], "/proj".into(), 0, None, 0, StdioPlan::default())
+            .spawn(argv(&["js", "main.js"]), vec![], "/proj".into(), 0, None, 0, None, StdioPlan::default())
             .unwrap();
         assert_eq!(spawned.graph.entry, "/proj/main.js");
         assert_eq!(spawned.graph.modules.len(), 1);
@@ -1009,6 +1053,7 @@ mod tests {
             0,
             None,
             0,
+            None,
             StdioPlan::default(),
         )
     }
@@ -1037,7 +1082,7 @@ mod tests {
     fn spawn_missing_entry_errors() {
         let mut k = boot();
         let err = k
-            .spawn(argv(&["js", "nope.js"]), vec![], "/".into(), 0, None, 0, StdioPlan::default())
+            .spawn(argv(&["js", "nope.js"]), vec![], "/".into(), 0, None, 0, None, StdioPlan::default())
             .unwrap_err();
         assert!(matches!(err, SpawnError::Resolve(ResolveError::NotFound(_))));
     }
@@ -1125,7 +1170,7 @@ mod tests {
         let mut k = boot();
         let a = spawn_main(&mut k, "");
         let b = k
-            .spawn(argv(&["js", "main.js"]), vec![], "/".into(), 0, None, 0, StdioPlan::default())
+            .spawn(argv(&["js", "main.js"]), vec![], "/".into(), 0, None, 0, None, StdioPlan::default())
             .unwrap()
             .pid;
         assert_ne!(a, b);
@@ -1157,7 +1202,7 @@ mod tests {
 
     fn spawn_with(k: &mut Kernel, name: &str, plan: StdioPlan) -> Pid {
         k.fs_write(&format!("/{name}"), b"").unwrap();
-        k.spawn(argv(&["js", name]), vec![], "/".into(), 0, None, 0, plan)
+        k.spawn(argv(&["js", name]), vec![], "/".into(), 0, None, 0, None, plan)
             .unwrap()
             .pid
     }
@@ -1188,6 +1233,54 @@ mod tests {
     }
 
     #[test]
+    fn process_groups_follow_posix_placement_rules() {
+        let mut k = boot();
+        for f in ["a.js", "b.js", "c.js", "d.js"] {
+            k.fs_write(&format!("/{f}"), b"").unwrap();
+        }
+        // Pipeline shape: the head becomes a leader (Some(0)); the rest join it.
+        let head = k
+            .spawn(argv(&["js", "a.js"]), vec![], "/".into(), 0, None, 0, Some(0), StdioPlan::default())
+            .unwrap()
+            .pid;
+        assert_eq!(k.proc_pgid(head), head, "Some(0) makes a new group, leader = self");
+        let stage2 = k
+            .spawn(argv(&["js", "b.js"]), vec![], "/".into(), 0, None, 0, Some(head), StdioPlan::default())
+            .unwrap()
+            .pid;
+        assert_eq!(k.proc_pgid(stage2), head, "Some(p) joins group p");
+        // A child spawned with None inherits its parent's group (an exec'd
+        // grandchild lands in the pipeline's group → foreground ^C reaches it).
+        let grandchild = k
+            .spawn(argv(&["js", "c.js"]), vec![], "/".into(), 0, None, stage2, None, StdioPlan::default())
+            .unwrap()
+            .pid;
+        assert_eq!(k.proc_pgid(grandchild), head, "None inherits the parent's group");
+        // No known parent + None → its own leader.
+        let solo = k
+            .spawn(argv(&["js", "d.js"]), vec![], "/".into(), 0, None, 0, None, StdioPlan::default())
+            .unwrap()
+            .pid;
+        assert_eq!(k.proc_pgid(solo), solo);
+
+        // The delivery set is the live members; zombies drop out.
+        let mut members = k.pgrp_members(head);
+        members.sort();
+        assert_eq!(members, vec![head, stage2, grandchild]);
+        k.mark_exited(stage2, 0);
+        let mut members = k.pgrp_members(head);
+        members.sort();
+        assert_eq!(members, vec![head, grandchild]);
+
+        // tcsetpgrp/tcgetpgrp round-trip; 0 = the shell owns the terminal.
+        assert_eq!(k.tty_foreground(), 0);
+        k.tty_set_foreground(head);
+        assert_eq!(k.tty_foreground(), head);
+        k.tty_set_foreground(0);
+        assert_eq!(k.tty_foreground(), 0);
+    }
+
+    #[test]
     fn capabilities_inherit_from_the_parent_unless_overridden() {
         let mut k = boot();
         k.fs_write("/agent.js", b"").unwrap();
@@ -1195,18 +1288,18 @@ mod tests {
         // Host policy denies network to the agent at the trust boundary…
         let denied = CapabilitySet { net_egress: false, ..CapabilitySet::default() };
         let agent = k
-            .spawn(argv(&["js", "agent.js"]), vec![], "/".into(), 0, Some(denied), 0, StdioPlan::default())
+            .spawn(argv(&["js", "agent.js"]), vec![], "/".into(), 0, Some(denied), 0, None, StdioPlan::default())
             .unwrap();
         assert!(!agent.net_egress);
         // …and the agent cannot shell out to regain it: a child spawned with no
         // explicit set inherits the parent's (ADR-024).
         let child = k
-            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, agent.pid, StdioPlan::default())
+            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, agent.pid, None, StdioPlan::default())
             .unwrap();
         assert!(!child.net_egress, "a denied parent's child must not regain egress");
         // A child of an unknown/host ppid gets the ordinary default (allowed).
         let fresh = k
-            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, 0, StdioPlan::default())
+            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, 0, None, StdioPlan::default())
             .unwrap();
         assert!(fresh.net_egress);
     }

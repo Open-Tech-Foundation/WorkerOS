@@ -101,7 +101,9 @@ WorkerOS uses a **kernel-worker + program-worker** model.
 
 ## 5. Process model
 
-The kernel maintains a POSIX-shaped process table. Each entry: `pid`, `ppid`, `argv`, `env`, `cwd`, `state` (`running`/`sleeping`/`zombie`), `stdio` handles, `exit_code`, `start_time`, and the backing worker handle.
+The kernel maintains a POSIX-shaped process table. Each entry: `pid`, `ppid`, `pgid` (process group — job control, ADR-025), `argv`, `env`, `cwd`, `state` (`running`/`sleeping`/`zombie`), `stdio` handles, `exit_code`, `kill_reason`, `start_time`, and the backing worker handle.
+
+**Process groups & the foreground job (ADR-025).** A pipeline shares one process group (leader = first stage); children inherit their parent's group, so exec'd grandchildren stay inside the job. The controlling terminal carries a kernel-owned **foreground pgrp** (`tcsetpgrp`/`tcgetpgrp`); ^C/^Z/SIGWINCH are delivered to the foreground *group's* live members, and the terminal returns to the shell (cooked termios, foreground cleared) when the group's last member reaps.
 
 Supported today / near-term:
 - `spawn(argv, env, cwd) -> pid` — creates a program worker, wires stdio.

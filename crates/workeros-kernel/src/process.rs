@@ -32,6 +32,12 @@ pub enum ProcState {
 pub struct Process {
     pub pid: Pid,
     pub ppid: Pid,
+    /// Process-group id (POSIX job control, ADR-025). A pipeline shares one
+    /// group (leader = first stage); signals from the controlling terminal
+    /// (^C/^Z/SIGWINCH) are delivered to the foreground *group*, so they reach
+    /// exec'd grandchildren too. Children inherit their parent's group unless
+    /// the spawn says otherwise.
+    pub pgid: Pid,
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: String,
@@ -51,6 +57,9 @@ pub struct Process {
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
     pub ppid: Pid,
+    /// The resolved process-group id (the kernel computes it from the caller's
+    /// `Option<Pid>` — see `Kernel::spawn` — before the record is created).
+    pub pgid: Pid,
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: String,
@@ -89,6 +98,8 @@ impl ProcessTable {
             Process {
                 pid,
                 ppid: req.ppid,
+                // pgid 0 means "become a group leader": the group id is the pid.
+                pgid: if req.pgid == 0 { pid } else { req.pgid },
                 argv: req.argv,
                 env: req.env,
                 cwd: req.cwd,
@@ -140,6 +151,16 @@ impl ProcessTable {
     /// Whether the table is empty.
     pub fn is_empty(&self) -> bool {
         self.procs.is_empty()
+    }
+
+    /// The *live* (non-zombie) members of process group `pgid` — the set a
+    /// group-directed signal (^C to the foreground pipeline) is delivered to.
+    pub fn pgrp_members(&self, pgid: Pid) -> Vec<Pid> {
+        self.procs
+            .values()
+            .filter(|p| p.pgid == pgid && p.state != ProcState::Zombie)
+            .map(|p| p.pid)
+            .collect()
     }
 
     /// Direct children of `pid`.
@@ -210,6 +231,7 @@ mod tests {
     fn req(ppid: Pid, argv: &[&str]) -> SpawnRequest {
         SpawnRequest {
             ppid,
+            pgid: 0,
             argv: argv.iter().map(|s| s.to_string()).collect(),
             env: vec![],
             cwd: "/".to_string(),

@@ -121,6 +121,8 @@ struct SnapDto {
 struct ProcDto {
     pid: Pid,
     ppid: Pid,
+    /// Process-group id (job control, ADR-025).
+    pgid: Pid,
     argv: Vec<String>,
     cwd: String,
     state: &'static str,
@@ -406,6 +408,7 @@ impl WebKernel {
         ppid: u32,
         plan: JsValue,
         caps: JsValue,
+        pgid: Option<u32>,
     ) -> Result<JsValue, JsError> {
         let env: Vec<(String, String)> = if env.is_undefined() || env.is_null() {
             Vec::new()
@@ -436,7 +439,7 @@ impl WebKernel {
         };
         let spawned = self
             .inner
-            .spawn(argv, env, cwd, start_time as u64, caps, ppid, plan)
+            .spawn(argv, env, cwd, start_time as u64, caps, ppid, pgid, plan)
             .map_err(spawn_err_to_js)?;
         to_js(&SpawnDto {
             pid: spawned.pid,
@@ -814,6 +817,7 @@ impl WebKernel {
             .map(|p| ProcDto {
                 pid: p.pid,
                 ppid: p.ppid,
+                pgid: p.pgid,
                 argv: p.argv,
                 cwd: p.cwd,
                 state: p.state,
@@ -830,6 +834,30 @@ impl WebKernel {
     #[wasm_bindgen]
     pub fn mark_killed(&mut self, pid: Pid, code: i32, reason: &str) -> bool {
         self.inner.mark_killed(pid, code, reason)
+    }
+
+    /// `tcsetpgrp`: set the terminal's foreground process group (0 = the shell).
+    #[wasm_bindgen]
+    pub fn tty_set_foreground(&mut self, pgid: Pid) {
+        self.inner.tty_set_foreground(pgid)
+    }
+
+    /// `tcgetpgrp`: the terminal's foreground process group (0 = none).
+    #[wasm_bindgen]
+    pub fn tty_get_foreground(&self) -> Pid {
+        self.inner.tty_foreground()
+    }
+
+    /// Live members of a process group — the delivery set for a group signal.
+    #[wasm_bindgen]
+    pub fn pgrp_members(&self, pgid: Pid) -> Vec<Pid> {
+        self.inner.pgrp_members(pgid)
+    }
+
+    /// The process group `pid` belongs to (0 if unknown).
+    #[wasm_bindgen]
+    pub fn proc_pgid(&self, pid: Pid) -> Pid {
+        self.inner.proc_pgid(pid)
     }
 
     // ---- client fs ----

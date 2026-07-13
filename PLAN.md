@@ -76,6 +76,12 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
   park/drain cycles, caught-SIGPIPE delivery).
 - Coreutils as guest programs against the VFS: `ls cat cp mv rm mkdir echo pwd env true false`.
 - `ps` / `jobs` / background `&` reading the process table.
+  **✅ process groups + foreground pgrp (ADR-025)** — `pgid` on every process
+  record (pipelines share a leader-headed group; children inherit), a kernel
+  `tcsetpgrp`/`tcgetpgrp` foreground group on the terminal, and group-wide
+  ^C/^Z/SIGWINCH delivery (reaches exec'd grandchildren). `ps` shows `pgid`.
+  Native + browser tested (`tools/pgroups.test.js`). Still ⏳: real job
+  control (stopped jobs, `jobs`/`fg`/`bg`, `SIGTTIN`).
 - xterm-style terminal binding on the host. **✅ done** — a real **TTY layer**: the
   kernel owns a controlling-terminal device (`workeros-kernel/tty.rs`) with a line
   discipline (canonical/raw, echo, editing, `Ctrl-C`/`Ctrl-D`/`Ctrl-Z`, winsize),

@@ -198,7 +198,15 @@ const INTERRUPT = Symbol("tty-interrupt");
 let termStarted = false;
 let execRunning = false; // a foreground command is running under the REPL
 let termWaiter = null; // { resolve } awaiting the next committed input line
-const foreground = new Set(); // pids of the current foreground pipeline (for ^C)
+// The foreground pipeline is kernel state now (the terminal's foreground
+// process group, ADR-025): tcgetpgrp + the group's live members are the
+// control-key delivery set. Exec'd grandchildren inherit the group, so ^C
+// reaches them too.
+function fgMembers() {
+  if (!kernel) return [];
+  const g = kernel.tty_get_foreground();
+  return g ? Array.from(kernel.pgrp_members(g)) : [];
+}
 const history = []; // interactive command history (for the readline prompt)
 let activeReadline = null; // the line editor while the prompt is being edited
 const caughtSignals = new Map(); // pid → Set<signal> the guest installed a handler for
@@ -249,7 +257,7 @@ function waitForLine() {
 // one that did not is hard-killed with the conventional 130 (128 + SIGINT).
 function onInterrupt() {
   if (execRunning) {
-    for (const pid of [...foreground]) {
+    for (const pid of fgMembers()) {
       if (catches(pid, "SIGINT")) deliverSignal(pid, "SIGINT");
       else handleExit(pid, 130);
     }
@@ -269,7 +277,7 @@ function onInterrupt() {
 // default disposition is *ignore* (not stop); a foreground process that installed
 // a SIGTSTP handler is told, and can act on it.
 function onSusp() {
-  for (const pid of [...foreground]) {
+  for (const pid of fgMembers()) {
     if (catches(pid, "SIGTSTP")) deliverSignal(pid, "SIGTSTP");
   }
 }
@@ -479,6 +487,9 @@ function spawnKernel(argv, env, cwd, plan, opts = {}) {
   return kernel.spawn(
     argv, Object.entries(env || {}), cwd, Date.now(), opts.ppid || 0, plan || null,
     opts.caps || null,
+    // Process-group placement (ADR-025): undefined/null inherits the parent's
+    // group; 0 becomes a new group's leader; a pid joins that group.
+    opts.pgid,
   );
 }
 
@@ -528,12 +539,20 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
   return exited;
 }
 
-/** Used by the shell driver: spawn one command with a stdio plan + sink. */
-function startProcess({ argv, env, cwd, plan, sink, ppid }) {
-  const spawned = spawnKernel(argv, env, cwd, plan, { ppid });
-  // Shell-run programs form the terminal's foreground pipeline, so ^C can
-  // interrupt them. (Client `spawn` uses startWorker directly and is not tracked.)
-  foreground.add(spawned.pid);
+/** Used by the shell driver: spawn one command with a stdio plan + sink.
+ *  `pgroup` ({ leader }) places the process in a pipeline's process group
+ *  (ADR-025): the first spawn ({ leader: 0 }) becomes the group leader *and*
+ *  the terminal's foreground group (tcsetpgrp) so ^C/^Z/SIGWINCH reach the
+ *  whole pipeline; later stages join `pgroup.leader`. Without a pgroup the
+ *  process inherits its parent's group (exec'd sub-commands stay inside the
+ *  caller's job). */
+function startProcess({ argv, env, cwd, plan, sink, ppid, pgroup }) {
+  const pgid = pgroup ? pgroup.leader || 0 : undefined;
+  const spawned = spawnKernel(argv, env, cwd, plan, { ppid, pgid });
+  if (pgroup && !pgroup.leader) {
+    pgroup.leader = spawned.pid;
+    kernel.tty_set_foreground(spawned.pid);
+  }
   const exited = startWorker(spawned, { argv, env, cwd, sink, onExit: () => {} });
   return { pid: spawned.pid, exited };
 }
@@ -551,16 +570,18 @@ function handleExit(pid, code) {
   syncPendingWrites = syncPendingWrites.filter((w) => w.pid !== pid);
   asyncWriteQueues.delete(pid);
   pumpIo();
+  const fg = kernel.tty_get_foreground();
+  const wasForeground = fg !== 0 && kernel.proc_pgid(pid) === fg;
   kernel.reap(pid);
   rec.worker.terminate();
   programs.delete(pid);
-  const wasForeground = foreground.delete(pid);
-  // Safety net: if the foreground program left the TTY raw (e.g. an editor that
-  // was killed before restoring termios), put it back to cooked so the shell
-  // prompt is usable again. A well-behaved program restores it itself; this only
-  // covers the crash/kill path.
-  if (wasForeground && foreground.size === 0) {
+  // Safety net: when the *last* member of the foreground group goes (e.g. an
+  // editor killed before restoring termios), return the terminal to the shell —
+  // cooked line discipline, foreground pgrp cleared (tcsetpgrp 0). A
+  // well-behaved program restores termios itself; this covers the crash/kill path.
+  if (wasForeground && kernel.pgrp_members(fg).length === 0) {
     kernel.tty_set_attr({ canonical: true, echo: true, isig: true });
+    kernel.tty_set_foreground(0);
   }
   caughtSignals.delete(pid);
   workerContexts.delete(pid);
@@ -1280,9 +1301,9 @@ function handleSyscall(pid, msg) {
           break;
         }
         const childPid = spawned.pid;
-        // A terminal-reading child is part of the foreground pipeline (^C + termios
-        // restore on exit, handled in handleExit).
-        if (stdio[0] === "inherit") foreground.add(childPid);
+        // A terminal-reading child joins its parent's process group (spawn
+        // inherited it, ADR-025), so if the parent is the foreground job the
+        // child gets ^C + the termios restore on exit automatically.
         // Per-fd output routing: 'inherit' → the terminal display; 'pipe' → the
         // parent worker's child streams; 'ignore' → dropped.
         const route = (fd, msgType) => {
@@ -1595,7 +1616,7 @@ self.onmessage = async (ev) => {
         if (activeReadline) activeReadline.resize();
         // Notify the foreground process(es) so a TUI can re-layout. Default
         // disposition is ignore, so a program without a handler is unaffected.
-        for (const pid of [...foreground]) deliverSignal(pid, "SIGWINCH");
+        for (const pid of fgMembers()) deliverSignal(pid, "SIGWINCH");
         break;
 
       case MSG.TERM_START:
