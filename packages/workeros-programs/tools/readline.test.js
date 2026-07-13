@@ -66,6 +66,27 @@ test("terminal Interface maintains line/cursor from keypresses and emits 'line' 
   assert.equal(rl.line, "");
 });
 
+test("getCursorPos/getPrompt report the caret position (Inquirer's ScreenManager)", () => {
+  // create-hono's prompts construct `new ScreenManager(rl)`, which calls
+  // rl.getCursorPos() on every render — a missing method threw "not a function".
+  const input = mockTty();
+  const rl = readline.createInterface({ input, terminal: true, prompt: "? name " });
+  assert.equal(rl.getPrompt(), "? name ");
+  rl.write("abc");
+  // prompt is 7 cols + 3 typed = column 10, still row 0 on an 80-col line
+  assert.deepEqual(rl.getCursorPos(), { cols: 10, rows: 0 });
+  input.emit("keypress", "", { name: "left" }); // caret back one → column 9
+  assert.deepEqual(rl.getCursorPos(), { cols: 9, rows: 0 });
+});
+
+test("getCursorPos wraps to a new row past the terminal width", () => {
+  const input = mockTty();
+  const output = { columns: 10, isTTY: true, write() {} };
+  const rl = readline.createInterface({ input, output, terminal: true, prompt: "" });
+  rl.write("0123456789abc"); // 13 cols on a 10-col terminal → row 1, col 3
+  assert.deepEqual(rl.getCursorPos(), { cols: 3, rows: 1 });
+});
+
 test("rl.write drives the editor: insert text, Ctrl-H backspace, Ctrl-U kill line", () => {
   const input = mockTty();
   const rl = readline.createInterface({ input, terminal: true });

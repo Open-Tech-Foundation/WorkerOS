@@ -202,6 +202,36 @@ class Interface extends EventEmitter {
     this._prompt = String(prompt);
   }
 
+  getPrompt() {
+    return this._prompt;
+  }
+
+  // The cursor's position (relative to the start of the prompt), accounting for
+  // explicit newlines and terminal-width wrapping. Inquirer's ScreenManager reads
+  // this on every render to place the caret; without it `new ScreenManager` throws
+  // "rl.getCursorPos is not a function" (e.g. `npm create hono`'s prompts). One
+  // column per code point (no East-Asian-width table) is close enough for the
+  // ASCII prompts these libraries draw.
+  getCursorPos() {
+    const cols = this.output?.columns || 80;
+    const str = this._prompt + this.line.slice(0, this.cursor);
+    let rows = 0;
+    let col = 0;
+    for (const ch of str) {
+      if (ch === "\n") {
+        rows++;
+        col = 0;
+      } else {
+        col++;
+        if (col >= cols) { // wrap to the next display row at the right edge
+          rows++;
+          col = 0;
+        }
+      }
+    }
+    return { cols: col, rows };
+  }
+
   prompt(preserveCursor) {
     writeOut(this.output, this._prompt);
     if (!preserveCursor) this.emit("prompt");
