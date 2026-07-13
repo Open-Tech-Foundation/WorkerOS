@@ -879,23 +879,37 @@ function handleSyscall(pid, msg) {
         break; // reply happens asynchronously above
       }
       case "spawnChild": {
-        // node:child_process streaming spawn: launch `argv` as a real, headless
-        // child process (not in the terminal foreground) whose stdout/stderr are
-        // streamed *incrementally* back to this (parent) process's worker as
-        // CHILD_STDOUT/CHILD_STDERR, and whose exit posts CHILD_EXIT. stdin is a
-        // temp VFS file seeded from `args.input` — always written (empty if none)
-        // so a child that reads stdin sees a clean EOF instead of blocking on the
-        // shared terminal. cwd/env come straight from the caller (no shell).
+        // node:child_process streaming spawn: launch `argv` as a real child whose
+        // exit posts CHILD_EXIT. Each stdio fd follows the caller's `args.stdio`
+        // plan (Node semantics), per descriptor:
+        //   • 'pipe'    — stdout/stderr stream *incrementally* back to this (parent)
+        //                 worker as CHILD_STDOUT/CHILD_STDERR; stdin is a temp VFS
+        //                 file seeded from `args.input` (empty ⇒ clean EOF).
+        //   • 'inherit' — the child shares this controlling terminal: its output
+        //                 goes straight to the display and its stdin reads the TTY,
+        //                 so an interactive tool (e.g. `create-vite`, run via npm's
+        //                 stdio:'inherit' path) can prompt. It joins the foreground
+        //                 pipeline so ^C reaches it and termios is restored on exit.
+        //   • 'ignore'  — output discarded; stdin is an immediate EOF.
+        // cwd/env come straight from the caller (no shell).
+        const stdio = args.stdio || ["pipe", "pipe", "pipe"];
         const parentRec = programs.get(pid);
         const parentWorker = parentRec && parentRec.worker;
-        const tmp = "/tmp/.cp-in-" + childTmpSeq++;
+
+        // stdin: 'inherit' reads the terminal directly; otherwise a temp VFS file
+        // (seeded from `input` for a pipe, empty for 'ignore') gives a clean EOF.
         let stdin = { kind: "inherit" };
-        try {
-          kernel.fs_write(tmp, args.input && args.input.length ? args.input : new Uint8Array(0));
-          stdin = { kind: "file", path: tmp, mode: "read" };
-        } catch { /* /tmp missing → fall back to inherit */ }
+        let tmp = null;
+        if (stdio[0] !== "inherit") {
+          tmp = "/tmp/.cp-in-" + childTmpSeq++;
+          const seed = stdio[0] === "pipe" && args.input && args.input.length ? args.input : new Uint8Array(0);
+          try {
+            kernel.fs_write(tmp, seed);
+            stdin = { kind: "file", path: tmp, mode: "read" };
+          } catch { tmp = null; /* /tmp missing → fall back to the terminal */ }
+        }
         const plan = { stdin, stdout: { kind: "inherit" }, stderr: { kind: "inherit" } };
-        const cleanup = () => { if (stdin.kind === "file") { try { kernel.sys_unlink(pid, tmp); } catch {} } };
+        const cleanup = () => { if (tmp) { try { kernel.sys_unlink(pid, tmp); } catch {} } };
         let spawned;
         try {
           spawned = spawnKernel(args.argv, args.env || {}, args.cwd || session.cwd, plan);
@@ -905,10 +919,18 @@ function handleSyscall(pid, msg) {
           break;
         }
         const childPid = spawned.pid;
-        const sink = {
-          stdout: (b) => parentWorker && parentWorker.postMessage({ type: MSG.CHILD_STDOUT, pid: childPid, data: b }),
-          stderr: (b) => parentWorker && parentWorker.postMessage({ type: MSG.CHILD_STDERR, pid: childPid, data: b }),
+        // A terminal-reading child is part of the foreground pipeline (^C + termios
+        // restore on exit, handled in handleExit).
+        if (stdio[0] === "inherit") foreground.add(childPid);
+        // Per-fd output routing: 'inherit' → the terminal display; 'pipe' → the
+        // parent worker's child streams; 'ignore' → dropped.
+        const route = (fd, msgType) => {
+          const mode = stdio[fd];
+          if (mode === "inherit") return (b) => termOut(crlf(b));
+          if (mode === "ignore") return () => {};
+          return (b) => parentWorker && parentWorker.postMessage({ type: msgType, pid: childPid, data: b });
         };
+        const sink = { stdout: route(1, MSG.CHILD_STDOUT), stderr: route(2, MSG.CHILD_STDERR) };
         startWorker(spawned, {
           argv: args.argv,
           env: args.env || {},

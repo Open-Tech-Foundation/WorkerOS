@@ -81,6 +81,20 @@ function normalizeOpts(options, callback) {
   return { options: options || {}, callback: typeof callback === "function" ? callback : undefined };
 }
 
+// Normalize Node's `stdio` option into a 3-entry [stdin, stdout, stderr] plan of
+// the modes the sandbox honors: 'pipe' (stream to/from the parent), 'inherit'
+// (share the parent's controlling terminal — an interactive child can prompt),
+// or 'ignore' (empty stdin / discarded output). A shorthand string applies to
+// all three; anything else we can't wire (a stream, an fd number, 'ipc') degrades
+// to 'pipe'. This is what `stdio: 'inherit'` — npm's own `foregroundChild` path —
+// needs so a scaffolder like `create-vite` reads and draws to the real terminal.
+function normalizeStdio(stdio) {
+  const one = (v) => (v === "inherit" || v === "ignore" ? v : "pipe");
+  if (typeof stdio === "string") return [one(stdio), one(stdio), one(stdio)];
+  if (Array.isArray(stdio)) return [one(stdio[0]), one(stdio[1]), one(stdio[2])];
+  return ["pipe", "pipe", "pipe"];
+}
+
 export function createChildProcess(sys = globalThis.sys) {
   let nextFakePid = 90000; // for the synchronous forms (no real pid surfaced)
   const children = new Map(); // real pid → live ChildProcess
@@ -121,6 +135,7 @@ export function createChildProcess(sys = globalThis.sys) {
       return dest;
     }
     _push(bytes) {
+      if (this._ended) return; // an inherited/closed stream never surfaces data
       if (!bytes || bytes.length === 0) return;
       this.emit("data", this._encoding ? Buffer.from(bytes).toString(this._encoding) : Buffer.from(bytes));
     }
@@ -175,12 +190,13 @@ export function createChildProcess(sys = globalThis.sys) {
   }
 
   class ChildProcess extends EventEmitter {
-    constructor() {
+    constructor(stdio) {
       super();
       this.pid = null;
       this.exitCode = null;
       this.signalCode = null;
       this.killed = false;
+      this._stdio = stdio || ["pipe", "pipe", "pipe"];
       this.stdout = new ChildStream();
       this.stderr = new ChildStream();
       let launch;
@@ -227,13 +243,21 @@ export function createChildProcess(sys = globalThis.sys) {
   // Launch a ChildProcess: gather its buffered stdin, ask the kernel to spawn it,
   // and register it so the dispatcher can route its streamed output + exit.
   async function launchChild(child, argv, options) {
-    const input = child.stdin._input();
+    const stdio = child._stdio;
+    // Only a piped stdin is fed from the buffered writes; 'inherit' reads the
+    // terminal and 'ignore' is an empty EOF (both handled kernel-side).
+    const input = stdio[0] === "pipe" ? child.stdin._input() : null;
     const env = options.env || globalThis.process?.env || {};
     const cwd = options.cwd != null ? String(options.cwd) : globalThis.process?.cwd?.() ?? sys.cwd;
     try {
-      const { pid } = await sys.spawnChild({ argv, env, cwd, input });
+      const { pid } = await sys.spawnChild({ argv, env, cwd, input, stdio });
       child.pid = pid;
       children.set(pid, child);
+      // A non-piped output fd never streams back as `data` (it went to the
+      // terminal, or was discarded), so close those readable sides now — Node
+      // reports them as `null`; ending them keeps any `end`/`close` listener honest.
+      if (stdio[1] !== "pipe") child.stdout._end();
+      if (stdio[2] !== "pipe") child.stderr._end();
       child.emit("spawn");
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
@@ -249,7 +273,7 @@ export function createChildProcess(sys = globalThis.sys) {
   function spawn(command, args, options) {
     const n = normalizeArgs(args, options, undefined);
     const argv = buildArgv(command, n.args, n.options);
-    const child = new ChildProcess();
+    const child = new ChildProcess(normalizeStdio(n.options.stdio));
     // Hold /bin/node's event loop open from the moment spawn() is called — *before*
     // the deferred launch below — so a `spawn()` right after an awaited child (whose
     // exit dropped the ref count to 0) doesn't let the process go idle and exit in

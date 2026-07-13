@@ -17,9 +17,9 @@ function fakeSys(respond) {
   return {
     calls,
     onChildEvent: (cb) => { dispatch = cb; },
-    spawnChild: async ({ argv, env, cwd, input }) => {
+    spawnChild: async ({ argv, env, cwd, input, stdio }) => {
       const line = argv.join(" ");
-      calls.push({ argv, line, env, cwd, input: input ? dec.decode(input) : null });
+      calls.push({ argv, line, env, cwd, stdio, input: input ? dec.decode(input) : null });
       const r = respond(line, input) || {};
       if (r.throw) throw new Error(r.throw);
       const pid = 1000 + calls.length;
@@ -185,6 +185,58 @@ test("spawn emits 'error' when the kernel can't spawn the child", async () => {
   const child = cp.spawn("does-not-exist");
   const err = await new Promise((resolve) => child.on("error", resolve));
   assert.match(err.message, /ENOENT/);
+});
+
+test("spawn defaults to a piped stdio plan", async () => {
+  const sys = fakeSys(() => ({ stdout: "" }));
+  const cp = createChildProcess(sys);
+  const child = cp.spawn("ls");
+  await new Promise((resolve) => child.on("close", resolve));
+  assert.deepEqual(sys.calls[0].stdio, ["pipe", "pipe", "pipe"]);
+});
+
+test("stdio:'inherit' passes an all-inherit plan and doesn't feed buffered stdin", async () => {
+  const sys = fakeSys(() => ({ stdout: "" }));
+  const cp = createChildProcess(sys);
+  // npm's foregroundChild path: run a scaffolder sharing the terminal.
+  const child = cp.spawn("sh", ["-c", "create-vite"], { stdio: "inherit" });
+  // Even if something writes to stdin, an inherited fd0 reads the terminal, not
+  // this buffer — so no `input` is sent to the kernel.
+  child.stdin.write("ignored");
+  child.stdin.end();
+  await new Promise((resolve) => child.on("close", resolve));
+  assert.deepEqual(sys.calls[0].stdio, ["inherit", "inherit", "inherit"]);
+  assert.equal(sys.calls[0].input, null);
+});
+
+test("inherited output streams end without emitting data (they go to the terminal)", async () => {
+  // The kernel routes an inherited fd's output to the display, never back as a
+  // CHILD_STDOUT `data` event — so the readable side just ends.
+  const sys = fakeSys(() => ({ stdout: "should-not-surface", stderr: "nor-this" }));
+  const cp = createChildProcess(sys);
+  const child = cp.spawn("tool", [], { stdio: ["ignore", "inherit", "inherit"] });
+  let sawData = false;
+  child.stdout.on("data", () => (sawData = true));
+  child.stderr.on("data", () => (sawData = true));
+  const ended = Promise.all([
+    new Promise((r) => child.stdout.on("end", r)),
+    new Promise((r) => child.stderr.on("end", r)),
+  ]);
+  await new Promise((resolve) => child.on("close", resolve));
+  await ended;
+  assert.equal(sawData, false);
+  assert.deepEqual(sys.calls[0].stdio, ["ignore", "inherit", "inherit"]);
+});
+
+test("a mixed stdio array keeps piped fds streaming", async () => {
+  const sys = fakeSys(() => ({ stdout: "hi\n" }));
+  const cp = createChildProcess(sys);
+  const child = cp.spawn("tool", [], { stdio: ["inherit", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (d) => (out += dec.decode(d)));
+  await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(out, "hi\n");
+  assert.deepEqual(sys.calls[0].stdio, ["inherit", "pipe", "ignore"]);
 });
 
 test("fork runs `node <module>` with no IPC channel", async () => {

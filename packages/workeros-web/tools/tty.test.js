@@ -321,3 +321,58 @@ test("echo -e emits real ANSI escapes to the terminal stream", opts, async () =>
   // backslash-e. (The command-echo line still shows the literal text the user typed.)
   assert.ok(buf.includes("\x1b[31mRED\x1b[0m"), "output carries a real ANSI SGR sequence");
 });
+
+test("child_process spawn stdio:'inherit' shares the terminal both ways", opts, async () => {
+  // npm's `foregroundChild` path (how `npm create vite` runs the scaffolder):
+  // a child spawned with stdio:'inherit' must write its prompt straight to the
+  // display and read the user's keystrokes from the controlling terminal — not
+  // through the parent's captured pipe (which would swallow the prompt and hand
+  // the child an instant-EOF stdin). This drives that end to end.
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    // The child: print a prompt, then block-read one line of stdin and echo it.
+    await os.fs.write(
+      "/child.js",
+      [
+        "import { readSync } from 'node:fs';",
+        "process.stdout.write('CHILD-PROMPT>');",
+        "const b = Buffer.alloc(1024);",
+        "const n = readSync(0, b, 0, 1024);",
+        "process.stdout.write('CHILD-GOT[' + b.slice(0, n).toString().trim() + ']\\n');",
+      ].join("\n"),
+    );
+    // The parent: spawn the child sharing this terminal, and wait for it.
+    await os.fs.write(
+      "/driver.js",
+      [
+        "import { spawn } from 'node:child_process';",
+        "const c = spawn('node', ['/child.js'], { stdio: 'inherit' });",
+        "await new Promise((r) => c.on('close', r));",
+        "process.stdout.write('DRIVER-DONE\\n');",
+      ].join("\n"),
+    );
+    os.startTerminal();
+    const waitFor = async (s, ms = 12000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out));
+    };
+    await waitFor("$");
+    os.input("node /driver.js\r");
+    await waitFor("CHILD-PROMPT>"); // the child's output reached the display (inherit stdout)
+    os.input("hello\r");
+    await waitFor("CHILD-GOT[hello]"); // the child read the typed line (inherit stdin)
+    await waitFor("DRIVER-DONE"); // parent saw the child close
+    return out;
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.match(buf, /CHILD-PROMPT>/, "the inherited-stdout child prompt reached the terminal");
+  assert.match(buf, /CHILD-GOT\[hello\]/, "the inherited-stdin child read the terminal line");
+  assert.match(buf, /DRIVER-DONE/, "the parent observed the child's exit");
+});
