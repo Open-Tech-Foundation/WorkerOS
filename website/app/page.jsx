@@ -1,31 +1,156 @@
 import { Link } from "@opentf/web";
 
+// The kernel runtime is served (unbundled) from /workeros/... by the sync step
+// (tools/sync-runtime.mjs → public/). Load it with a hidden dynamic import so the
+// site bundler leaves the worker/wasm graph untouched. Same approach as the
+// full playground (app/playground/page.jsx), reused here to boot a live shell in
+// the hero.
+const RUNTIME_URL = "/workeros/packages/workeros-web/src/index.js";
+const loadRuntime = new Function("u", "return import(u)");
+
+// Load a same-origin UMD script once; resolves when the global is installed.
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[data-src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.src = src;
+    s.dataset.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+function loadCss(href) {
+  if (document.querySelector(`link[href="${href}"]`)) return;
+  const l = document.createElement("link");
+  l.rel = "stylesheet";
+  l.href = href;
+  document.head.appendChild(l);
+}
+
 export default function Home() {
+  let statusText = $state("booting…");
+
+  // Captured after boot so the command chips can drive the same shell.
+  let osRef = null;
+  let termRef = null;
+
+  // Type a command into the live shell (chip click). `\r` submits it.
+  const runCmd = (cmd) => {
+    if (!osRef) return;
+    if (termRef) termRef.focus();
+    osRef.input(cmd + "\r");
+  };
+
+  // Refit the terminal to its container; a no-op until the kernel has booted.
+  let refit = () => {};
+  onResize(() => refit());
+
+  onMount(() => {
+    let os = null;
+    let term = null;
+
+    (async () => {
+      try {
+        loadCss("/vendor/xterm/xterm.css");
+        await loadScript("/vendor/xterm/xterm.js");
+        await loadScript("/vendor/xterm/addon-fit.js");
+
+        if (!window.crossOriginIsolated) statusText = "waiting for isolation…";
+        const { boot } = await loadRuntime(RUNTIME_URL);
+        os = await boot();
+        osRef = os;
+
+        const el = document.getElementById("hero-term");
+        term = new window.Terminal({
+          convertEol: false,
+          cursorBlink: true,
+          fontFamily:
+            'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+          fontSize: 13,
+          theme: {
+            background: "#0b0c0f",
+            foreground: "#d7dbe4",
+            cursor: "#7c9cff",
+            selectionBackground: "#2a3350",
+          },
+        });
+        const fit = new window.FitAddon.FitAddon();
+        term.loadAddon(fit);
+        term.open(el);
+        termRef = term;
+        fit.fit();
+
+        os.onOutput((bytes) => term.write(bytes));
+        term.onData((data) => os.input(data));
+
+        let lastRows = 0;
+        let lastCols = 0;
+        refit = () => {
+          try {
+            fit.fit();
+            if (term.rows !== lastRows || term.cols !== lastCols) {
+              lastRows = term.rows;
+              lastCols = term.cols;
+              os.resize(term.rows, term.cols);
+            }
+          } catch {}
+        };
+        refit();
+
+        statusText = `${os.version} · wsh`;
+        os.startTerminal();
+      } catch (err) {
+        statusText = "boot failed";
+        const msg = `boot failed: ${err?.message ?? err}\r\n`;
+        if (term) term.write(msg);
+        else {
+          const el = document.getElementById("hero-term");
+          if (el) el.textContent = msg;
+        }
+      }
+    })();
+  });
+
   return (
     <>
       {/* ---------------- hero ---------------- */}
       <section class="hero">
-        <div class="container">
-          <span class="eyebrow">
-            <span class="dot" /> M3 — usable shell reached
-          </span>
-          <h1>
-            An operating system that boots in a <span class="grad">Web Worker</span>.
-          </h1>
-          <p class="lead">
-            WorkerOS is a language-agnostic OS personality whose executable format is
-            JavaScript or WASM instead of native binaries — and whose “CPU” is the
-            host’s own JS/WASM engine. The kernel is written in Rust, compiled to
-            WASM, and is the sole authority for the VFS, processes, and capabilities.
-          </p>
-          <div class="hero-cta">
-            <Link href="/playground" class="btn btn-primary">
-              Launch the playground <span class="arrow">→</span>
-            </Link>
+        <div class="container hero-grid">
+          <div class="hero-copy">
+            <h1>
+              An operating system that boots in a{" "}
+              <span class="grad">Web Worker</span>.
+            </h1>
+            <p class="lead">
+              A real kernel running real processes — where JS and WASM are the
+              native executable format. POSIX-style coreutils and bash-like scripting.
+            </p>
           </div>
-          <div class="quickstart">
-            <span class="prompt">$</span>
-            <span class="cmd">echo hi | cat &amp;&amp; ls /sbin &amp;&amp; ps</span>
+
+          <div class="hero-demo">
+            <div class="term-window">
+              <div class="code-bar">
+                <span class="dots"><i /><i /><i /></span>
+                <span class="file">wsh — WorkerOS</span>
+                <span class="term-status">{statusText}</span>
+              </div>
+              <div id="hero-term" class="hero-term-screen" />
+            </div>
+            <div class="term-cmds">
+              <span class="term-cmds-label">Try</span>
+              <button class="cmd-chip" onclick={() => runCmd("ls /")}>ls /</button>
+              <button class="cmd-chip" onclick={() => runCmd("echo hi | cat")}>echo hi | cat</button>
+              <button class="cmd-chip" onclick={() => runCmd("ps")}>ps</button>
+              <button class="cmd-chip" onclick={() => runCmd("uname -a")}>uname -a</button>
+              <button
+                class="cmd-chip"
+                onclick={() => runCmd(`node -p "require('crypto').randomUUID()"`)}
+              >
+                node -p "require('crypto').randomUUID()"
+              </button>
+            </div>
           </div>
         </div>
       </section>
@@ -68,16 +193,26 @@ export default function Home() {
               <h3>A bash-flavored shell</h3>
               <p>
                 <code>wsh</code> supports pipes, redirects, <code>&amp;&amp;</code>/
-                <code>||</code>/<code>;</code>, globbing, background jobs, and{" "}
-                <code>cd</code>.
+                <code>||</code>/<code>;</code>, globbing, background jobs,{" "}
+                <code>if</code>/<code>for</code>/<code>while</code>, and functions.
               </p>
             </div>
             <div class="card">
               <span class="ico">📦</span>
-              <h3>JS or WASM executables</h3>
+              <h3>npm + node, for real</h3>
               <p>
-                The executable format is a module. <code>import</code> is resolved by
-                the kernel, so programs load their dependencies through real syscalls.
+                <code>npm install</code> fetches real registry tarballs — semver +
+                transitive deps — into <code>node_modules</code>; <code>node app.js</code>{" "}
+                runs CommonJS/ESM that <code>require</code>/<code>import</code> them.
+              </p>
+            </div>
+            <div class="card">
+              <span class="ico">🧊</span>
+              <h3>Unmodified WASI binaries</h3>
+              <p>
+                A <code>wasm32-wasip1</code> binary runs as a real process — stdio,
+                args/env, clocks, <code>proc_exit</code>, and blocking VFS +{" "}
+                <code>stdin</code> I/O over a SharedArrayBuffer syscall channel.
               </p>
             </div>
             <div class="card">
@@ -136,48 +271,6 @@ await os.`}<span class="f">exec</span>{`(`}<span class="s">"cat /hello.txt | cat
 const procs = await os.`}<span class="f">ps</span>{`();`}
             </pre>
           </div>
-        </div>
-      </section>
-
-      {/* ---------------- milestones ---------------- */}
-      <section class="section" id="milestones">
-        <div class="container">
-          <div class="section-head">
-            <p class="kicker">Roadmap</p>
-            <h2>Where WorkerOS is today.</h2>
-          </div>
-
-          <table class="mtable">
-            <thead>
-              <tr>
-                <th>Milestone</th>
-                <th>Scope</th>
-                <th>State</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>M1 — Boot</td>
-                <td>Kernel boots, VFS + WASI-shaped syscall spine</td>
-                <td><span class="pill done">✓ done</span></td>
-              </tr>
-              <tr>
-                <td>M2 — Run JS (MVP)</td>
-                <td>spawn / run / kill JS, concurrent, kernel-resolved import</td>
-                <td><span class="pill done">✓ done</span></td>
-              </tr>
-              <tr>
-                <td>M3 — Usable shell</td>
-                <td>wsh (pipes, redirects, &amp;&amp;/||, glob, &amp;), IPC, coreutils, ps</td>
-                <td><span class="pill done">✓ done</span></td>
-              </tr>
-              <tr>
-                <td>M4+ — Beyond</td>
-                <td>WASI binaries, npm, preview, persistence</td>
-                <td><span class="pill wip">in progress</span></td>
-              </tr>
-            </tbody>
-          </table>
         </div>
       </section>
 

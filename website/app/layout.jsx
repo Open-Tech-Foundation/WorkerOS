@@ -6,7 +6,6 @@ export default function RootLayout({ children }) {
       <header class="nav">
         <div class="container nav-inner">
           <Link href="/" class="brand">
-            <span class="brand-mark">W</span>
             <span>Worker<b>OS</b></span>
           </Link>
           <span class="nav-spacer" />
@@ -35,7 +34,9 @@ export default function RootLayout({ children }) {
       <footer class="footer">
         <div class="container footer-inner">
           <span>
-            WorkerOS — an OS personality that boots in a Web Worker. Apache-2.0.
+            <a href="https://opentechf.org" target="_blank" rel="noreferrer">
+              Open Tech Foundation
+            </a>
           </span>
           <span>
             Built with{" "}

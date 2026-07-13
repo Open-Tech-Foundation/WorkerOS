@@ -7,6 +7,31 @@ Notable changes to the WorkerOS website + live playground, built with the
 
 ## [Unreleased]
 
+### Changed
+- **Hero is now a live shell.** The homepage hero was a single centered column
+  with a static one-line `quickstart`. It is now a two-column layout: copy on the
+  left, and on the right a **real booted WorkerOS terminal** in a window frame —
+  the same Rust→WASM kernel + xterm path as the full playground, embedded inline.
+  One-click chips (`ls /`, `echo hi | cat`, `ps`, `uname -a`, and a Node one-liner
+  `node -p "require('crypto').randomUUID()"`) type commands into the live shell so a
+  visitor can try the OS — coreutils, pipes, the process table, and real `node`
+  execution — without leaving the landing page.
+  Verified end-to-end in headless Chromium (cross-origin isolated; boots to a
+  `/ $` prompt; the `ps` chip runs and streams output).
+- **Feature grid updated to the current runtime.** Added an *npm + node, for real*
+  card (registry tarballs, semver + transitive deps, `node app.js` running
+  CJS/ESM) and an *Unmodified WASI binaries* card (stdio/exit + blocking
+  VFS/`stdin` over the SharedArrayBuffer syscall channel).
+- **Hero lead reworded** — dropped the "language-agnostic" framing and the long
+  executable-format explanation for a two-line description; the meta description in
+  `index.html` was updated to match.
+
+### Removed
+- **Static `quickstart` command line** in the hero — superseded by the live shell.
+- **Roadmap / milestone table dropped from the landing page.** The homepage now
+  flows hero → what it is → architecture → CTA; the phase-by-phase status lives in
+  [`PLAN.md`](../PLAN.md) rather than on the marketing page.
+
 ### Added
 - **Landing page** (`/`) — hero, feature grid, architecture code sample, and the
   milestone roadmap, in an OTF-flavored dark theme.
