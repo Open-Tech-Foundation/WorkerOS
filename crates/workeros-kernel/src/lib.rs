@@ -36,7 +36,8 @@ use process::{Pid, ProcState, SpawnRequest};
 use resolver::{Interpreter, ModuleGraph, ResolveError, DEFAULT_PATH};
 use std::collections::BTreeMap;
 use syscall::{
-    Fd, PipeEnd, PipeId, PipeTable, ProcessCtx, ReadOutcome, RedirectMode, FD_STDERR, FD_STDOUT,
+    Fd, PipeEnd, PipeId, PipeTable, ProcessCtx, ReadOutcome, RedirectMode, WriteOutcome,
+    FD_STDERR, FD_STDOUT,
 };
 use tty::{Termios, Tty, TtyInput, TtyRead, Winsize};
 use vfs::{path, DirEntry, Metadata, OpenOptions, Vfs};
@@ -71,6 +72,10 @@ pub enum WriteEffect {
     Stderr(Vec<u8>),
     /// Bytes were written to a file in the VFS; nothing to forward.
     File { nwritten: usize },
+    /// Bytes were accepted by a pipe — `nwritten` may be *less* than offered
+    /// (the pipe buffer is bounded, ADR-023). The host must park the remainder
+    /// and retry as the reader drains; a guest never sees a short pipe write.
+    Pipe { nwritten: usize },
 }
 
 /// A successful spawn: the new pid, the interpreter to run under, the resolved
@@ -446,7 +451,13 @@ impl Kernel {
     /// file or pipe yields `File { nwritten }` (nothing to forward).
     pub fn sys_write(&mut self, pid: Pid, fd: Fd, data: &[u8]) -> SysResult<WriteEffect> {
         let ctx = self.contexts.get_mut(&pid).ok_or(Errno::Badf)?;
-        let n = ctx.fd_write(&mut self.vfs, &mut self.pipes, fd, data)?;
+        let outcome = ctx.fd_write(&mut self.vfs, &mut self.pipes, fd, data)?;
+        // A pipe write is reported as such: it is the one case that can be short
+        // (bounded buffer, ADR-023) and the host parks the remainder.
+        if let WriteOutcome::Pipe(nwritten) = outcome {
+            return Ok(WriteEffect::Pipe { nwritten });
+        }
+        let WriteOutcome::Wrote(n) = outcome else { unreachable!() };
         // Only an un-redirected terminal fd streams to the host: those keep bytes
         // in the ctx stdout/stderr buffers. A redirected fd 1/2 (file/pipe) leaves
         // them empty, so classify by whether the buffer actually grew.
@@ -1130,14 +1141,102 @@ mod tests {
             StdioPlan { stdin: StdioTarget::Pipe { id, end: PipeEnd::Read }, ..Default::default() },
         );
 
-        // Writing to the pipe is a File effect (nothing streams to the terminal).
-        assert_eq!(k.sys_write(w, FD_STDOUT, b"hello").unwrap(), WriteEffect::File { nwritten: 5 });
+        // Writing to the pipe is a Pipe effect (nothing streams to the terminal).
+        assert_eq!(k.sys_write(w, FD_STDOUT, b"hello").unwrap(), WriteEffect::Pipe { nwritten: 5 });
         assert_eq!(k.sys_read(r, 0, 16).unwrap(), ReadResult::Data(b"hello".to_vec()));
         // Drained, writer still alive → would block.
         assert_eq!(k.sys_read(r, 0, 16).unwrap(), ReadResult::WouldBlock);
         // Writer exits → reader sees EOF.
         k.mark_exited(w, 0);
         assert_eq!(k.sys_read(r, 0, 16).unwrap(), ReadResult::Eof);
+    }
+
+    #[test]
+    fn pipe_write_blocks_at_capacity_and_resumes_as_reader_drains() {
+        use syscall::PIPE_CAPACITY;
+        let mut k = boot();
+        let id = k.pipe_open();
+        let w = spawn_with(
+            &mut k,
+            "w.js",
+            StdioPlan { stdout: StdioTarget::Pipe { id, end: PipeEnd::Write }, ..Default::default() },
+        );
+        let r = spawn_with(
+            &mut k,
+            "r.js",
+            StdioPlan { stdin: StdioTarget::Pipe { id, end: PipeEnd::Read }, ..Default::default() },
+        );
+
+        // Fill to capacity in one go; a further write is accepted as 0 bytes
+        // ("park me"), never buffered beyond the cap (ADR-023).
+        let big = vec![b'x'; PIPE_CAPACITY + 1];
+        assert_eq!(
+            k.sys_write(w, FD_STDOUT, &big).unwrap(),
+            WriteEffect::Pipe { nwritten: PIPE_CAPACITY }
+        );
+        assert_eq!(k.sys_write(w, FD_STDOUT, b"y").unwrap(), WriteEffect::Pipe { nwritten: 0 });
+
+        // A reader draining frees exactly that much capacity for the retry.
+        assert_eq!(k.sys_read(r, 0, 1000).unwrap(), ReadResult::Data(vec![b'x'; 1000]));
+        assert_eq!(
+            k.sys_write(w, FD_STDOUT, &big).unwrap(),
+            WriteEffect::Pipe { nwritten: 1000 }
+        );
+    }
+
+    #[test]
+    fn pipe_write_is_epipe_after_the_last_reader_departs() {
+        let mut k = boot();
+        let id = k.pipe_open();
+        let w = spawn_with(
+            &mut k,
+            "w.js",
+            StdioPlan { stdout: StdioTarget::Pipe { id, end: PipeEnd::Write }, ..Default::default() },
+        );
+        let r = spawn_with(
+            &mut k,
+            "r.js",
+            StdioPlan { stdin: StdioTarget::Pipe { id, end: PipeEnd::Read }, ..Default::default() },
+        );
+
+        assert_eq!(k.sys_write(w, FD_STDOUT, b"early").unwrap(), WriteEffect::Pipe { nwritten: 5 });
+        // The reader exits (its fds close) → the pipe is broken for the writer:
+        // EPIPE, exactly the `yes | head -1` shape (ADR-023). Buffered bytes the
+        // reader never consumed do not resurrect the pipe.
+        k.mark_exited(r, 0);
+        assert_eq!(k.sys_write(w, FD_STDOUT, b"late"), Err(Errno::Pipe));
+    }
+
+    #[test]
+    fn pipe_ends_not_yet_attached_park_rather_than_finalize() {
+        // The shell wires pipeline ends one spawn at a time, so an eager peer
+        // must see would-block — not EOF (read side) or EPIPE (write side) —
+        // until the other end has *ever* attached.
+        let mut k = boot();
+
+        // Reader first, writer not attached yet: WouldBlock, not EOF.
+        let id = k.pipe_open();
+        let r = spawn_with(
+            &mut k,
+            "r.js",
+            StdioPlan { stdin: StdioTarget::Pipe { id, end: PipeEnd::Read }, ..Default::default() },
+        );
+        assert_eq!(k.sys_read(r, 0, 16).unwrap(), ReadResult::WouldBlock);
+
+        // Writer first, reader not attached yet: buffered, not EPIPE.
+        let id2 = k.pipe_open();
+        let w = spawn_with(
+            &mut k,
+            "w.js",
+            StdioPlan { stdout: StdioTarget::Pipe { id: id2, end: PipeEnd::Write }, ..Default::default() },
+        );
+        assert_eq!(k.sys_write(w, FD_STDOUT, b"eager").unwrap(), WriteEffect::Pipe { nwritten: 5 });
+        let r2 = spawn_with(
+            &mut k,
+            "r2.js",
+            StdioPlan { stdin: StdioTarget::Pipe { id: id2, end: PipeEnd::Read }, ..Default::default() },
+        );
+        assert_eq!(k.sys_read(r2, 0, 16).unwrap(), ReadResult::Data(b"eager".to_vec()));
     }
 
     #[test]

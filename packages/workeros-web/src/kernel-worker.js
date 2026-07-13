@@ -456,9 +456,11 @@ function handleExit(pid, code) {
   tracer.record("proc", pid, "exit", `code=${code}`);
   kernel.mark_exited(pid, code); // idempotent; closes its pipe/file fds → EOF downstream
   kernel.watchClosePid(pid); // drop this process's fs.watch registrations
-  retryPendingReads(); // downstream pipe readers may now see EOF
-  retrySyncPending();
-  retryInjectReads(); // an injected preview connection may now see EOF/data
+  // Its parked I/O dies with it; then downstream pipe readers may see EOF and
+  // upstream writers may see EPIPE — pump everything.
+  syncPendingWrites = syncPendingWrites.filter((w) => w.pid !== pid);
+  asyncWriteQueues.delete(pid);
+  pumpIo();
   kernel.reap(pid);
   rec.worker.terminate();
   programs.delete(pid);
@@ -494,9 +496,11 @@ function reply(pid, id, ok, payload) {
   });
 }
 
-/** Re-attempt parked pipe reads after the pipe state may have changed. */
+/** Re-attempt parked pipe reads after the pipe state may have changed.
+ *  Returns whether anything advanced (a parked read completed). */
 function retryPendingReads() {
-  if (pendingReads.length === 0) return;
+  if (pendingReads.length === 0) return false;
+  let progressed = false;
   const still = [];
   for (const pr of pendingReads) {
     const rec = programs.get(pr.pid);
@@ -506,17 +510,24 @@ function retryPendingReads() {
       res = kernel.sys_read(pr.pid, pr.fd, pr.max);
     } catch (e) {
       reply(pr.pid, pr.id, false, String(e.message || e));
+      progressed = true;
       continue;
     }
     if (res.status === "again") still.push(pr);
-    else reply(pr.pid, pr.id, true, res);
+    else {
+      reply(pr.pid, pr.id, true, res);
+      progressed = true;
+    }
   }
   pendingReads = still;
+  return progressed;
 }
 
-/** Re-attempt parked net accepts after a connection may have been queued. */
+/** Re-attempt parked net accepts after a connection may have been queued.
+ *  Returns whether anything advanced. */
 function retryPendingAccepts() {
-  if (pendingAccepts.length === 0) return;
+  if (pendingAccepts.length === 0) return false;
+  let progressed = false;
   const still = [];
   for (const pa of pendingAccepts) {
     const rec = programs.get(pa.pid);
@@ -526,12 +537,17 @@ function retryPendingAccepts() {
       res = kernel.net_accept(pa.pid, pa.listener);
     } catch (e) {
       reply(pa.pid, pa.id, false, String(e.message || e));
+      progressed = true;
       continue;
     }
     if (res.status === "again") still.push(pa);
-    else reply(pa.pid, pa.id, true, res);
+    else {
+      reply(pa.pid, pa.id, true, res);
+      progressed = true;
+    }
   }
   pendingAccepts = still;
+  return progressed;
 }
 
 /**
@@ -550,15 +566,23 @@ async function injectConnection(port, reqBytes) {
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
   }
-  // Deliver the request and wake the server's parked accept + reads.
-  try {
-    kernel.sys_write(injectorPid, conn.wfd, reqBytes);
-  } catch (e) {
-    return { ok: false, error: String((e && e.message) || e) };
+  // Deliver the request and wake the server's parked accept + reads. The pipe
+  // buffer is bounded (ADR-023), so a large body streams: write what fits, wake
+  // the server, and await a drain before writing more.
+  for (let off = 0; off < reqBytes.length; ) {
+    let eff;
+    try {
+      eff = kernel.sys_write(injectorPid, conn.wfd, off ? reqBytes.subarray(off) : reqBytes);
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+    off += eff.nwritten;
+    pumpIo();
+    if (off < reqBytes.length && eff.nwritten === 0) {
+      await new Promise((res) => injectWaiters.push(res)); // full: await a server read
+    }
   }
-  retryPendingAccepts();
-  retryPendingReads();
-  retrySyncPending();
+  pumpIo();
 
   // Read the response until EOF (the request carries `Connection: close`, so the
   // server closes its write end when done). Parks on "again" between server writes.
@@ -570,12 +594,17 @@ async function injectConnection(port, reqBytes) {
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e) };
     }
-    if (r.status === "data") { chunks.push(r.data); continue; }
+    if (r.status === "data") {
+      chunks.push(r.data);
+      pumpIo(); // drained capacity: a parked server write may proceed
+      continue;
+    }
     if (r.status === "eof") break;
     await new Promise((res) => injectWaiters.push(res)); // "again": await advance
   }
   try { kernel.sys_close(injectorPid, conn.wfd); } catch {}
   try { kernel.sys_close(injectorPid, conn.rfd); } catch {}
+  pumpIo(); // the closed client ends finalize the pipes for the server
 
   let n = 0;
   for (const c of chunks) n += c.length;
@@ -591,7 +620,8 @@ async function injectConnection(port, reqBytes) {
 let syncPending = [];
 
 function retrySyncPending() {
-  if (syncPending.length === 0) return;
+  if (syncPending.length === 0) return false;
+  let progressed = false;
   const still = [];
   for (const item of syncPending) {
     const rec = programs.get(item.pid);
@@ -601,12 +631,160 @@ function retrySyncPending() {
       res = kernel.sys_read(item.pid, item.req.fd, item.req.max);
     } catch (e) {
       writeResponse(rec.syncSab, -1, { error: String(e.message || e) });
+      progressed = true;
       continue;
     }
     if (res.status === "again") still.push(item);
-    else writeResponse(rec.syncSab, 0, res.status === "data" ? res.data : new Uint8Array(0));
+    else {
+      writeResponse(rec.syncSab, 0, res.status === "data" ? res.data : new Uint8Array(0));
+      progressed = true;
+    }
   }
   syncPending = still;
+  return progressed;
+}
+
+// ---- pipe writes: bounded buffers, parked writers, EPIPE (ADR-023) ----------
+//
+// The kernel accepts at most a pipe's free capacity per write (a short count,
+// `WriteEffect::Pipe`). The remainder parks here:
+//  - a *blocking* write (SAB sync channel) keeps the guest thread in
+//    `Atomics.wait` until every byte is accepted — POSIX blocking-write
+//    semantics; the response carries the full count, so guests never see a
+//    short pipe write;
+//  - a *fire-and-forget* write (async postMessage — TTY streams, plus any
+//    guest without the sync channel) queues its remainder per (pid, fd), and
+//    later writes append behind it so per-fd order is preserved.
+// Both drain in pumpIo() as readers consume. A write to a pipe whose last
+// reader is gone is EPIPE, with the POSIX default disposition: the writer is
+// killed with 128+SIGPIPE unless it asked to catch the signal — this is what
+// ends `yes | head -1`.
+
+// Parked blocking writes: { pid, fd, bytes, off }.
+let syncPendingWrites = [];
+// Fire-and-forget overflow, pid → Map(fd → [Uint8Array, ...]).
+const asyncWriteQueues = new Map();
+
+const SIGPIPE_EXIT = 128 + 13;
+
+function isEpipe(e) {
+  return /errno Pipe\b/.test(String((e && e.message) || e));
+}
+
+/** Apply the SIGPIPE disposition to a writer on a broken pipe. Returns true if
+ *  the process catches SIGPIPE (caller reports EPIPE to it); false if the
+ *  default killed it. */
+function breakPipe(pid) {
+  if (catches(pid, "SIGPIPE")) {
+    deliverSignal(pid, "SIGPIPE");
+    return true;
+  }
+  handleExit(pid, SIGPIPE_EXIT);
+  return false;
+}
+
+function enqueueAsyncWrite(pid, fd, bytes) {
+  let byFd = asyncWriteQueues.get(pid);
+  if (!byFd) asyncWriteQueues.set(pid, (byFd = new Map()));
+  let q = byFd.get(fd);
+  if (!q) byFd.set(fd, (q = []));
+  q.push(bytes);
+}
+
+/** Re-attempt parked pipe writes after a reader may have drained capacity.
+ *  Returns whether anything advanced. */
+function retryPendingWrites() {
+  let progressed = false;
+  if (syncPendingWrites.length > 0) {
+    const still = [];
+    for (const item of syncPendingWrites) {
+      const rec = programs.get(item.pid);
+      if (!rec || rec.done) continue;
+      let broke = null;
+      try {
+        while (item.off < item.bytes.length) {
+          const eff = kernel.sys_write(item.pid, item.fd, item.bytes.subarray(item.off));
+          if (eff.nwritten === 0) break;
+          item.off += eff.nwritten;
+          progressed = true;
+        }
+      } catch (e) {
+        broke = e;
+      }
+      if (broke) {
+        progressed = true;
+        if (!isEpipe(broke)) {
+          writeResponse(rec.syncSab, -1, { error: String(broke.message || broke) });
+        } else if (item.off > 0) {
+          // Some bytes were accepted before the pipe broke: a short write
+          // (POSIX); the *next* write will observe EPIPE.
+          writeResponse(rec.syncSab, 0, { nwritten: item.off });
+        } else if (breakPipe(item.pid)) {
+          writeResponse(rec.syncSab, -1, { error: "errno Pipe (64)" });
+        }
+        continue;
+      }
+      if (item.off < item.bytes.length) still.push(item);
+      else {
+        writeResponse(rec.syncSab, 0, { nwritten: item.bytes.length });
+        progressed = true;
+      }
+    }
+    syncPendingWrites = still;
+  }
+  for (const [pid, byFd] of [...asyncWriteQueues]) {
+    const rec = programs.get(pid);
+    if (!rec || rec.done) {
+      asyncWriteQueues.delete(pid);
+      continue;
+    }
+    for (const [fd, q] of [...byFd]) {
+      while (q.length > 0) {
+        let eff;
+        try {
+          eff = kernel.sys_write(pid, fd, q[0]);
+        } catch (e) {
+          if (isEpipe(e)) breakPipe(pid); // no reply channel: bytes are dropped
+          q.length = 0;
+          progressed = true;
+          break;
+        }
+        if (eff.nwritten === 0) break;
+        progressed = true;
+        if (eff.nwritten < q[0].length) {
+          q[0] = q[0].subarray(eff.nwritten);
+          break;
+        }
+        q.shift();
+      }
+      if (q.length === 0) byFd.delete(fd);
+    }
+    if (byFd.size === 0) asyncWriteQueues.delete(pid);
+  }
+  return progressed;
+}
+
+// One pump for every parked-I/O list. Any event that can advance a pipe (a
+// write, a read, a close, an exit, an injected connection) calls this; it loops
+// until no list advances, so a chain like "parked write fills pipe → parked
+// read drains it → write completes" settles in one call. Re-entrant calls
+// (e.g. handleExit fired by a SIGPIPE kill mid-pump) fold into the outer loop.
+let pumping = false;
+function pumpIo() {
+  if (pumping) return;
+  pumping = true;
+  try {
+    for (;;) {
+      const advanced =
+        // Bitwise-or on purpose: every retry list must run each round (|| would
+        // short-circuit and starve the later lists).
+        retryPendingWrites() | retryPendingReads() | retrySyncPending() | retryPendingAccepts();
+      retryInjectReads(); // promise resolvers; they re-enter via their own awaits
+      if (!advanced) break;
+    }
+  } finally {
+    pumping = false;
+  }
 }
 
 /** Service one synchronous syscall request sitting in a process's SAB. */
@@ -633,20 +811,36 @@ function serviceSync(pid) {
           return;
         }
         writeResponse(rec.syncSab, 0, res.status === "data" ? res.data : new Uint8Array(0));
+        pumpIo(); // a pipe read frees capacity → parked writers may proceed
         break;
       }
       case "write": {
         // Read the payload bytes before writing the response overwrites the SAB.
         const bytes = requestBytes(rec.syncSab);
-        const eff = kernel.sys_write(pid, req.fd, bytes);
-        // A write to an un-redirected terminal fd streams to the host; a file/pipe
+        let eff;
+        try {
+          eff = kernel.sys_write(pid, req.fd, bytes);
+        } catch (e) {
+          if (!isEpipe(e)) throw e; // ordinary errno: outer catch responds
+          // Broken pipe: apply the SIGPIPE disposition. If the default killed
+          // the process, its worker is gone — no response to write.
+          if (breakPipe(pid)) writeResponse(rec.syncSab, -1, { error: "errno Pipe (64)" });
+          return;
+        }
+        // A write to an un-redirected terminal fd streams to the host; a file
         // write just reports nwritten. (Mirrors the async `write` handler.)
         if (eff.target === "stdout") rec.sink.stdout(bytes);
         else if (eff.target === "stderr") rec.sink.stderr(bytes);
-        retryPendingReads(); // a pipe may have gained data
-        retrySyncPending();
-        retryInjectReads();
+        if (eff.target === "pipe" && eff.nwritten < bytes.length) {
+          // Pipe full: park the remainder and leave the guest blocked in
+          // Atomics.wait until every byte is accepted (POSIX blocking write,
+          // ADR-023). The response is written by retryPendingWrites().
+          syncPendingWrites.push({ pid, fd: req.fd, bytes, off: eff.nwritten });
+          pumpIo();
+          return;
+        }
         writeResponse(rec.syncSab, 0, { nwritten: eff.nwritten });
+        pumpIo(); // a pipe may have gained data → wake parked readers
         break;
       }
       case "open":
@@ -655,6 +849,9 @@ function serviceSync(pid) {
       case "close":
         kernel.sys_close(pid, req.fd);
         writeResponse(rec.syncSab, 0, {});
+        // Closing a pipe end finalizes it for the peer: a drained reader now
+        // sees EOF, a parked writer EPIPE.
+        pumpIo();
         break;
       case "seek":
         writeResponse(rec.syncSab, 0, {
@@ -793,21 +990,41 @@ function handleSyscall(pid, msg) {
   try {
     switch (call) {
       case "write": {
-        const eff = kernel.sys_write(pid, args.fd, args.data);
+        // Fire-and-forget: no reply channel. Bytes a full pipe does not accept
+        // are queued per (pid, fd) and drained by the pump, so nothing is lost
+        // and per-fd order holds; EPIPE applies the SIGPIPE disposition.
+        const queued = asyncWriteQueues.get(pid)?.get(args.fd);
+        if (queued && queued.length > 0) {
+          queued.push(args.data); // order behind the parked remainder
+          pumpIo();
+          break;
+        }
+        let eff;
+        try {
+          eff = kernel.sys_write(pid, args.fd, args.data);
+        } catch (e) {
+          if (!isEpipe(e)) throw e;
+          breakPipe(pid); // caught: signal delivered, bytes dropped; else killed
+          break;
+        }
         const rec = programs.get(pid);
         if (rec) {
           if (eff.target === "stdout") rec.sink.stdout(args.data);
           else if (eff.target === "stderr") rec.sink.stderr(args.data);
         }
-        retryPendingReads(); // a pipe may have gained data
-        retrySyncPending();
-        retryInjectReads();
-        break; // fire-and-forget: no reply
+        if (eff.target === "pipe" && eff.nwritten < args.data.length) {
+          enqueueAsyncWrite(pid, args.fd, args.data.subarray(eff.nwritten));
+        }
+        pumpIo(); // a pipe may have gained data
+        break;
       }
       case "read": {
         const res = kernel.sys_read(pid, args.fd, args.max);
         if (res.status === "again") pendingReads.push({ pid, id, fd: args.fd, max: args.max });
-        else reply(pid, id, true, res);
+        else {
+          reply(pid, id, true, res);
+          pumpIo(); // a pipe read frees capacity → parked writers may proceed
+        }
         break;
       }
       case "open":
@@ -816,11 +1033,10 @@ function handleSyscall(pid, msg) {
       case "close":
         kernel.sys_close(pid, args.fd);
         reply(pid, id, true, null);
-        // Closing a pipe write end lets a drained reader observe EOF — wake any
-        // parked reader (a downstream guest, or the injector's response reader).
-        retryPendingReads();
-        retrySyncPending();
-        retryInjectReads();
+        // Closing a pipe end finalizes it for the peer: a drained reader now
+        // sees EOF (a downstream guest, or the injector's response reader), a
+        // parked writer EPIPE.
+        pumpIo();
         break;
       case "readdir":
         reply(pid, id, true, kernel.sys_readdir(pid, args.path));
@@ -842,7 +1058,7 @@ function handleSyscall(pid, msg) {
         kernel.tty_set_attr(args.attr || {});
         // Going raw makes any already-buffered bytes readable, and a program
         // returning to cooked may have a line waiting — nudge parked reads.
-        retryPendingReads();
+        pumpIo();
         reply(pid, id, true, null);
         break;
       case "stat":
@@ -1227,8 +1443,7 @@ self.onmessage = async (ev) => {
       case MSG.STDIN:
         tracer.record("stdin", msg.pid, "feed", `bytes=${msg.data?.length ?? 0}`);
         kernel.feed_stdin(msg.pid, msg.data);
-        retryPendingReads();
-        retrySyncPending();
+        pumpIo();
         break;
 
       case MSG.PREVIEW_REQUEST: {
@@ -1261,8 +1476,7 @@ self.onmessage = async (ev) => {
         else if (res.signal === "susp") onSusp();
         // A committed line may now unblock a foreground program's read, or the
         // `read` builtin waiting on the prompt.
-        retryPendingReads();
-        retrySyncPending();
+        pumpIo();
         pumpWaiter();
         break;
       }

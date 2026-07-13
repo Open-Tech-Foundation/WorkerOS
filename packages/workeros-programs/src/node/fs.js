@@ -52,6 +52,10 @@ const CODES = {
   Badf: "EBADF",
   Notsup: "ENOTSUP",
   Spipe: "ESPIPE",
+  // Substring order matters here: "Spipe" (capital S) never matches "Pipe", so
+  // both are safe under the includes() scan in toCode.
+  Pipe: "EPIPE",
+  EPIPE: "EPIPE",
 };
 
 function toCode(message) {

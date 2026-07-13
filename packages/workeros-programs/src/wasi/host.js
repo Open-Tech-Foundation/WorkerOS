@@ -18,8 +18,10 @@ const ERRNO_BADF = 8;
 const ERRNO_INVAL = 28;
 const ERRNO_IO = 29;
 const ERRNO_NOENT = 44;
+const ERRNO_NOSPC = 51;
 const ERRNO_NOSYS = 52;
 const ERRNO_NOTDIR = 54;
+const ERRNO_PIPE = 64;
 
 // __wasi_filetype_t
 const FILETYPE_CHARACTER_DEVICE = 2;
@@ -71,6 +73,8 @@ function mapErr(value) {
   if (/Noent/.test(m)) return ERRNO_NOENT;
   if (/Notdir/.test(m)) return ERRNO_NOTDIR;
   if (/Inval/.test(m)) return ERRNO_INVAL;
+  if (/Nospc/.test(m)) return ERRNO_NOSPC;
+  if (/errno Pipe\b|EPIPE/.test(m)) return ERRNO_PIPE;
   return ERRNO_IO;
 }
 
@@ -234,7 +238,15 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
         total += bufLen;
       }
       const info = fds.get(fd);
-      sys.write(info ? info.kfd : fd, concat(parts)); // fire-and-forget
+      // `sys.write` blocks until every byte is accepted (a full pipe parks this
+      // thread — ADR-023), so a short count is never reported. It throws on a
+      // kernel errno: EPIPE only reaches here if the guest catches SIGPIPE (the
+      // default disposition already terminated it), ENOSPC on a full VFS.
+      try {
+        sys.write(info ? info.kfd : fd, concat(parts));
+      } catch (e) {
+        return mapErr({ error: String((e && e.message) || e) });
+      }
       dv.setUint32(nwrittenPtr, total, true);
       return ERRNO_SUCCESS;
     },

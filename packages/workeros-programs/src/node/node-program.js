@@ -129,7 +129,10 @@ const tty = createTty({
   emitter,
 });
 
-const SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGWINCH", "SIGTSTP", "SIGHUP", "SIGUSR1", "SIGUSR2"]);
+// SIGPIPE: the kernel worker applies the POSIX default (kill, 128+13) to a
+// writer on a broken pipe unless it registers a handler here (ADR-023) — then
+// the write raises EPIPE instead and the handler is delivered cooperatively.
+const SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGWINCH", "SIGTSTP", "SIGHUP", "SIGPIPE", "SIGUSR1", "SIGUSR2"]);
 
 // `process.cwd()`/`chdir()`. The kernel owns the real cwd (set at spawn); we have
 // no chdir syscall yet, so this is a process-local view: it moves what the script

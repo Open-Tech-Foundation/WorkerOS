@@ -57,14 +57,19 @@ export function createShell({ kernel, startProcess, session, readLine }) {
   }
 
   // Run one external program with a resolved stdio plan; returns its exit code.
-  async function runExternal({ argv, env, cwd, stdin, redirects, out, err }) {
+  // `stdinPipe`/`stdoutPipe` (kernel PipeIds) wire a streaming pipeline stage
+  // (ADR-023); explicit redirects below still win over them, as in POSIX.
+  async function runExternal({ argv, env, cwd, stdin, stdinPipe, stdoutPipe, redirects, out, err }) {
     const plan = { stdin: { kind: "inherit" }, stdout: { kind: "inherit" }, stderr: { kind: "inherit" } };
     let outSink = out || (() => {});
     let errSink = err || (() => {});
     const temps = [];
 
-    // Provided stdin bytes (a pipe stage or `$()` feed) → a temp VFS file the
-    // process reads. Simple and reliable; avoids a live pipe from JS.
+    if (stdinPipe != null) plan.stdin = { kind: "pipe", id: stdinPipe, end: "read" };
+    if (stdoutPipe != null) plan.stdout = { kind: "pipe", id: stdoutPipe, end: "write" };
+
+    // Provided stdin bytes (a `$()` feed or collect-and-feed stage) → a temp VFS
+    // file the process reads. Simple and reliable; avoids a live pipe from JS.
     if (stdin && stdin.length) {
       const p = "/tmp/.wsh-in-" + tmpSeq++;
       try { kernel.fs_write(p, stdin); temps.push(p); plan.stdin = { kind: "file", path: p, mode: "read" }; } catch { /* /tmp missing */ }
@@ -109,6 +114,9 @@ export function createShell({ kernel, startProcess, session, readLine }) {
     // (ADR-012); the kernel serializes the AST to JSON and we hydrate it here.
     parse: (src) => JSON.parse(kernel.shell_parse(src)),
     runExternal,
+    // A kernel IPC pipe for a streaming pipeline stage (bounded, EPIPE-correct —
+    // ADR-023). Ends attach when the stages spawn with it in their stdio plans.
+    pipeOpen: () => kernel.pipe_open(),
     readFile: (path, cwd) => {
       try { return kernel.fs_read(absPath(cwd, path)); } catch { return null; }
     },

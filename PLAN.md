@@ -66,6 +66,14 @@ Conventions: **[MVP]** = required for the first usable milestone · **[post-MVP]
 
 - `wsh` (§10, ADR-012): argv, env assignment, `cd`/`pwd`, run program, exit codes → then pipes `|`, redirects `> >> <`, `&&`/`||`/`;`, globbing, quoting.
 - IPC pipes via `otf:ipc_open` so `A | B` streams concurrently (§6.3, ADR-006).
+  **✅ streaming + POSIX-shaped (ADR-023)** — pipes are bounded (64 KiB): a
+  writer into a full pipe blocks (parked host-side), a departed reader raises
+  `EPIPE` with the SIGPIPE default (kill, 128+13; catchable), so
+  `producer | head`-style pipelines terminate. All-external pipelines run
+  concurrently over kernel pipes (builtin stages keep collect-and-feed).
+  Native-tested (capacity/EPIPE/attach-order) + browser e2e
+  (`tools/pipe-backpressure.test.js`: termination, byte integrity across
+  park/drain cycles, caught-SIGPIPE delivery).
 - Coreutils as guest programs against the VFS: `ls cat cp mv rm mkdir echo pwd env true false`.
 - `ps` / `jobs` / background `&` reading the process table.
 - xterm-style terminal binding on the host. **✅ done** — a real **TTY layer**: the

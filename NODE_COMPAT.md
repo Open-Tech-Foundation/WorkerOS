@@ -4,6 +4,17 @@ WorkerOS targets the public JavaScript API of **Node.js v22.23.1 (Jod LTS)**.
 It does not embed Node or V8: `/bin/node` is a guest compatibility runtime over
 the WorkerOS kernel and the browser's JavaScript engine.
 
+## Known behavioral deviations
+
+- **Broken pipe (`EPIPE`/`SIGPIPE`, ADR-023).** Real Node ignores `SIGPIPE`; a
+  write to a departed pipe reader surfaces as an `EPIPE` `'error'` on the stream
+  (unhandled → crash, exit 1). WorkerOS currently leaves `/bin/node` on the
+  POSIX default disposition: an uncaught writer is killed with `128+13` (like a
+  plain C program). Pipelines terminate identically; only the writer's exit code
+  and error report differ. `process.on('SIGPIPE', …)` opts into delivery, after
+  which writes throw `EPIPE`. Matching Node exactly (ignore + stream `'error'`)
+  is a planned refinement of `node:tty`/`process.stdout`.
+
 ## Official test comparison
 
 The compatibility harness downloads selected files directly from the

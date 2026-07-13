@@ -32,11 +32,31 @@ function call(callName, args) {
   });
 }
 
-/** A fire-and-forget write. Ordering with later syscalls is preserved by the
- *  message queue, so a write followed by exit lands before the process closes. */
+// The blocking write primitive, installed once the sync channel exists (START).
+// Routing writes through the SAB gives them real POSIX semantics (ADR-023): a
+// write into a full pipe *blocks this thread* until the reader drains it, and a
+// write to a broken pipe applies the SIGPIPE disposition (default: the kernel
+// worker kills this process with 128+13; if caught, the call errors with EPIPE).
+// Terminal/file writes return immediately — only a full pipe ever parks.
+let syncWrite = null;
+// A safe per-write chunk: the sync channel payload is 1 MiB (minus the JSON
+// meta), and the kernel worker parks until a whole chunk is accepted — so
+// chunking loses nothing and keeps every request under the channel's capacity.
+const WRITE_CHUNK = 1 << 19; // 512 KiB
+
+/** Write `bytes` to `fd`, blocking (sync channel) until every byte is accepted.
+ *  Ordering with fire-and-forget syscalls is preserved: the SAB request is
+ *  announced by the same postMessage queue the async path uses. Falls back to a
+ *  fire-and-forget postMessage before START (no sync channel yet). */
 function writeBytes(fd, bytes) {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  kernel.postMessage({ type: MSG.SYSCALL, call: "write", args: { fd, data: u8 } });
+  if (!syncWrite) {
+    kernel.postMessage({ type: MSG.SYSCALL, call: "write", args: { fd, data: u8 } });
+    return u8.length;
+  }
+  for (let off = 0; off < u8.length; off += WRITE_CHUNK) {
+    syncWrite(fd, u8.subarray(off, Math.min(off + WRITE_CHUNK, u8.length)));
+  }
   return u8.length;
 }
 
@@ -355,6 +375,17 @@ self.onmessage = async (ev) => {
   // One synchronous-syscall channel per process (SAB + Atomics). Both the WASI
   // host and a JS guest's `sys.syncFs` block on it; only one guest runs at a time.
   const syncCall = makeSyncCaller(msg.syncSab, () => kernel.postMessage({ type: MSG.SYNC }));
+  // From here on, `sys.write` is a real blocking write (backpressure + EPIPE,
+  // ADR-023). A broken-pipe error only comes back if this process catches
+  // SIGPIPE — the default disposition already killed it otherwise.
+  syncWrite = (fd, chunk) => {
+    const r = syncCall("write", { fd }, false, chunk);
+    if (r.status < 0) {
+      const reason = (r.value && r.value.error) || "errno " + r.status;
+      throw new Error(/errno Pipe\b/.test(reason) ? "EPIPE: broken pipe, write" : reason);
+    }
+    return r.value ? r.value.nwritten : chunk.length;
+  };
   const sys = makeSys(msg, syncCall);
   installGlobals(msg, sys);
 

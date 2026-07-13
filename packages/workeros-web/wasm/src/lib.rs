@@ -52,7 +52,8 @@ struct SpawnDto {
 
 #[derive(Serialize)]
 struct WriteDto {
-    /// "stdout" | "stderr" | "file"
+    /// "stdout" | "stderr" | "file" | "pipe" — "pipe" may carry a *short*
+    /// `nwritten` (bounded buffer, ADR-023); the host parks the remainder.
     target: &'static str,
     nwritten: usize,
 }
@@ -428,6 +429,7 @@ impl WebKernel {
             WriteEffect::Stdout(b) => WriteDto { target: "stdout", nwritten: b.len() },
             WriteEffect::Stderr(b) => WriteDto { target: "stderr", nwritten: b.len() },
             WriteEffect::File { nwritten } => WriteDto { target: "file", nwritten },
+            WriteEffect::Pipe { nwritten } => WriteDto { target: "pipe", nwritten },
         };
         to_js(&dto)
     }

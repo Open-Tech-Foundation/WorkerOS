@@ -78,13 +78,38 @@ pub trait HostEnv {
     fn random(&self, buf: &mut [u8]);
 }
 
-/// A kernel IPC pipe: a byte buffer with a live-writer count. When the last
-/// writer closes, a drained reader observes [`ReadOutcome::Eof`] (§6.3).
+/// How many buffered bytes a pipe holds before writers block (ADR-023). Matches
+/// Linux's default pipe capacity. Bounds kernel memory per pipe: a fast producer
+/// feeding a slow consumer parks (host-side) instead of growing the buffer, and
+/// `A | B` streams in bounded chunks exactly as on a real OS.
+pub const PIPE_CAPACITY: usize = 64 * 1024;
+
+/// The result of a write: how the descriptor absorbed the bytes. The pipe case
+/// is separate because only a pipe can accept *fewer* bytes than offered (its
+/// buffer is bounded, ADR-023) — the host must park and retry the remainder
+/// rather than treat a short count as done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// Bytes accepted in full by a terminal stream or a VFS file.
+    Wrote(usize),
+    /// Bytes accepted by a pipe — possibly fewer than offered (0 when full).
+    Pipe(usize),
+}
+
+/// A kernel IPC pipe: a bounded byte buffer with live reader/writer counts. When
+/// the last writer closes, a drained reader observes [`ReadOutcome::Eof`]; when
+/// the last reader closes, a writer gets `EPIPE` (§6.3, ADR-023).
 #[derive(Debug)]
 struct Pipe {
     buffer: VecDeque<u8>,
     writers: u32,
     readers: u32,
+    /// Whether a writer/reader end was *ever* attached. Ends attach one spawn at
+    /// a time (the shell wires the writer before the reader), so "none attached
+    /// yet" must read as would-block — not EOF/EPIPE — or an eager peer races the
+    /// other end's spawn. Only an end that existed and then went away is final.
+    had_writer: bool,
+    had_reader: bool,
 }
 
 /// The table of live pipes (kernel-owned; shared across processes).
@@ -112,6 +137,8 @@ impl PipeTable {
                 buffer: VecDeque::new(),
                 writers: 0,
                 readers: 0,
+                had_writer: false,
+                had_reader: false,
             },
         );
         id
@@ -120,8 +147,14 @@ impl PipeTable {
     fn attach(&mut self, id: PipeId, end: PipeEnd) {
         if let Some(p) = self.pipes.get_mut(&id) {
             match end {
-                PipeEnd::Read => p.readers += 1,
-                PipeEnd::Write => p.writers += 1,
+                PipeEnd::Read => {
+                    p.readers += 1;
+                    p.had_reader = true;
+                }
+                PipeEnd::Write => {
+                    p.writers += 1;
+                    p.had_writer = true;
+                }
             }
         }
     }
@@ -138,16 +171,24 @@ impl PipeTable {
         }
     }
 
+    /// Write into a pipe, accepting at most the free capacity (ADR-023). Returns
+    /// the bytes accepted — possibly `0`, meaning the pipe is full and the caller
+    /// must retry once a reader drains it (the host parks the write). A pipe whose
+    /// last read end closed is broken: `EPIPE`, never silent buffering (INV-5).
     fn write(&mut self, id: PipeId, data: &[u8]) -> SysResult<usize> {
         let p = self.pipes.get_mut(&id).ok_or(Errno::Badf)?;
-        p.buffer.extend(data.iter().copied());
-        Ok(data.len())
+        if p.had_reader && p.readers == 0 {
+            return Err(Errno::Pipe);
+        }
+        let n = data.len().min(PIPE_CAPACITY.saturating_sub(p.buffer.len()));
+        p.buffer.extend(data[..n].iter().copied());
+        Ok(n)
     }
 
     fn read(&mut self, id: PipeId, buf: &mut [u8]) -> SysResult<ReadOutcome> {
         let p = self.pipes.get_mut(&id).ok_or(Errno::Badf)?;
         if p.buffer.is_empty() {
-            return Ok(if p.writers == 0 {
+            return Ok(if p.had_writer && p.writers == 0 {
                 ReadOutcome::Eof
             } else {
                 ReadOutcome::WouldBlock
@@ -445,28 +486,31 @@ impl ProcessCtx {
         }
     }
 
-    /// `fd_write`. Returns bytes written.
+    /// `fd_write`. Terminal streams and files accept everything (or error, e.g.
+    /// `ENOSPC`); a pipe accepts at most its free capacity — the [`WriteOutcome`]
+    /// tells the host which case it is, so a short pipe write can be parked and
+    /// retried instead of misread as a completed write (ADR-023).
     pub fn fd_write(
         &mut self,
         vfs: &mut dyn Vfs,
         pipes: &mut PipeTable,
         fd: Fd,
         data: &[u8],
-    ) -> SysResult<usize> {
+    ) -> SysResult<WriteOutcome> {
         match self.fds.get_mut(&fd) {
             Some(Handle::Stdout) => {
                 if !self.caps.stdout {
                     return Err(Errno::Badf);
                 }
                 self.stdout.extend_from_slice(data);
-                Ok(data.len())
+                Ok(WriteOutcome::Wrote(data.len()))
             }
             Some(Handle::Stderr) => {
                 if !self.caps.stderr {
                     return Err(Errno::Badf);
                 }
                 self.stderr.extend_from_slice(data);
-                Ok(data.len())
+                Ok(WriteOutcome::Wrote(data.len()))
             }
             Some(Handle::File { ino, cursor, path }) => {
                 let n = vfs.write_at(*ino, *cursor, data)?;
@@ -474,9 +518,11 @@ impl ProcessCtx {
                 if n > 0 {
                     vfs.note_event(path, crate::vfs::FsEventKind::Change);
                 }
-                Ok(n)
+                Ok(WriteOutcome::Wrote(n))
             }
-            Some(Handle::Pipe { id, end: PipeEnd::Write }) => pipes.write(*id, data),
+            Some(Handle::Pipe { id, end: PipeEnd::Write }) => {
+                pipes.write(*id, data).map(WriteOutcome::Pipe)
+            }
             Some(Handle::Pipe { end: PipeEnd::Read, .. })
             | Some(Handle::Stdin)
             | Some(Handle::Dir { .. }) => Err(Errno::Badf),
@@ -679,7 +725,7 @@ mod tests {
             .unwrap();
         assert!(fd >= FIRST_FILE_FD);
 
-        assert_eq!(p.fd_write(&mut vfs, &mut pipes, fd, b"hello world").unwrap(), 11);
+        assert_eq!(p.fd_write(&mut vfs, &mut pipes, fd, b"hello world").unwrap(), WriteOutcome::Wrote(11));
         assert_eq!(p.fd_seek(&vfs, fd, 6, Whence::Set).unwrap(), 6);
         let mut buf = [0u8; 5];
         assert_eq!(p.fd_read(&vfs, &mut pipes, fd, &mut buf).unwrap(), ReadOutcome::Data(5));
@@ -735,8 +781,8 @@ mod tests {
         let mut vfs = MemVfs::new();
         let mut pipes = PipeTable::new();
         let mut p = ctx();
-        assert_eq!(p.fd_write(&mut vfs, &mut pipes, FD_STDOUT, b"out").unwrap(), 3);
-        assert_eq!(p.fd_write(&mut vfs, &mut pipes, FD_STDERR, b"err").unwrap(), 3);
+        assert_eq!(p.fd_write(&mut vfs, &mut pipes, FD_STDOUT, b"out").unwrap(), WriteOutcome::Wrote(3));
+        assert_eq!(p.fd_write(&mut vfs, &mut pipes, FD_STDERR, b"err").unwrap(), WriteOutcome::Wrote(3));
         assert_eq!(p.stdout, b"out");
         assert_eq!(p.stderr, b"err");
     }
@@ -784,7 +830,7 @@ mod tests {
         let mut pipes = PipeTable::new();
         let mut p = ctx();
         p.bind_stdio_file(&mut vfs, FD_STDOUT, "/out.txt", RedirectMode::Write).unwrap();
-        assert_eq!(p.fd_write(&mut vfs, &mut pipes, FD_STDOUT, b"to-file").unwrap(), 7);
+        assert_eq!(p.fd_write(&mut vfs, &mut pipes, FD_STDOUT, b"to-file").unwrap(), WriteOutcome::Wrote(7));
         assert!(p.stdout.is_empty(), "nothing streamed to the terminal");
         assert_eq!(vfs.stat("/out.txt").unwrap().size, 7);
     }
@@ -815,7 +861,7 @@ mod tests {
         let mut p = ctx();
         assert_eq!(p.fd_seek(&vfs, FD_STDOUT, 0, Whence::Set).unwrap_err(), Errno::Spipe);
         assert_eq!(p.fd_close(&mut vfs, &mut pipes, FD_STDOUT).unwrap_err(), Errno::Notsup);
-        assert_eq!(p.fd_write(&mut vfs, &mut pipes, FD_STDOUT, b"x").unwrap(), 1);
+        assert_eq!(p.fd_write(&mut vfs, &mut pipes, FD_STDOUT, b"x").unwrap(), WriteOutcome::Wrote(1));
     }
 
     #[test]

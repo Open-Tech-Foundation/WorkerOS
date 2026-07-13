@@ -161,6 +161,8 @@ Everything else (networking, preview, GPU/canvas, live-reload) is **deferred** t
 
 Pipes and channels are the kernel's own construct (WASI has none). An `otf:ipc_open` returns an fd that behaves like any other under `fd_read`/`fd_write`, so `A | B` is just "B's stdin fd is wired to A's stdout channel." Cross-worker transport is a SAB ring buffer; the shell sets the wiring up at spawn time.
 
+Pipes are **bounded and POSIX-shaped** (ADR-023): a pipe buffers at most 64 KiB (`PIPE_CAPACITY`), a writer into a full pipe **blocks** (its worker thread parks in `Atomics.wait` until the reader drains — real backpressure, not host-side buffering), and a write to a pipe whose last reader closed is **`EPIPE`** with the POSIX default **SIGPIPE** disposition (the writer is killed with `128+13` unless it catches the signal) — so `producer | head`-style pipelines terminate exactly as on Unix. All-external shell pipelines run concurrently over these kernel pipes; a pipeline stage that is a shell builtin falls back to buffered collect-and-feed.
+
 ---
 
 ## 7. Execution & module-loading handshake

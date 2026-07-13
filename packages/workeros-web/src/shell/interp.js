@@ -350,6 +350,14 @@ export function createInterpreter({ runtime, session }) {
     let code;
     if (cmds.length === 1) {
       code = await runCommand(cmds[0], io);
+    } else if (runtime.pipeOpen && cmds.every(isPlainExternal)) {
+      // (Guarded on the runtime hook so an embedder's reduced runtime — e.g.
+      // the interpreter unit tests' mock — keeps the collect-and-feed path.)
+      // All stages are external programs: run them *concurrently* over real
+      // kernel pipes (ADR-023). Streaming and bounded — a fast producer blocks
+      // when the pipe fills, and a stage whose reader exits gets EPIPE/SIGPIPE
+      // (so `producer | head`-style pipelines terminate), exactly like POSIX.
+      code = await runPipedExternals(cmds, io);
     } else {
       // "collect and feed": each stage's captured stdout becomes the next stdin.
       // Not concurrent/streaming, but lets builtins and externals interoperate.
@@ -368,6 +376,62 @@ export function createInterpreter({ runtime, session }) {
     if (pipeline.negate) code = code === 0 ? 1 : 0;
     state.status = code;
     return code;
+  }
+
+  /** The command name of a simple command when it is statically known (all
+   *  literal/single-quoted parts, no glob metachars) — else null. Used to pick
+   *  the streaming pipeline path without running expansions twice. */
+  function staticCommandName(cmd) {
+    if (cmd.type !== "simple" || !cmd.words || cmd.words.length === 0) return null;
+    let name = "";
+    for (const part of cmd.words[0].parts) {
+      if (part.kind === "lit" || part.kind === "sq") name += part.value;
+      else return null; // $var / $(...) command word: expansion decides — fall back
+    }
+    return /[*?[]/.test(name) ? null : name;
+  }
+
+  /** Whether a pipeline stage is certainly an external program (not a builtin,
+   *  function, or compound command). Conservative: unknown ⇒ false. */
+  function isPlainExternal(cmd) {
+    const name = staticCommandName(cmd);
+    return name !== null && !BUILTINS[name] && !state.funcs.has(name);
+  }
+
+  /** Run an all-external pipeline over kernel pipes, all stages concurrent.
+   *  Spawn order is writer-before-reader (the kernel treats a pipe end that was
+   *  never attached as "not final yet"). Exit code is the last stage's (no
+   *  pipefail). Stage k's stdout feeds k+1's stdin; redirects still win. */
+  async function runPipedExternals(cmds, io) {
+    const n = cmds.length;
+    const pipeIds = [];
+    for (let i = 0; i < n - 1; i++) pipeIds.push(runtime.pipeOpen());
+    const waits = [];
+    for (let i = 0; i < n; i++) {
+      const cmd = cmds[i];
+      // Per-stage expansion, exactly as runSimple's external branch (once).
+      const argv = [];
+      for (const w of cmd.words) argv.push(...(await expandWord(w, true)));
+      const localEnv = {};
+      for (const a of cmd.assigns) localEnv[a.name] = (await expandWord(a.word, false))[0];
+      const redirects = [];
+      for (const r of cmd.redirects || []) {
+        redirects.push({ fd: r.fd, op: r.op, target: (await expandWord(r.target, false))[0] });
+      }
+      const env = { ...Object.fromEntries(state.vars), ...envExports(), ...localEnv };
+      // Not awaited here: the process is spawned synchronously inside
+      // runExternal, so stage i (writer) attaches before i+1 (reader) and all
+      // stages run concurrently; only the exits are awaited together below.
+      waits.push(runtime.runExternal({
+        argv, env, cwd: session.cwd,
+        stdin: i === 0 && io.stdin ? io.stdin.readAll() : null,
+        stdinPipe: i > 0 ? pipeIds[i - 1] : null,
+        stdoutPipe: i < n - 1 ? pipeIds[i] : null,
+        redirects, out: io.out, err: io.err,
+      }));
+    }
+    const codes = await Promise.all(waits);
+    return codes[n - 1] | 0;
   }
 
   async function runCommand(cmd, io) {
