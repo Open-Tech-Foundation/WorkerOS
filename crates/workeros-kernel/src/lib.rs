@@ -88,6 +88,10 @@ pub struct Spawned {
     pub interpreter: Interpreter,
     pub graph: ModuleGraph,
     pub argv: Vec<String>,
+    /// The granted [`CapabilitySet::net_egress`] bit, echoed so the host can
+    /// enforce it at the program-worker boundary without a second lookup
+    /// (ADR-024). The kernel decided; the host is the mechanism.
+    pub net_egress: bool,
 }
 
 /// Why a spawn failed.
@@ -379,7 +383,7 @@ impl Kernel {
         env: Vec<(String, String)>,
         cwd: String,
         start_time: u64,
-        caps: CapabilitySet,
+        caps: Option<CapabilitySet>,
         ppid: Pid,
         plan: StdioPlan,
     ) -> Result<Spawned, SpawnError> {
@@ -389,6 +393,11 @@ impl Kernel {
         if self.processes.live_count() >= self.limits.max_procs {
             return Err(SpawnError::LimitExceeded);
         }
+        // Capabilities are inherited like POSIX credentials (ADR-024): `None`
+        // means "the parent's set" (a denied-network guest cannot shell out to
+        // regain it); an explicit set is host policy at the trust boundary. An
+        // unknown/host ppid inherits the ordinary-program default.
+        let caps = caps.unwrap_or_else(|| self.child_caps(ppid));
         let inv = resolver::resolve_invocation(&self.vfs, &cwd, &argv, &env, DEFAULT_PATH)
             .map_err(SpawnError::Resolve)?;
         let graph = resolver::resolve_graph(&self.vfs, &inv.entry).map_err(SpawnError::Resolve)?;
@@ -410,13 +419,25 @@ impl Kernel {
             self.processes.remove(pid);
             return Err(SpawnError::Resolve(ResolveError::Io(e)));
         }
+        let net_egress = ctx.caps.net_egress;
         self.contexts.insert(pid, ctx);
         Ok(Spawned {
             pid,
             interpreter: inv.interpreter,
             graph,
             argv,
+            net_egress,
         })
+    }
+
+    /// The capability set a child of `ppid` inherits when the spawn names none
+    /// (ADR-024): the parent's live set, or the ordinary-program default when
+    /// the parent is unknown (a host/client spawn).
+    pub fn child_caps(&self, ppid: Pid) -> CapabilitySet {
+        self.contexts
+            .get(&ppid)
+            .map(|c| c.caps.clone())
+            .unwrap_or_default()
     }
 
     fn apply_stdio(
@@ -951,7 +972,7 @@ mod tests {
             vec![],
             "/".into(),
             0,
-            CapabilitySet::default(),
+            None,
             0,
             StdioPlan::default(),
         )
@@ -973,7 +994,7 @@ mod tests {
         // module (the entry) and never walks an import graph.
         k.fs_write("/proj/main.js", b"console.log('x')").unwrap();
         let spawned = k
-            .spawn(argv(&["js", "main.js"]), vec![], "/proj".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
+            .spawn(argv(&["js", "main.js"]), vec![], "/proj".into(), 0, None, 0, StdioPlan::default())
             .unwrap();
         assert_eq!(spawned.graph.entry, "/proj/main.js");
         assert_eq!(spawned.graph.modules.len(), 1);
@@ -986,7 +1007,7 @@ mod tests {
             vec![],
             "/".into(),
             0,
-            CapabilitySet::default(),
+            None,
             0,
             StdioPlan::default(),
         )
@@ -1016,7 +1037,7 @@ mod tests {
     fn spawn_missing_entry_errors() {
         let mut k = boot();
         let err = k
-            .spawn(argv(&["js", "nope.js"]), vec![], "/".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
+            .spawn(argv(&["js", "nope.js"]), vec![], "/".into(), 0, None, 0, StdioPlan::default())
             .unwrap_err();
         assert!(matches!(err, SpawnError::Resolve(ResolveError::NotFound(_))));
     }
@@ -1104,7 +1125,7 @@ mod tests {
         let mut k = boot();
         let a = spawn_main(&mut k, "");
         let b = k
-            .spawn(argv(&["js", "main.js"]), vec![], "/".into(), 0, CapabilitySet::default(), 0, StdioPlan::default())
+            .spawn(argv(&["js", "main.js"]), vec![], "/".into(), 0, None, 0, StdioPlan::default())
             .unwrap()
             .pid;
         assert_ne!(a, b);
@@ -1136,7 +1157,7 @@ mod tests {
 
     fn spawn_with(k: &mut Kernel, name: &str, plan: StdioPlan) -> Pid {
         k.fs_write(&format!("/{name}"), b"").unwrap();
-        k.spawn(argv(&["js", name]), vec![], "/".into(), 0, CapabilitySet::default(), 0, plan)
+        k.spawn(argv(&["js", name]), vec![], "/".into(), 0, None, 0, plan)
             .unwrap()
             .pid
     }
@@ -1164,6 +1185,30 @@ mod tests {
         // Writer exits → reader sees EOF.
         k.mark_exited(w, 0);
         assert_eq!(k.sys_read(r, 0, 16).unwrap(), ReadResult::Eof);
+    }
+
+    #[test]
+    fn capabilities_inherit_from_the_parent_unless_overridden() {
+        let mut k = boot();
+        k.fs_write("/agent.js", b"").unwrap();
+        k.fs_write("/child.js", b"").unwrap();
+        // Host policy denies network to the agent at the trust boundary…
+        let denied = CapabilitySet { net_egress: false, ..CapabilitySet::default() };
+        let agent = k
+            .spawn(argv(&["js", "agent.js"]), vec![], "/".into(), 0, Some(denied), 0, StdioPlan::default())
+            .unwrap();
+        assert!(!agent.net_egress);
+        // …and the agent cannot shell out to regain it: a child spawned with no
+        // explicit set inherits the parent's (ADR-024).
+        let child = k
+            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, agent.pid, StdioPlan::default())
+            .unwrap();
+        assert!(!child.net_egress, "a denied parent's child must not regain egress");
+        // A child of an unknown/host ppid gets the ordinary default (allowed).
+        let fresh = k
+            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, 0, StdioPlan::default())
+            .unwrap();
+        assert!(fresh.net_egress);
     }
 
     #[test]

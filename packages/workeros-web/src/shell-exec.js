@@ -59,7 +59,7 @@ export function createShell({ kernel, startProcess, session, readLine }) {
   // Run one external program with a resolved stdio plan; returns its exit code.
   // `stdinPipe`/`stdoutPipe` (kernel PipeIds) wire a streaming pipeline stage
   // (ADR-023); explicit redirects below still win over them, as in POSIX.
-  async function runExternal({ argv, env, cwd, stdin, stdinPipe, stdoutPipe, redirects, out, err }) {
+  async function runExternal({ argv, env, cwd, stdin, stdinPipe, stdoutPipe, redirects, out, err, ppid }) {
     const plan = { stdin: { kind: "inherit" }, stdout: { kind: "inherit" }, stderr: { kind: "inherit" } };
     let outSink = out || (() => {});
     let errSink = err || (() => {});
@@ -98,7 +98,7 @@ export function createShell({ kernel, startProcess, session, readLine }) {
 
     let handle;
     try {
-      handle = startProcess({ argv, env: withNodeBinPath(cwd, env), cwd, plan, sink: { stdout: (b) => outSink(b), stderr: (b) => errSink(b) } });
+      handle = startProcess({ argv, env: withNodeBinPath(cwd, env), cwd, plan, ppid, sink: { stdout: (b) => outSink(b), stderr: (b) => errSink(b) } });
     } catch (e) {
       errSink(enc.encode((argv[0] || "wsh") + ": " + (e.message || e) + "\n"));
       cleanup();
@@ -169,6 +169,9 @@ export function createShell({ kernel, startProcess, session, readLine }) {
       const childSession = {
         cwd: opts.cwd || session.cwd,
         env: opts.env || session.env,
+        // Attribute spawns to the exec-ing process so capabilities inherit
+        // (a denied-network guest cannot shell out to regain fetch, ADR-024).
+        spawnPpid: opts.ppid || 0,
       };
       runner = createInterpreter({ runtime, session: childSession });
     }

@@ -378,6 +378,30 @@ self.onmessage = async (ev) => {
   }
   if (msg.type !== MSG.START) return;
 
+  // Capability enforcement at the worker boundary (ADR-024): a process the
+  // kernel denied net egress gets its ambient network globals removed *before
+  // any guest code runs* — nothing was evaluated yet, so no reference to them
+  // can have been captured. Coarse, same-realm, pre-`Membrane` (honest, INV-5):
+  // it stops ordinary code cold, not a hostile realm-surgeon. `Worker` is
+  // stripped too (a fresh worker would mint fresh globals); guest concurrency
+  // uses the sys ABI (worker_threads/child_process), which stays kernel-routed.
+  if (msg.netEgress === false) {
+    for (const name of [
+      "fetch", "XMLHttpRequest", "WebSocket", "EventSource", "WebTransport",
+      "Worker", "SharedWorker", "importScripts",
+    ]) {
+      // Remove from the whole prototype chain, then pin an undefined shadow.
+      for (let o = globalThis; o; o = Object.getPrototypeOf(o)) {
+        try { delete o[name]; } catch { /* non-configurable somewhere: shadow below */ }
+      }
+      try {
+        Object.defineProperty(globalThis, name, {
+          value: undefined, writable: false, configurable: false,
+        });
+      } catch { /* already shadowed */ }
+    }
+  }
+
   // One synchronous-syscall channel per process (SAB + Atomics). Both the WASI
   // host and a JS guest's `sys.syncFs` block on it; only one guest runs at a time.
   const syncCall = makeSyncCaller(msg.syncSab, () => kernel.postMessage({ type: MSG.SYNC }));

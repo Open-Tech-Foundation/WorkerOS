@@ -34,6 +34,13 @@ pub struct CapabilitySet {
     pub stdout: bool,
     /// May write stderr (fd 2).
     pub stderr: bool,
+    /// May use the host's ambient *outbound* network (browser `fetch` — the
+    /// only egress that exists, ADR-008). Loopback `otf:net_*` sockets are
+    /// separate (`NetListen`; in-instance connects are ungated). The kernel
+    /// decides this bit; the program worker enforces it by removing the egress
+    /// globals (`fetch`, `WebSocket`, …) before any guest code runs — coarse,
+    /// same-realm, pre-`Membrane` enforcement, stated honestly (ADR-024).
+    pub net_egress: bool,
     /// Which `otf:*` calls are permitted.
     pub otf: Vec<OtfCall>,
 }
@@ -54,6 +61,10 @@ impl Default for CapabilitySet {
             stdin: true,
             stdout: true,
             stderr: true,
+            // Ambient outbound `fetch` is the npm-install model (ADR-008), so
+            // the ordinary-program default allows it; deny per spawn for
+            // untrusted/AI-agent runs (ADR-024).
+            net_egress: true,
             otf: vec![OtfCall::Spawn, OtfCall::Kill, OtfCall::IpcOpen, OtfCall::NetListen],
         }
     }

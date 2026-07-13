@@ -227,7 +227,7 @@ The browser cannot open raw sockets, and that limit passes straight through. Wor
 
 - **No listening sockets.** When a guest "starts a dev server on :5173," nothing is actually listening on a port. Instead: the server registers routes in a kernel-side registry, and a **Service Worker** on the same origin intercepts the browser's `fetch` to the preview URL and routes it into the kernel/handler. The port is a convincing fiction maintained by the Service Worker. (This is how WebContainer previews work; it is why the Service Worker is load-bearing, not an afterthought.)
 - **`net`/`dgram` (raw TCP/UDP):** unsupported. A guest doing `net.connect(5432, host)` has no socket to receive. Optionally shimmable over WebSocket **iff** a WS↔TCP proxy exists server-side; out of scope for the browser-only product.
-- **Outbound HTTP:** `fetch` works but is CORS-bound. The npm registry therefore needs a **CORS proxy** for package downloads.
+- **Outbound HTTP:** `fetch` works but is CORS-bound. The npm registry therefore needs a **CORS proxy** for package downloads. Egress is a **kernel-granted capability** (ADR-024): `CapabilitySet.net_egress` (default allowed, inherited by children like POSIX credentials — a denied guest cannot shell out to regain it); a denial is enforced by the program worker removing the egress globals (`fetch`, `WebSocket`, XHR, …) before any guest code runs. Coarse, same-realm, pre-`Membrane` — stated honestly (INV-5). Client surface: `os.spawn(argv, { net: false })`.
 - **Extension surface:** all of the above lives behind `otf:net` / `otf:preview` extensions, deferred past MVP.
 
 ---

@@ -427,7 +427,7 @@ export function createInterpreter({ runtime, session }) {
         stdin: i === 0 && io.stdin ? io.stdin.readAll() : null,
         stdinPipe: i > 0 ? pipeIds[i - 1] : null,
         stdoutPipe: i < n - 1 ? pipeIds[i] : null,
-        redirects, out: io.out, err: io.err,
+        redirects, out: io.out, err: io.err, ppid: session.spawnPpid || 0,
       }));
     }
     const codes = await Promise.all(waits);
@@ -585,7 +585,7 @@ export function createInterpreter({ runtime, session }) {
       const env = { ...Object.fromEntries(state.vars), ...envExports(), ...localEnv };
       code = await runtime.runExternal({
         argv, env, cwd: session.cwd, stdin: io.stdin ? io.stdin.readAll() : null,
-        redirects, out: io.out, err: io.err,
+        redirects, out: io.out, err: io.err, ppid: session.spawnPpid || 0,
       });
     }
     state.status = code;

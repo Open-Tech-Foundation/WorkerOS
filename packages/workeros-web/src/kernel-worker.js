@@ -472,8 +472,14 @@ function runCaptured(line, input, opts) {
 
 // ---- process lifecycle -----------------------------------------------------
 
-function spawnKernel(argv, env, cwd, plan) {
-  return kernel.spawn(argv, Object.entries(env || {}), cwd, Date.now(), 0, plan || null);
+// `opts.ppid` attributes the spawn to its initiating process so capabilities
+// inherit (a denied-network guest cannot shell out to regain fetch — ADR-024);
+// `opts.caps` ({ netEgress?: bool }) is an explicit host-policy override.
+function spawnKernel(argv, env, cwd, plan, opts = {}) {
+  return kernel.spawn(
+    argv, Object.entries(env || {}), cwd, Date.now(), opts.ppid || 0, plan || null,
+    opts.caps || null,
+  );
 }
 
 function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
@@ -515,13 +521,16 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
     pid: spawned.pid,
     graph: spawned.graph,
     syncSab,
+    // The kernel-granted egress capability (ADR-024): when false, the worker
+    // strips the ambient network globals before any guest code runs.
+    netEgress: spawned.net_egress !== false,
   });
   return exited;
 }
 
 /** Used by the shell driver: spawn one command with a stdio plan + sink. */
-function startProcess({ argv, env, cwd, plan, sink }) {
-  const spawned = spawnKernel(argv, env, cwd, plan);
+function startProcess({ argv, env, cwd, plan, sink, ppid }) {
+  const spawned = spawnKernel(argv, env, cwd, plan, { ppid });
   // Shell-run programs form the terminal's foreground pipeline, so ^C can
   // interrupt them. (Client `spawn` uses startWorker directly and is not tracked.)
   foreground.add(spawned.pid);
@@ -998,7 +1007,7 @@ function serviceSync(pid) {
         // and we write the framed { code, stdout, stderr } back when it exits,
         // waking the guest. `input` (this request's payload) is the child's stdin.
         const input = requestBytes(rec.syncSab);
-        runCaptured(req.line, input.length ? input : undefined, { env: rec.env, cwd: rec.cwd })
+        runCaptured(req.line, input.length ? input : undefined, { env: rec.env, cwd: rec.cwd, ppid: pid })
           .then((res) => writeResponse(rec.syncSab, 0, frameExecResult(res.code, res.stdout, res.stderr)))
           .catch((e) => writeResponse(rec.syncSab, -1, { error: String(e && e.message ? e.message : e) }));
         return; // response is written asynchronously above (no immediate write)
@@ -1225,7 +1234,7 @@ function handleSyscall(pid, msg) {
           ? rec.sink
           : { stdout: () => {}, stderr: () => {} };
         shell
-          .exec(args.line, sink, undefined, rec && { env: rec.env, cwd: rec.cwd })
+          .exec(args.line, sink, undefined, rec && { env: rec.env, cwd: rec.cwd, ppid: pid })
           .then((code) => reply(pid, id, true, code | 0))
           .catch((e) => reply(pid, id, false, String(e && e.message ? e.message : e)));
         break; // reply happens asynchronously above
@@ -1264,7 +1273,7 @@ function handleSyscall(pid, msg) {
         const cleanup = () => { if (tmp) { try { kernel.sys_unlink(pid, tmp); } catch {} } };
         let spawned;
         try {
-          spawned = spawnKernel(args.argv, args.env || {}, args.cwd || session.cwd, plan);
+          spawned = spawnKernel(args.argv, args.env || {}, args.cwd || session.cwd, plan, { ppid: pid });
         } catch (e) {
           cleanup();
           reply(pid, id, false, String(e && e.message ? e.message : e));
@@ -1496,7 +1505,7 @@ self.onmessage = async (ev) => {
         break;
 
       case MSG.SPAWN: {
-        const spawned = spawnKernel(msg.argv, msg.env, msg.cwd || session.cwd, null);
+        const spawned = spawnKernel(msg.argv, msg.env, msg.cwd || session.cwd, null, { caps: msg.caps });
         const pid = spawned.pid;
         const sink = {
           stdout: (b) => post({ type: MSG.STDOUT, pid, data: b }),

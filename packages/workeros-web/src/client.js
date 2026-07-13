@@ -202,10 +202,14 @@ export class WorkerOS {
   async spawn(argv, opts = {}) {
     const env = opts.env || {};
     const cwd = opts.cwd || "/";
+    // `opts.net: false` denies the process (and everything it spawns — caps
+    // inherit, ADR-024) the ambient outbound network: fetch/WebSocket/… are
+    // removed from its worker before any guest code runs. Default: allowed.
+    const caps = opts.net === false ? { netEgress: false } : null;
     // Register the Process before the pid resolves so no early output is missed:
     // the kernel worker sends SPAWNED before any stdout, but we still guard by
     // buffering in Process until listeners attach.
-    const pid = await this._request(MSG.SPAWN, { argv, env, cwd });
+    const pid = await this._request(MSG.SPAWN, { argv, env, cwd, caps });
     const proc = new Process(this, pid);
     this._procs.set(pid, proc);
     return proc;

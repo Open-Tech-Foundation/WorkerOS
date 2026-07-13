@@ -8,7 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
-use workeros_kernel::caps::CapabilitySet;
 use workeros_kernel::errno::Errno;
 use workeros_kernel::net::{AcceptOutcome, ListenerId};
 use workeros_kernel::process::Pid;
@@ -48,6 +47,16 @@ struct SpawnDto {
     /// The effective argv (a `#!` shebang may have rewritten the caller's argv).
     /// The host starts the worker with this so `sys.argv` matches what runs.
     argv: Vec<String>,
+    /// The granted net-egress capability (ADR-024): the kernel decided; the
+    /// host enforces it at the program-worker boundary (strip fetch/WebSocket/…).
+    net_egress: bool,
+}
+
+/// A partial capability override for `spawn` (ADR-024); absent fields inherit.
+#[derive(Deserialize)]
+struct CapsDto {
+    #[serde(default, rename = "netEgress")]
+    net_egress: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -385,6 +394,8 @@ impl WebKernel {
     /// process, wire its stdio per `plan`, and return `{ pid, interpreter, graph }`.
     /// `env` is an array of `[key, value]` pairs; `plan` is the stdio wiring (or
     /// null for all-terminal). `start_time` is milliseconds since the epoch.
+    /// `caps` is null to inherit the parent's capability set (ADR-024), or a
+    /// partial override — `{ netEgress?: bool }` — applied on top of it.
     #[wasm_bindgen]
     pub fn spawn(
         &mut self,
@@ -394,11 +405,23 @@ impl WebKernel {
         start_time: f64,
         ppid: u32,
         plan: JsValue,
+        caps: JsValue,
     ) -> Result<JsValue, JsError> {
         let env: Vec<(String, String)> = if env.is_undefined() || env.is_null() {
             Vec::new()
         } else {
             serde_wasm_bindgen::from_value(env).map_err(|e| JsError::new(&e.to_string()))?
+        };
+        let caps = if caps.is_undefined() || caps.is_null() {
+            None // inherit from ppid (kernel rule)
+        } else {
+            let dto: CapsDto =
+                serde_wasm_bindgen::from_value(caps).map_err(|e| JsError::new(&e.to_string()))?;
+            let mut set = self.inner.child_caps(ppid);
+            if let Some(net) = dto.net_egress {
+                set.net_egress = net;
+            }
+            Some(set)
         };
         let plan = if plan.is_undefined() || plan.is_null() {
             StdioPlan::default()
@@ -413,13 +436,14 @@ impl WebKernel {
         };
         let spawned = self
             .inner
-            .spawn(argv, env, cwd, start_time as u64, CapabilitySet::default(), ppid, plan)
+            .spawn(argv, env, cwd, start_time as u64, caps, ppid, plan)
             .map_err(spawn_err_to_js)?;
         to_js(&SpawnDto {
             pid: spawned.pid,
             interpreter: spawned.interpreter.as_str(),
             graph: GraphDto::from(&spawned.graph),
             argv: spawned.argv,
+            net_egress: spawned.net_egress,
         })
     }
 
