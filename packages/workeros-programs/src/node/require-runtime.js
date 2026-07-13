@@ -35,6 +35,7 @@ import { zlib as zlibModule } from "./zlib.js";
 import { createChildProcess } from "./child-process.js";
 import querystringModule from "./querystring.js";
 import perfHooksModule from "./perf-hooks.js";
+import asyncHooksModule from "./async-hooks.js";
 import { vm as vmModule } from "./vm.js";
 import constantsModule from "./constants.js";
 
@@ -106,6 +107,7 @@ export function makeBuiltins(sys, extras) {
     ["child_process", childProcess],
     ["querystring", querystringModule],
     ["perf_hooks", perfHooksModule],
+    ["async_hooks", asyncHooksModule],
     ["vm", vmModule],
     ["constants", constantsModule],
   ]);

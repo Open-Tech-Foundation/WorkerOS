@@ -55,6 +55,7 @@ export const NODE_BUILTINS = new Set([
   "child_process",
   "querystring",
   "perf_hooks",
+  "async_hooks",
   "worker_threads",
   "vm",
   "constants",
