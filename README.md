@@ -1,70 +1,21 @@
 # WorkerOS
 
-A lightweight, language-agnostic operating-system personality that boots inside
-a Web Worker and runs applications — written in JavaScript or WebAssembly — as
-real processes.
+An operating system that boots inside a Web Worker and runs JavaScript or
+WebAssembly programs as real processes — spawned, streamed, killable, and visible
+in `ps`.
 
-> An OS-style runtime where the executable format is JavaScript or WASM instead
-> of native binaries, and the "CPU" is the host's own JS/WASM engine.
+> The executable format is a JS or WASM module instead of a native binary, and the
+> "CPU" is the host's own JS/WASM engine.
 
-The kernel is written in **Rust** (compiled to WASM), is **Node-agnostic**, and
-is the sole authority for the VFS, the process table, module resolution, and
-capability granting. Node compatibility is a swappable guest-side tenant layer,
-never part of the kernel. See [`ARCHITECTURE.md`](./ARCHITECTURE.md),
-[`PLAN.md`](./PLAN.md), and [`DECISIONS.md`](./DECISIONS.md).
+The kernel is written in **Rust** (compiled to WASM) and is the sole authority for
+the VFS, the process table, module resolution, and capability granting. It is
+**Node-agnostic**: Node compatibility is a swappable guest-side tenant layer, never
+part of the kernel. A `wsh` shell (bash-subset scripting), POSIX-style coreutils, a
+real `npm` + `node`, and unmodified `wasm32-wasip1` binaries all run as ordinary
+processes on top of it.
 
-## Status
-
-**M3 — Usable shell reached.** On top of the MVP (spawn/run/kill/concurrent JS)
-there is now `wsh`, which has grown from a one-line planner into a real
-bash-subset **script interpreter** (`packages/workeros-web/src/shell/`): pipes,
-redirects (incl. `2>&1`), `&&`/`||`/`;`, background jobs, globbing, `#` comments,
-`$VAR`/`${…}`/`$(…)`/`$(( … ))` expansion, `if`/`for`/`while`/`until`/`case`,
-functions with `local`, and builtins that have no external (`test`/`[`, `read`,
-`export`, `set -e`, `trap`, `printf`, `cd`, …). It runs alongside the coreutils
-(`echo cat ls cp mv rm mkdir pwd env true false`) that execute as real,
-`ps`-visible, killable processes. So a script like
-`OS=$(uname -s); for f in *.txt; do echo "$f"; done` runs as written — though
-`curl … | bash` installers still fail on what they *do* (native binaries, no
-`fork`/`exec`), not on the shell grammar. The grammar stays in Rust (the kernel's
-`shell_parse` returns the AST; ADR-012); the JS evaluator only walks it and drives
-the async spawn/wait plumbing that wasm can't. The kernel owns VFS, process table,
-and glob.
-
-There is now also a real **`npm` + `node`** inside the OS (a Phase-5 slice):
-`npm install` fetches packages from the npm registry (semver + transitive deps),
-gunzips/untars their tarballs into `node_modules`, and `node index.js` runs
-CommonJS that `require()`s them — all as ordinary programs invoked through the
-shell (`os.exec("npm install …")`, `os.exec("node app.js")`). npm/node are guest
-programs; the kernel stays Node-agnostic (INV-1).
-
-**WASI is running (Phase 4).** An unmodified `wasm32-wasip1` binary runs as a
-WorkerOS process — the program worker instantiates the `.wasm` against a WASI
-Preview 1 host bound to the kernel's syscalls and calls `_start`. It does stdio,
-args/env, clocks, random, `proc_exit`, **and real blocking I/O**: a
-SharedArrayBuffer synchronous-syscall channel lets a wasm program open/read VFS
-files (`std::fs`), seek, `read_dir`, rename, and block on `stdin` from a pipe. A
-`curl` program speaks HTTP(S) over the worker's `fetch` — downloads, headers,
-methods, `-d`/`-F` bodies, Basic auth, `-i`/`-I`, `-w`, `-f`, `--max-time` — so you
-can fetch and run a wasm, or hit a JSON API:
-
-```sh
-curl -o /hello.wasm https://example.com/hello.wasm   # needs CORS on the host
-/hello.wasm
-curl -sS -H 'Accept: application/json' https://api.example.com/thing
-curl -X POST -d '{"a":1}' -H 'Content-Type: application/json' https://api.example.com/x
-```
-
-The transport is browser `fetch`, so its rules apply: cross-origin URLs must send
-CORS headers, and forbidden request headers (Host/Cookie/User-Agent/…) are dropped.
-
-| Milestone | Phases | State |
-|-----------|--------|-------|
-| M1 — Boot | 0–1 | ✅ kernel boots, VFS + WASI-shaped syscall spine, fully native-tested |
-| M2 — Run JS (MVP) | 2 | ✅ spawn/run/kill JS, concurrent, `import` resolved by the kernel |
-| M3 — Usable shell | 3 | ✅ `wsh` (pipes, redirects, `&&`/`\|\|`, glob, `&`), IPC pipes, coreutils, `ps` |
-| M5 — Ecosystem | 5 | 🚧 `npm` (registry install, deps) + `node` CJS `require`; preview/lockfiles TBD |
-| M4 / M6+ | 4,6,7 | ⏳ WASI binaries, preview, persistence |
+For current capabilities and the milestone map, see [`PLAN.md`](./PLAN.md); for the
+design, [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`DECISIONS.md`](./DECISIONS.md).
 
 ## Layout
 

@@ -15,7 +15,7 @@ export default function RootLayout({ children }) {
             </Link>
             <a
               class="nav-icon nav-icon-plain"
-              href="https://github.com/Open-Tech-Foundation"
+              href="https://github.com/Open-Tech-Foundation/WorkerOS"
               target="_blank"
               rel="noreferrer"
               aria-label="GitHub"
