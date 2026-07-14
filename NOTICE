@@ -6,3 +6,9 @@ its contributors.
 
 Licensed under the Apache License, Version 2.0. See the accompanying
 LICENSE file for full terms.
+
+Third-party software:
+
+The wasm coreutils binary built from crates/wsh-utils links the uutils
+coreutils crates (uu_*, uucore) — https://github.com/uutils/coreutils —
+Copyright (c) uutils developers, licensed under the MIT License.

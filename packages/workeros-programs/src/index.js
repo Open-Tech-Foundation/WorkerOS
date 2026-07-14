@@ -89,6 +89,22 @@ export const programs = [
     type: "wasm",
     source: () => fetchBytes("./grep/grep.wasm"),
   },
+  {
+    // The uutils coreutils tier (crates/wsh-utils): one multicall wasm32-wasip1
+    // binary — real GNU-behavior utilities pulled in as `uu_*` crates instead of
+    // handwritten. `links` names get /bin symlinks to this one blob at boot; the
+    // binary dispatches on the invoked name (argv[0] basename). Built by
+    // `npm run build:utils` into ./utils/.
+    bin: "/bin/coreutils",
+    type: "wasm",
+    source: () => fetchBytes("./utils/coreutils.wasm"),
+    links: [
+      "base32", "base64", "basename", "cksum", "comm", "date", "dd", "dirname",
+      "expand", "fold", "join", "ln", "mktemp", "nl", "od", "paste", "printf",
+      "readlink", "realpath", "shuf", "sleep", "split", "tee", "touch",
+      "truncate", "unexpand", "yes",
+    ],
+  },
 ];
 
 // Load a bundled program: its source `entry` (e.g. `./node/node-program.js`) is

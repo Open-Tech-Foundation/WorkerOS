@@ -294,7 +294,10 @@ async function runWasm(start, sys, syncCall) {
     sys,
     syncCall,
     argv: start.argv,
-    env: start.env,
+    // WASI P1 has no cwd; wasi-libc emulates one starting at "/". PWD carries the
+    // kernel cwd so a guest that wants relative paths can chdir to it at startup
+    // (wsh-utils does; see crates/wsh-utils/src/main.rs).
+    env: { PWD: start.cwd || "/", ...start.env },
     getMemory: () => memory,
   });
   const { instance } = await WebAssembly.instantiate(bytes, imports);

@@ -1,0 +1,54 @@
+# WorkerOS userland utilities from uutils — a multicall binary compiled to
+# `wasm32-wasip1` and run as WorkerOS processes through the WASI host.
+#
+# Each utility is one `uu_*` dependency line + one dispatch arm in main.rs; the
+# binary dispatches on the invoked name (argv[0] basename), so one blob in the
+# VFS serves every command through /bin symlinks. Kept out of the main workspace
+# (its own `[workspace]`) like wsh-grep, so its heavier deps and wasi target
+# don't touch the kernel's dependency-free build.
+[package]
+name = "wsh-utils"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "coreutils"
+path = "src/main.rs"
+
+[dependencies]
+uu_base32 = "0.9.0"
+uu_base64 = "0.9.0"
+uu_basename = "0.9.0"
+uu_cksum = "0.9.0"
+uu_comm = "0.9.0"
+uu_date = "0.9.0"
+uu_dd = "0.9.0"
+uu_dirname = "0.9.0"
+uu_expand = "0.9.0"
+uu_fold = "0.9.0"
+uu_join = "0.9.0"
+uu_ln = "0.9.0"
+uu_mktemp = "0.9.0"
+uu_nl = "0.9.0"
+uu_od = "0.9.0"
+uu_paste = "0.9.0"
+uu_printf = "0.9.0"
+uu_readlink = "0.9.0"
+uu_realpath = "0.9.0"
+uu_shuf = "0.9.0"
+uu_sleep = "0.9.0"
+uu_split = "0.9.0"
+uu_tee = "0.9.0"
+uu_touch = "0.9.0"
+uu_truncate = "0.9.0"
+uu_unexpand = "0.9.0"
+uu_yes = "0.9.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+
+[workspace]

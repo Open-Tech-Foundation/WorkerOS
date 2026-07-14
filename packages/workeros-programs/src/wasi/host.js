@@ -27,6 +27,14 @@ const ERRNO_PIPE = 64;
 const FILETYPE_CHARACTER_DEVICE = 2;
 const FILETYPE_DIRECTORY = 3;
 const FILETYPE_REGULAR_FILE = 4;
+const FILETYPE_SYMBOLIC_LINK = 7;
+
+// __wasi_lookupflags_t
+const LOOKUPFLAGS_SYMLINK_FOLLOW = 1;
+
+/** Map a kernel stat DTO `kind` onto the WASI filetype. */
+const filetypeOf = (kind) =>
+  kind === "dir" ? FILETYPE_DIRECTORY : kind === "symlink" ? FILETYPE_SYMBOLIC_LINK : FILETYPE_REGULAR_FILE;
 
 // __wasi_rights_t bits used to decide isatty (a TTY is a non-seekable chardev).
 const RIGHTS_FD_SEEK = 1n << 2n;
@@ -278,11 +286,14 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
       writeFilestat(ptr, r.value.kind === "dir" ? FILETYPE_DIRECTORY : FILETYPE_REGULAR_FILE, r.value.size);
       return ERRNO_SUCCESS;
     },
-    path_filestat_get: (_dirfd, _flags, pathPtr, pathLen, ptr) => {
+    path_filestat_get: (_dirfd, flags, pathPtr, pathLen, ptr) => {
       const path = absPath(readStr(pathPtr, pathLen));
-      const r = syncCall("stat", { path }, false);
+      // Without SYMLINK_FOLLOW this is an lstat — how a guest (realpath, ln -s
+      // checks) sees the symlink itself rather than what it points at.
+      const call = flags & LOOKUPFLAGS_SYMLINK_FOLLOW ? "stat" : "lstat";
+      const r = syncCall(call, { path }, false);
       if (r.status < 0) return mapErr(r.value);
-      writeFilestat(ptr, r.value.kind === "dir" ? FILETYPE_DIRECTORY : FILETYPE_REGULAR_FILE, r.value.size);
+      writeFilestat(ptr, filetypeOf(r.value.kind), r.value.size);
       return ERRNO_SUCCESS;
     },
 
@@ -302,6 +313,83 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
       const from = absPath(readStr(oldPtr, oldLen));
       const to = absPath(readStr(newPtr, newLen));
       const r = syncCall("rename", { from, to }, false);
+      return r.status < 0 ? mapErr(r.value) : ERRNO_SUCCESS;
+    },
+    // The link *target* is stored uninterpreted (kernel symlink semantics), so it
+    // must not be resolved against the preopen — only the new path is.
+    path_symlink: (oldPtr, oldLen, _dirfd, newPtr, newLen) => {
+      const target = readStr(oldPtr, oldLen);
+      const path = absPath(readStr(newPtr, newLen));
+      const r = syncCall("symlink", { target, path }, false);
+      return r.status < 0 ? mapErr(r.value) : ERRNO_SUCCESS;
+    },
+    path_link: (_oldFd, _oldFlags, oldPtr, oldLen, _newFd, newPtr, newLen) => {
+      const existing = absPath(readStr(oldPtr, oldLen));
+      const path = absPath(readStr(newPtr, newLen));
+      const r = syncCall("link", { existing, path }, false);
+      return r.status < 0 ? mapErr(r.value) : ERRNO_SUCCESS;
+    },
+    path_readlink: (_dirfd, pathPtr, pathLen, bufPtr, bufLen, nusedPtr) => {
+      const r = syncCall("readlink", { path: absPath(readStr(pathPtr, pathLen)) }, false);
+      if (r.status < 0) return mapErr(r.value);
+      const bytes = encoder.encode(String(r.value.target));
+      const n = Math.min(bytes.length, bufLen);
+      u8().set(bytes.subarray(0, n), bufPtr);
+      view().setUint32(nusedPtr, n, true);
+      return ERRNO_SUCCESS;
+    },
+    // WASI carries nanosecond timestamps + per-field flags; the kernel's utimes
+    // sets both times in epoch ms. An unflagged field falls back to "now" — the
+    // callers that matter (touch) always flag both.
+    path_filestat_set_times: (_dirfd, _flags, pathPtr, pathLen, atim, mtim, fstFlags) => {
+      const ms = (ns, set, now) => (now ? Date.now() : set ? Number(ns / 1000000n) : Date.now());
+      const atime = ms(atim, fstFlags & 1, fstFlags & 2);
+      const mtime = ms(mtim, fstFlags & 4, fstFlags & 8);
+      const r = syncCall("utimes", { path: absPath(readStr(pathPtr, pathLen)), atime, mtime }, false);
+      return r.status < 0 ? mapErr(r.value) : ERRNO_SUCCESS;
+    },
+    // The kernel has no ftruncate syscall; like node/fs.js truncateAt, do it in
+    // userland over the ops we have — read the prefix, rewrite grown (zero-
+    // filled) or shrunk. Correct, if not atomic.
+    fd_filestat_set_size: (fd, size) => {
+      const info = fds.get(fd);
+      if (!info) return ERRNO_BADF;
+      const want = Number(size);
+      const st = syncCall("stat", { path: info.path }, false);
+      if (st.status < 0) return mapErr(st.value);
+      const keep = Math.min(Number(st.value.size), want);
+      const out = new Uint8Array(want);
+      if (keep > 0) {
+        const rfd = syncCall("open", { path: info.path, opts: {} }, false);
+        if (rfd.status < 0) return mapErr(rfd.value);
+        let off = 0;
+        while (off < keep) {
+          const r = syncCall("read", { fd: rfd.value.fd, max: Math.min(keep - off, 512 * 1024) }, true);
+          if (r.status < 0) { syncCall("close", { fd: rfd.value.fd }, false); return mapErr(r.value); }
+          if (!r.bytes || r.bytes.length === 0) break;
+          out.set(r.bytes.subarray(0, Math.min(r.bytes.length, keep - off)), off);
+          off += r.bytes.length;
+        }
+        syncCall("close", { fd: rfd.value.fd }, false);
+      }
+      const wfd = syncCall("open", { path: info.path, opts: { create: true, truncate: true } }, false);
+      if (wfd.status < 0) return mapErr(wfd.value);
+      try {
+        sys.write(wfd.value.fd, out);
+      } catch (e) {
+        syncCall("close", { fd: wfd.value.fd }, false);
+        return mapErr({ error: String((e && e.message) || e) });
+      }
+      syncCall("close", { fd: wfd.value.fd }, false);
+      return ERRNO_SUCCESS;
+    },
+    fd_filestat_set_times: (fd, atim, mtim, fstFlags) => {
+      const info = fds.get(fd);
+      if (!info) return ERRNO_BADF;
+      const ms = (ns, set, now) => (now ? Date.now() : set ? Number(ns / 1000000n) : Date.now());
+      const atime = ms(atim, fstFlags & 1, fstFlags & 2);
+      const mtime = ms(mtim, fstFlags & 4, fstFlags & 8);
+      const r = syncCall("utimes", { path: info.path, atime, mtime }, false);
       return r.status < 0 ? mapErr(r.value) : ERRNO_SUCCESS;
     },
 
@@ -360,10 +448,9 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
   // Remaining WASI P1 surface: provided so instantiation never fails on a missing
   // import, but honestly ENOSYS until implemented.
   const NOT_YET = [
-    "fd_advise", "fd_allocate", "fd_datasync", "fd_filestat_set_size",
-    "fd_filestat_set_times", "fd_pread", "fd_pwrite", "fd_renumber",
-    "fd_sync", "fd_fdstat_set_rights", "path_filestat_set_times", "path_link",
-    "path_readlink", "path_symlink", "poll_oneoff", "proc_raise",
+    "fd_advise", "fd_allocate", "fd_datasync",
+    "fd_pread", "fd_pwrite", "fd_renumber",
+    "fd_sync", "fd_fdstat_set_rights", "poll_oneoff", "proc_raise",
     "sock_accept", "sock_recv", "sock_send", "sock_shutdown", "clock_nanosleep",
   ];
   for (const name of NOT_YET) {

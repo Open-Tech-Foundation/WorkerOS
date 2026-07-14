@@ -1514,6 +1514,11 @@ self.onmessage = async (ev) => {
           const data = await prog.source();
           if (data == null) continue; // a wasm program not built in this environment
           kernel.fs_write(prog.bin, typeof data === "string" ? enc.encode(data) : new Uint8Array(data));
+          // A multicall binary (e.g. the uutils coreutils tier) installs once and
+          // gets a /bin symlink per utility name; it dispatches on argv[0].
+          for (const name of prog.links || []) {
+            try { kernel.sys_symlink(injectorPid, prog.bin, "/bin/" + name); } catch { /* exists */ }
+          }
         }
         // Install the guest runtime library (/lib/workeros-node): the CommonJS
         // runtime + node: builtins that /bin/node imports at load time (INV-2).
