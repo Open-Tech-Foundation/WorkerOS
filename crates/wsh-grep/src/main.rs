@@ -31,6 +31,12 @@ fn grep(content: &str, re: &Regex, invert: bool, number: bool, out: &mut impl Wr
 }
 
 fn main() {
+    // WASI has no process cwd; wasi-libc emulates one that starts at "/". The
+    // host passes the kernel cwd as PWD — adopt it so relative FILE args behave.
+    if let Ok(pwd) = env::var("PWD") {
+        let _ = env::set_current_dir(&pwd);
+    }
+
     let mut icase = false;
     let mut invert = false;
     let mut number = false;
