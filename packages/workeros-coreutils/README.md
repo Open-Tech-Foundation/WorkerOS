@@ -31,7 +31,7 @@ behavior. It does not aim to copy every GNU coreutils option.
 | `mkdir` | `[-p] DIRECTORY...` |
 | `rm` | `[-rRf] FILE...`; `rm -f` also accepts no files |
 | `head`, `tail` | `[-n N] [FILE...]`, `-nN`, or `-N`; `N` is a non-negative integer |
-| `wc` | `[-lwc] [FILE...]` |
+| `wc` | `[-lwc] [FILE...]`; `-c` counts input bytes |
 | `sort` | `-r`, `-n`, `-u` |
 | `uniq` | `[-c] [INPUT [OUTPUT]]` |
 | `cut` | `[-d DELIM] -f LIST [FILE...]`; one-character delimiter and positive fields/closed ranges |
@@ -49,6 +49,10 @@ With multiple files, `head` and `tail` process each file independently and add
 section headers. `wc` prints a row per named file and a `total` row for multiple
 files. `uniq` accepts at most one input and one output file; omitting the input
 uses standard input, and omitting the output uses standard output.
+
+`wc` decodes text for word classification, but counts newlines and `-c` directly
+from the original bytes. UTF-8 multibyte characters therefore contribute their
+encoded byte length to `-c` and to the default third column.
 
 `grep` is a separate Rust `wasm32-wasip1` program installed in `/bin`, rather
 than a JavaScript utility in this package.

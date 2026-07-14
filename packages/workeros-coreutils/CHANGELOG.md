@@ -8,6 +8,8 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `wc -c` and the default third column now count original input bytes instead
+  of JavaScript UTF-16 string units, including correct totals for UTF-8 input.
 - Multi-file text processing now follows command boundaries: `head` and `tail`
   process and label each file independently while continuing after read errors,
   `wc` reports filenames and a total row, and `uniq` treats its second operand

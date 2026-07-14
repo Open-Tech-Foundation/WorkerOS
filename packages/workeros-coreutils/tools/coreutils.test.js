@@ -164,6 +164,17 @@ test("wc reports each file and a total", async () => {
   );
 });
 
+test("wc -c counts UTF-8 bytes instead of JavaScript string units", async () => {
+  assert.equal((await run("wc", { stdin: "é 🙂\n" })).out, "1 2 8\n");
+
+  const files = { "/unicode": "é🙂\n", "/ascii": "x\n" };
+  assert.equal((await run("wc", { argv: ["-c", "/unicode"], files })).out, "7 /unicode\n");
+  assert.equal(
+    (await run("wc", { argv: ["-c", "/unicode", "/ascii"], files })).out,
+    "7 /unicode\n2 /ascii\n9 total\n",
+  );
+});
+
 test("sort", async () => {
   assert.equal((await run("sort", { stdin: "banana\napple\ncherry\n" })).out, "apple\nbanana\ncherry\n");
   assert.equal((await run("sort", { argv: ["-rn"], stdin: "2\n10\n1\n" })).out, "10\n2\n1\n");

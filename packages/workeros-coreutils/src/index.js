@@ -36,21 +36,23 @@ const acceptOptions = (short = "", long = []) => {
   for (const flag of flags) if (!short.includes(flag)) unsupportedOption("-" + flag);
   for (const flag of longFlags) if (!long.includes(flag)) unsupportedOption("--" + flag);
 };
-// Read a whole fd to text.
-const readFd = async (fd) => {
+// Read a whole fd without losing its original byte representation.
+const readFdBytes = async (fd) => {
   const chunks = [];
   for (;;) { const b = await sys.read(fd, 65536); if (b.length === 0) break; chunks.push(b); }
   let n = 0; for (const c of chunks) n += c.length;
   const u = new Uint8Array(n); let o = 0; for (const c of chunks) { u.set(c, o); o += c.length; }
-  return dec.decode(u);
+  return u;
 };
-const readInput = async (file) => {
-  if (file === "-") return readFd(0);
+const readFd = async (fd) => dec.decode(await readFdBytes(fd));
+const readInputBytes = async (file) => {
+  if (file === "-") return readFdBytes(0);
   const fd = await sys.open(file, {});
-  const text = await readFd(fd);
+  const bytes = await readFdBytes(fd);
   await sys.close(fd);
-  return text;
+  return bytes;
 };
+const readInput = async (file) => dec.decode(await readInputBytes(file));
 // Read a list of file operands (or stdin when empty / "-"), concatenated to text.
 const readInputs = async (files) => {
   if (!files || files.length === 0) return readFd(0);
@@ -428,25 +430,27 @@ sys.exit(code);
   // wc [-l|-w|-c] [files] — count lines, words, characters.
   "/sbin/wc": util(`
 acceptOptions("lwc");
-const count = (text) => ({
-  lines: (text.match(/\\n/g) || []).length,
-  words: text.trim() === "" ? 0 : text.trim().split(/\\s+/).length,
-  chars: text.length,
-});
+const count = (bytes) => {
+  let lines = 0;
+  for (const byte of bytes) if (byte === 10) lines++;
+  const text = dec.decode(bytes);
+  const words = text.trim() === "" ? 0 : text.trim().split(/\\s+/).length;
+  return { lines, words, bytes: bytes.length };
+};
 const values = (counts) => {
   const parts = [];
   if (has("l")) parts.push(counts.lines);
   if (has("w")) parts.push(counts.words);
-  if (has("c")) parts.push(counts.chars);
-  return parts.length ? parts : [counts.lines, counts.words, counts.chars];
+  if (has("c")) parts.push(counts.bytes);
+  return parts.length ? parts : [counts.lines, counts.words, counts.bytes];
 };
 const inputs = operands.length ? operands : ["-"];
-const total = { lines: 0, words: 0, chars: 0 };
+const total = { lines: 0, words: 0, bytes: 0 };
 let code = 0;
 for (const file of inputs) {
   try {
-    const counts = count(await readInput(file));
-    total.lines += counts.lines; total.words += counts.words; total.chars += counts.chars;
+    const counts = count(await readInputBytes(file));
+    total.lines += counts.lines; total.words += counts.words; total.bytes += counts.bytes;
     out(values(counts).join(" ") + (operands.length ? " " + file : "") + "\\n");
   } catch (e) {
     err("wc: " + file + ": " + e.message + "\\n");
