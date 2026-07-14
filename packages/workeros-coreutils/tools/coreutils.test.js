@@ -12,10 +12,10 @@ const enc = new TextEncoder(), dec = new TextDecoder();
 
 async function run(name, {
   argv = [], stdin = "", files = {}, dirs = [], readErrors = [], writeErrors = [], mkdirErrors = [], inspectFds = false,
-  inspectWrites = false,
+  inspectWrites = false, inspectReads = false,
 } = {}) {
   const body = coreutils["/sbin/" + name].replace(/^import .*?\n/, "");
-  const outB = [], errB = [], stdoutWrites = [];
+  const outB = [], errB = [], stdoutWrites = [], readCalls = [];
   const vfs = new Map(Object.entries(files).map(([k, v]) => [k, enc.encode(v)]));
   const dirSet = new Set(dirs);
   const fds = new Map();
@@ -41,7 +41,9 @@ async function run(name, {
       const f = fds.get(fd);
       if (f?.path && readErrors.includes(f.path)) throw new Error("EIO");
       if (!f || f.pos >= f.data.length) return new Uint8Array(0);
-      const slice = f.data.subarray(f.pos, f.pos + max); f.pos += slice.length; return slice;
+      const slice = f.data.subarray(f.pos, f.pos + max); f.pos += slice.length;
+      readCalls.push({ path: f.path || "-", bytes: slice.length });
+      return slice;
     },
     open: async (path, opts = {}) => {
       if (dirSet.has(path)) throw new Error("EISDIR");
@@ -83,6 +85,7 @@ async function run(name, {
   };
   if (inspectFds) result.openFds = [...fds.keys()].filter((fd) => fd > 2);
   if (inspectWrites) result.stdoutWrites = stdoutWrites;
+  if (inspectReads) result.readCalls = readCalls;
   return result;
 }
 
@@ -283,6 +286,23 @@ test("head / tail process multiple files independently", async () => {
   assert.equal(partial.code, 1);
   assert.equal(partial.err, "head: cannot open '/missing': ENOENT\n");
   assert.equal(partial.out, "==> /a <==\na1\n");
+});
+
+test("head stops reading after the requested lines", async () => {
+  const result = await run("head", {
+    argv: ["-n1", "/large"],
+    files: { "/large": "first\n" + "x".repeat(200000) },
+    inspectReads: true,
+  });
+  assert.equal(result.out, "first\n");
+  assert.deepEqual(result.readCalls, [{ path: "/large", bytes: 65536 }]);
+
+  assert.equal((await run("head", { argv: ["-n1"], stdin: "without newline" })).out, "without newline");
+  const zero = await run("head", {
+    argv: ["-n0", "/large"], files: { "/large": "data" }, inspectReads: true,
+  });
+  assert.equal(zero.out, "");
+  assert.deepEqual(zero.readCalls, []);
 });
 
 test("wc", async () => {

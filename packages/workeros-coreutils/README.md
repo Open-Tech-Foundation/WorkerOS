@@ -60,6 +60,10 @@ section headers. `wc` prints a row per named file and a `total` row for multiple
 files. `uniq` accepts at most one input and one output file; omitting the input
 uses standard input, and omitting the output uses standard output.
 
+`head` scans input bytes incrementally and stops reading as soon as the requested
+line count is reached. It does not manufacture a trailing newline when the
+selected input does not contain one.
+
 `ls -l` reports the VFS entry type, real hard-link count, size, and modification
 time in UTC. WorkerOS does not currently model Unix owner/group or permission
 bits, so the leading access text is a conventional display profile based on the

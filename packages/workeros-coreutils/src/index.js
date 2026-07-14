@@ -419,17 +419,28 @@ for (let i = 0; i < av.length; i++) {
 const inputs = files.length ? files : ["-"];
 let code = 0, sections = 0;
 for (const file of inputs) {
+  let fd = null, owned = false;
   try {
-    const lines = toLines(await readInput(file)).slice(0, n);
+    if (file === "-") fd = 0;
+    else { fd = await sys.open(file, {}); owned = true; }
     if (inputs.length > 1) {
       if (sections++) out("\\n");
       out("==> " + (file === "-" ? "standard input" : file) + " <==\\n");
     }
-    emit(lines);
+    let lines = 0, done = n === 0;
+    while (!done) {
+      const bytes = await sys.read(fd, 65536);
+      if (bytes.length === 0) break;
+      let end = bytes.length;
+      for (let i = 0; i < bytes.length; i++) {
+        if (bytes[i] === 10 && ++lines === n) { end = i + 1; done = true; break; }
+      }
+      if (end) sys.write(1, bytes.subarray(0, end));
+    }
   } catch (e) {
     err("head: cannot open '" + file + "': " + e.message + "\\n");
     code = 1;
-  }
+  } finally { if (owned) await closeQuietly(fd); }
 }
 sys.exit(code);
 `),

@@ -8,6 +8,8 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `head` now scans bytes incrementally, stops reading after the requested line
+  count, and preserves an unterminated final line without adding a newline.
 - `seq` now streams bounded output chunks instead of retaining the complete
   sequence, and rejects floating-point increments that cannot make numeric
   progress rather than looping forever.
