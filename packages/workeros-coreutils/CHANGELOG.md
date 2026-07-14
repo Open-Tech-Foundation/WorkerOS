@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `sort -n` now handles nonnumeric lines as numeric zero with deterministic
+  lexical ties, `sort -nu` deduplicates numeric keys, and readable files are
+  still sorted after an individual input error.
 - `tr` now translates and deletes incrementally with a streaming UTF-8 decoder,
   including code-point-safe mappings and multibyte characters split across
   reads.

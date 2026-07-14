@@ -614,13 +614,24 @@ sys.exit(code);
   // sort [-r] [-n] [-u] [files] — sort lines.
   "/sbin/sort": util(`
 acceptOptions("rnu");
-let arr = toLines(await readInputs(operands));
-if (has("n")) arr.sort((a, b) => parseFloat(a) - parseFloat(b));
-else arr.sort();
+const inputs = operands.length ? operands : ["-"];
+let text = "", code = 0;
+for (const file of inputs) {
+  try { text += await readInput(file); }
+  catch (e) { err("sort: " + file + ": " + e.message + "\\n"); code = 1; }
+}
+let arr = toLines(text);
+const lexical = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+const numeric = (line) => {
+  const value = parseFloat(line);
+  return Number.isNaN(value) ? 0 : value;
+};
+if (has("n")) arr.sort((a, b) => numeric(a) - numeric(b) || lexical(a, b));
+else arr.sort(lexical);
 if (has("r")) arr.reverse();
-if (has("u")) arr = arr.filter((v, i) => i === 0 || v !== arr[i - 1]);
+if (has("u")) arr = arr.filter((value, i) => i === 0 || (has("n") ? numeric(value) !== numeric(arr[i - 1]) : value !== arr[i - 1]));
 emit(arr);
-sys.exit(0);
+sys.exit(code);
 `),
 
   // uniq [-c] [input [output]] — collapse adjacent duplicate lines.

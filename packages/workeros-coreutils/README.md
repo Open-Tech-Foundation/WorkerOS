@@ -70,6 +70,11 @@ uses standard input, and omitting the output uses standard output.
 line and group count. It preserves an unterminated final line and rejects an
 identical input/output path before opening the output for truncation.
 
+`sort -n` treats a line without a numeric prefix as numeric zero, uses lexical
+order to make equal numeric keys deterministic, and makes `-u` unique by numeric
+key. Readable files are still sorted when another input file fails, with a
+non-zero final status. Sorting necessarily retains its input lines in memory.
+
 `head` scans input bytes incrementally and stops reading as soon as the requested
 line count is reached. It does not manufacture a trailing newline when the
 selected input does not contain one.

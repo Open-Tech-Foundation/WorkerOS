@@ -423,6 +423,24 @@ test("sort", async () => {
   assert.equal((await run("sort", { argv: ["-u"], stdin: "b\na\nb\na\n" })).out, "a\nb\n");
 });
 
+test("sort handles numeric keys and partial input failures deterministically", async () => {
+  assert.equal(
+    (await run("sort", { argv: ["-n"], stdin: "bad\n2\n10x\n-1\n" })).out,
+    "-1\nbad\n2\n10x\n",
+  );
+  assert.equal(
+    (await run("sort", { argv: ["-nu"], stdin: "1\n01\n2\nbad\nalso\n" })).out,
+    "also\n01\n2\n",
+  );
+
+  const partial = await run("sort", {
+    argv: ["/missing", "/good"], files: { "/good": "b\na\n" },
+  });
+  assert.equal(partial.code, 1);
+  assert.equal(partial.err, "sort: /missing: ENOENT\n");
+  assert.equal(partial.out, "a\nb\n");
+});
+
 test("uniq", async () => {
   assert.equal((await run("uniq", { stdin: "a\na\nb\nb\nb\nc\n" })).out, "a\nb\nc\n");
   assert.equal((await run("uniq", { argv: ["-c"], stdin: "a\na\nb\n" })).out, "      2 a\n      1 b\n");
