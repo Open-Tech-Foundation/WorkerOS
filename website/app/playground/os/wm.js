@@ -9,6 +9,7 @@
 // window, never the whole desktop.
 
 import { reactive } from "@opentf/web";
+import { appMeta } from "./apps.js";
 
 /** @typedef {"normal"|"min"|"max"} WinState */
 
@@ -19,6 +20,7 @@ export const wm = reactive({
   windows: [],
   focusedId: null,
   topZ: 10,
+  launcherOpen: false,
 });
 
 let nextId = 1;
@@ -134,4 +136,34 @@ export function restore(id) {
   if (!w) return;
   if (w.state === "min") w.state = "normal";
   focusWindow(id);
+}
+
+/* ---------- launcher ---------- */
+export function toggleLauncher() { wm.launcherOpen = !wm.launcherOpen; }
+export function openLauncher() { wm.launcherOpen = true; }
+export function closeLauncher() { if (wm.launcherOpen) wm.launcherOpen = false; }
+
+/**
+ * Dock/launcher click behavior for an app (macOS-like): open it if it has no
+ * window; restore it if its top-most window is minimized; minimize it if that
+ * window is already focused; otherwise raise/focus it. New windows use the app's
+ * default geometry from the registry.
+ */
+export function activateApp(appId) {
+  const list = wm.windows.filter((w) => w.appId === appId);
+  if (list.length === 0) {
+    const a = appMeta(appId);
+    openWindow({ appId: a.id, title: a.name, icon: a.icon, w: a.w, h: a.h });
+    return;
+  }
+  let top = null;
+  for (const w of list) if (!top || w.z > top.z) top = w;
+  if (top.state === "min") { restore(top.id); return; }
+  if (wm.focusedId === top.id) { minimize(top.id); return; }
+  focusWindow(top.id);
+}
+
+/** True if the app has at least one open window (for a dock running indicator). */
+export function appIsRunning(appId) {
+  return wm.windows.some((w) => w.appId === appId);
 }

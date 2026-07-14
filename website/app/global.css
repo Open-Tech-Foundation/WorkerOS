@@ -498,7 +498,25 @@ pre.code .a { color: var(--accent-soft); }
 .dt-dock-mins { border-left: 1px solid var(--line-soft); padding-left: 10px; margin-left: -2px; }
 .dt-dock-mins:empty { border: 0; padding: 0; }
 
+/* Launcher button (opens the full-screen app grid) + separator. */
+.dock-launch {
+  display: grid; place-items: center;
+  width: 40px; height: 40px; padding: 0;
+  border: 1px solid transparent; border-radius: 11px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: color-mix(in srgb, var(--accent) 85%, var(--text));
+  cursor: pointer; transition: transform 0.12s, background 0.12s, border-color 0.12s;
+}
+.dock-launch svg { width: 18px; height: 18px; fill: currentColor; }
+.dock-launch:hover, .dock-launch.is-open {
+  transform: translateY(-3px);
+  background: color-mix(in srgb, var(--accent) 26%, var(--bg-elev-2));
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.dock-sep { width: 1px; height: 26px; background: var(--line-soft); margin: 0 2px; }
+
 .dock-app {
+  position: relative;
   display: grid; place-items: center;
   width: 40px; height: 40px; padding: 0;
   border: 1px solid transparent; border-radius: 11px;
@@ -509,6 +527,13 @@ pre.code .a { color: var(--accent-soft); }
   transform: translateY(-3px);
   background: color-mix(in srgb, var(--accent) 16%, var(--bg-elev-2));
   border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+/* Running indicator: a small dot centered under the icon. */
+.dock-app.is-running::after {
+  content: "";
+  position: absolute; bottom: -5px; left: 50%; transform: translateX(-50%);
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--accent);
 }
 .dock-ico { font-size: 20px; line-height: 1; }
 
@@ -530,6 +555,58 @@ pre.code .a { color: var(--accent-soft); }
   font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums;
   color: var(--text-dim);
 }
+
+/* ---------- launcher overlay (Launchpad-style) ---------- */
+.dt-launcher {
+  position: absolute; inset: 0; z-index: 1500;
+  display: grid; place-items: center;
+  padding: 6vh 5vw 96px;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: saturate(140%) blur(22px);
+  animation: lp-in 0.14s ease-out;
+}
+@keyframes lp-in { from { opacity: 0; } to { opacity: 1; } }
+
+.lp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, 116px);
+  justify-content: center;
+  gap: 22px 10px;
+  width: 100%; max-width: 760px;
+}
+.lp-app {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 12px 6px; border: 0; border-radius: 16px;
+  background: transparent; color: var(--text-dim);
+  cursor: pointer; transition: transform 0.12s, background 0.12s, color 0.12s;
+  animation: lp-pop 0.2s ease-out both;
+}
+.lp-app:hover { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); transform: translateY(-2px); }
+.lp-ico {
+  display: grid; place-items: center;
+  width: 68px; height: 68px; border-radius: 18px;
+  font-size: 34px; line-height: 1;
+  background: color-mix(in srgb, var(--bg-elev-2) 90%, var(--accent) 6%);
+  border: 1px solid var(--line);
+  box-shadow: 0 10px 26px -14px rgba(0, 0, 0, 0.6);
+}
+.lp-name { font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; }
+@keyframes lp-pop { from { opacity: 0; transform: translateY(8px) scale(0.96); } to { opacity: 1; transform: none; } }
+
+/* ---------- placeholder app (not-yet-built) ---------- */
+.app-soon {
+  height: 100%; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px;
+  padding: 32px; text-align: center;
+}
+.app-soon-ico {
+  width: 60px; height: 60px; border-radius: 16px;
+  display: grid; place-items: center; font-size: 30px;
+  background: color-mix(in srgb, var(--bg-elev-2) 90%, var(--accent) 6%);
+  border: 1px solid var(--line);
+}
+.app-soon h2 { margin: 4px 0 0; font-size: 1.05rem; letter-spacing: -0.02em; }
+.app-soon p { margin: 0; max-width: 34ch; color: var(--text-faint); font-size: 0.88rem; line-height: 1.6; }
 
 /* ---------- welcome app ---------- */
 .app-welcome { padding: 28px 26px; }

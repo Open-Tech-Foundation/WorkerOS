@@ -4,8 +4,9 @@
 // to its component; each new app adds an import + a branch here.
 
 import WelcomeApp from "./apps/WelcomeApp.jsx";
+import PlaceholderApp from "./apps/PlaceholderApp.jsx";
 
 export default function AppView({ win }) {
-  const id = win.appId;
-  return id === "welcome" ? <WelcomeApp win={win} /> : null;
+  // appId is fixed for a window, so a plain ternary (not a reactive block) is fine.
+  return win.appId === "welcome" ? <WelcomeApp win={win} /> : <PlaceholderApp win={win} />;
 }

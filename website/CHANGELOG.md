@@ -8,6 +8,20 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Playground desktop — Phase 2: dock, launcher & app registry.** The temporary
+  launch bar is now a real **dock** (`app/playground/ui/Dock.jsx`): a launcher
+  button, the pinned apps with a **running indicator** dot under any app that has an
+  open window (`ui/DockApp.jsx`), a tray of minimized windows, and the clock.
+  Clicking a dock app is macOS-like — open it, focus it, minimize it if it's already
+  focused, or restore it if minimized (`wm.activateApp`). A full-screen,
+  Launchpad-style **launcher overlay** (`ui/Launcher.jsx`, toggled from the dock,
+  dismissed by clicking the backdrop or pressing Escape) shows every app in a grid —
+  no start menu, no top bar. The **app registry** (`os/apps.js`) grew from a single
+  Welcome app to the full set — Terminal, Files, Browser, Editor, Processes, Welcome,
+  About — with the not-yet-built ones rendering a shared placeholder body
+  (`ui/apps/PlaceholderApp.jsx`, dispatched by `AppView`). Theme-aware; verified
+  headlessly in light + dark (launcher open/close/Escape, launch-from-launcher,
+  running dots, dock minimize/restore, no horizontal overflow, no console errors).
 - **Playground is becoming a desktop OS shell (Phase 1: window manager).** The
   `/playground` route is now a full-viewport desktop instead of a fixed
   terminal+preview split: a reactive window manager (`app/playground/os/wm.js`,
