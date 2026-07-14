@@ -4,13 +4,16 @@ import { Navbar } from "@opentf/web-docs";
 import config from "../otfw.config.js";
 
 export default function RootLayout({ children }) {
-  // The /docs section renders its own full chrome (the same Navbar plus a sidebar,
-  // TOC, and footer) via DocsLayout, so the marketing shell is omitted there — avoids
-  // a double navbar. The conditional lives inside the returned JSX (not an early
+  // Two routes render without the marketing shell: /docs supplies its own full
+  // chrome via DocsLayout (avoiding a double navbar), and /playground is a
+  // full-viewport desktop that owns the whole screen. Everything else gets the
+  // shared navbar + footer. The check lives inside the returned JSX (not an early
   // return) so client-side navigation reactively swaps chrome.
-  const isDocs = $derived(router.pathname.startsWith("/docs"));
+  const isBare = $derived(
+    router.pathname.startsWith("/docs") || router.pathname.startsWith("/playground"),
+  );
 
-  return isDocs ? (
+  return isBare ? (
     <>{children}</>
   ) : (
     <div class="app">

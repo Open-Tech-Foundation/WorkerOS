@@ -8,6 +8,21 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Playground is becoming a desktop OS shell (Phase 1: window manager).** The
+  `/playground` route is now a full-viewport desktop instead of a fixed
+  terminal+preview split: a reactive window manager (`app/playground/os/wm.js`,
+  built on `@opentf/web`'s `reactive()` store) with draggable, resizable windows —
+  edge/corner resize, focus-raises-z, minimize/maximize/restore/close, controls on
+  the right — plus a bottom dock (launch apps, restore minimized windows, clock).
+  Distinct WorkerOS look, theme-aware via the site's `data-theme`. Components:
+  `ui/Desktop`, `ui/Window`, `ui/WindowHost`, `ui/AppView`, `ui/DockMin`, and a
+  placeholder `ui/apps/WelcomeApp`; the app registry (`os/apps.js`) is metadata-only
+  (each app component is a default-exported file dispatched by `AppView`, since the
+  compiler turns components into custom elements). `RootLayout` now renders
+  `/playground` bare (no marketing nav/footer), like `/docs`. The real apps
+  (Terminal on the multi-PTY kernel, Files, Browser, …) land in later phases.
+  Verified headlessly: single window on load, drag/resize/maximize/minimize/restore/
+  close, opening a window doesn't remount existing ones, light + dark, no overflow.
 - **Documentation section (`/docs`)** built with `@opentf/web-docs` — MDX pages
   under `app/docs/**`, a generated sidebar (`_meta.json` ordering), TOC, themed
   callouts, and **Pagefind full-text search** (⌘K). Rendered with the full
