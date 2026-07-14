@@ -8,6 +8,15 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Playground desktop — Phase 3 (part 2): a live Processes monitor.** A new
+  Processes app (`ui/apps/ProcessesApp.jsx`) polls the kernel's real process table
+  via `os.ps()` and renders PID/PPID/STATE/COMMAND with per-row **SIGTERM/SIGKILL**
+  buttons (`ui/apps/ProcRow.jsx`, `os.kill(pid, sig)`). One shared, ref-counted poll
+  loop backs every open Processes window (`os/processes.js` reactive store), so the
+  table updates live: spawn something in a Terminal and it appears here; kill it and
+  it's gone. Verified headlessly (cross-origin isolated) — the table populates,
+  a `node -e … &` process launched from a Terminal shows up, and SIGKILL removes it —
+  no console errors. (Files, Browser, and Editor still render the placeholder.)
 - **Playground desktop — Phase 3 (part 1): the Terminal is real, on the multi-PTY
   kernel.** The desktop now boots the Rust→WASM kernel **once** (a shared singleton,
   `app/playground/os/os.js`) and each Terminal window opens its **own kernel tty**
