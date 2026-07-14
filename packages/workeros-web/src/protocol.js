@@ -13,6 +13,7 @@ export const MSG = Object.freeze({
   BOOT: "boot",
   FS_WRITE: "fs_write",
   FS_READ: "fs_read",
+  FS_READDIR: "fs_readdir",
   SPAWN: "spawn",
   EXEC: "exec",
   PS: "ps",

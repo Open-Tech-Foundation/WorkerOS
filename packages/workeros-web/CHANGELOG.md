@@ -8,6 +8,12 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **`os.fs.list(path)` — directory enumeration from the client.** Alongside
+  `fs.read`/`fs.write`, the client now exposes a directory read that resolves with
+  `[{ name, is_dir }]` (a `FS_READDIR` round-trip handled in the kernel worker via
+  the registered injector process's `sys_readdir`; no wasm change). Lets host UIs —
+  e.g. the playground's Files app — browse the real VFS without shelling out to
+  `ls`. Covered by an mvp.test.js browser case.
 - **Multiple independent terminals (multi-PTY).** The single kernel-owned TTY is
   now a table of controlling terminals: each has its own line discipline, termios,
   window size, foreground process group, shell session (cwd/env), and history, so

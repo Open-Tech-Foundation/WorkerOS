@@ -113,3 +113,25 @@ test("criterion 4: two processes run concurrently in separate workers", opts, as
   assert.deepEqual(result.a.out.trim().split("\n"), ["A0", "A1", "A2"]);
   assert.deepEqual(result.b.out.trim().split("\n"), ["B0", "B1", "B2"]);
 });
+
+test("client fs.list enumerates a directory (name + is_dir)", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      await os.fs.write("/lsdir/a.txt", "a");
+      await os.fs.write("/lsdir/b.txt", "b");
+      await os.fs.write("/lsdir/sub/c.txt", "c");
+      const entries = await os.fs.list("/lsdir");
+      return entries
+        .map((e) => ({ name: e.name, is_dir: !!e.is_dir }))
+        .sort((x, y) => (x.name < y.name ? -1 : 1));
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.deepEqual(result, [
+    { name: "a.txt", is_dir: false },
+    { name: "b.txt", is_dir: false },
+    { name: "sub", is_dir: true },
+  ]);
+});

@@ -1582,6 +1582,22 @@ self.onmessage = async (ev) => {
         break;
       }
 
+      case MSG.FS_READDIR: {
+        // Host-side directory read, attributed to the registered injector process
+        // (the same host pid the completion/preview paths use for sys_readdir).
+        if (injectorPid < 0) {
+          post({ type: MSG.ERROR, id: msg.id, error: "kernel not ready" });
+          break;
+        }
+        try {
+          const entries = kernel.sys_readdir(injectorPid, msg.path);
+          post({ type: MSG.FS_READDIR, id: msg.id, entries });
+        } catch (e) {
+          post({ type: MSG.ERROR, id: msg.id, error: String(e?.message || e) });
+        }
+        break;
+      }
+
       // Opt-in tracing control (debugging). Toggle the tracer, read the recent
       // event ring buffer, and/or snapshot the live process table — then reply.
       case MSG.TRACE: {

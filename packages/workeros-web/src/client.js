@@ -93,6 +93,8 @@ export class WorkerOS {
       write: (path, data) => this._request(MSG.FS_WRITE, { path, data: toBytes(data) }),
       // fs.read is a synchronous kernel op; exposed via a request round-trip.
       read: (path) => this._request(MSG.FS_READ, { path }),
+      // List a directory. Resolves with `[{ name, is_dir }]`.
+      list: (path) => this._request(MSG.FS_READDIR, { path }),
     };
 
     worker.addEventListener("message", (ev) => this._dispatch(ev.data));
@@ -129,6 +131,7 @@ export class WorkerOS {
       case MSG.FS_WRITE:
       case MSG.FS_FLUSH:
       case MSG.FS_READ:
+      case MSG.FS_READDIR:
       case MSG.TRACE_RESULT:
       case MSG.PS_RESULT: {
         const p = this._pending.get(msg.id);
@@ -136,6 +139,7 @@ export class WorkerOS {
           this._pending.delete(msg.id);
           if (msg.type === MSG.SPAWNED) p.resolve(msg.pid);
           else if (msg.type === MSG.FS_READ) p.resolve(msg.data);
+          else if (msg.type === MSG.FS_READDIR) p.resolve(msg.entries);
           else if (msg.type === MSG.PS_RESULT) p.resolve(msg.procs);
           else if (msg.type === MSG.TRACE_RESULT) p.resolve({ on: msg.on, events: msg.events, procs: msg.procs });
           else p.resolve();
