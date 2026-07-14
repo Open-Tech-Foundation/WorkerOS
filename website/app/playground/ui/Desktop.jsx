@@ -7,6 +7,7 @@ import { onMount } from "@opentf/web";
 import { wm, openWindow, closeLauncher, activateApp, openLauncher } from "../os/wm.js";
 import { seedHome } from "../os/vfs.js";
 import { attachTheme, theme, setTheme } from "../os/theme.js";
+import { startState } from "../os/state.js";
 import { contextMenu } from "../os/menus.js";
 import WindowHost from "./WindowHost.jsx";
 import Launcher from "./Launcher.jsx";
@@ -22,11 +23,18 @@ export default function Desktop() {
     const detachTheme = attachTheme(document.querySelector(".dt"));
     // Seed the home directory early so it exists before Files/Editor open (idempotent).
     seedHome().catch(() => {});
-    // Open a welcome window so the desktop isn't empty on first load. Guarded so a
-    // repeated mount (SSG hydration) doesn't seed a second copy.
-    if (wm.windows.length === 0) {
+    // Hydrate settings + restore the saved session from the real FS. Only fall back
+    // to a fresh Welcome window if nothing was restored; a timeout guards against a
+    // slow kernel so the desktop is never left empty. `welcomed` + the length check
+    // keep it idempotent under the SSG hydration double-mount.
+    let welcomed = false;
+    const ensureWelcome = () => {
+      if (welcomed || wm.windows.length > 0) return;
+      welcomed = true;
       openWindow({ appId: "welcome", title: "Welcome", icon: "👋", w: 520, h: 360 });
-    }
+    };
+    startState().then((n) => { if (n === 0) ensureWelcome(); }).catch(ensureWelcome);
+    setTimeout(ensureWelcome, 1800);
     // Escape dismisses the launcher.
     const onKey = (e) => {
       if (e.key === "Escape") closeLauncher();

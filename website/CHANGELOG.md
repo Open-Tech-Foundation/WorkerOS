@@ -8,6 +8,17 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **UI toolkit — Pillar D: system state persisted in the real filesystem.** Because
+  this is a real OS, the desktop's state lives on the durable kernel FS (ADR-022), not
+  in `localStorage` — the Terminal sees the same files. `os/state.js` hydrates on boot
+  and writes changes back (debounced): **settings** — theme mode / accent / wallpaper —
+  to `~/.config/workeros/settings.json`, and the **session** — every open window and
+  its geometry — to `~/.local/state/workeros/session.json`. On load the desktop paints
+  in the saved theme and **restores the windows that were open** (the default Welcome
+  window only appears when there's nothing to restore); a timeout guards a slow kernel
+  so the desktop is never left empty. Verified headlessly (6 checks): open Terminal +
+  Files, switch to Light, reload — theme and all three windows come back from disk with
+  no duplicate Welcome, no console errors.
 - **UI toolkit — Pillar C (part 1): window reliability + per-app context menus.**
   The window manager gained a **dock-aware work area** so windows behave predictably:
   maximizing now reserves the dock strip (the dock stays visible and clickable), and
