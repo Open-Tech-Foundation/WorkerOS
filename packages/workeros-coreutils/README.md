@@ -54,6 +54,10 @@ uses standard input, and omitting the output uses standard output.
 from the original bytes. UTF-8 multibyte characters therefore contribute their
 encoded byte length to `-c` and to the default third column.
 
+`cut -f` preserves lines that do not contain the delimiter. Selected fields are
+written in their original input order, and overlapping field ranges do not
+duplicate output fields.
+
 Utilities close every file descriptor they open, including when an input read,
 output write, or later open operation fails. Standard input and output remain
 owned by the process runtime and are not closed by a utility.

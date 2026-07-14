@@ -538,8 +538,12 @@ for (const part of spec.split(",")) {
     idx.push(value);
   }
 }
+const selected = new Set(idx);
 const arr = toLines(await readInputs(files));
-emit(arr.map((l) => { const f = l.split(delim); return idx.map((i) => f[i - 1]).filter((v) => v !== undefined).join(delim); }));
+emit(arr.map((line) => {
+  if (!line.includes(delim)) return line;
+  return line.split(delim).filter((_, i) => selected.has(i + 1)).join(delim);
+}));
 sys.exit(0);
 `),
 

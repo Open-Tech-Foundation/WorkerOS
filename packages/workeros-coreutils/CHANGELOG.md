@@ -8,6 +8,8 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `cut -f` now preserves non-delimited lines and emits selected fields in input
+  order without duplicating fields selected by overlapping or reordered lists.
 - File descriptors opened by shared input handling, `cat`, `cp`, and `uniq` are
   now closed on read, write, and open failures instead of leaking until process
   teardown.

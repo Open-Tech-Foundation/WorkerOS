@@ -242,6 +242,12 @@ test("cut", async () => {
   assert.equal((await run("cut", { argv: ["-d", ",", "-f", "1,3"], stdin: "1,2,3,4\n" })).out, "1,3\n");
 });
 
+test("cut preserves source field order and non-delimited lines", async () => {
+  const input = "plain text\na:b:c:d\n";
+  assert.equal((await run("cut", { argv: ["-d:", "-f3,1"], stdin: input })).out, "plain text\na:c\n");
+  assert.equal((await run("cut", { argv: ["-d:", "-f1-3,2-4"], stdin: "a:b:c:d\n" })).out, "a:b:c:d\n");
+});
+
 test("tr", async () => {
   assert.equal((await run("tr", { argv: ["a-z", "A-Z"], stdin: "hello\n" })).out, "HELLO\n");
   assert.equal((await run("tr", { argv: ["-d", "aeiou"], stdin: "hello world\n" })).out, "hll wrld\n");
