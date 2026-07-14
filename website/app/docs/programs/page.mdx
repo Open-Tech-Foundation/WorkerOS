@@ -1,0 +1,68 @@
+---
+title: Programs
+description: Coreutils, a real npm + node, and unmodified WASI binaries — all as processes.
+---
+
+import { Callout } from "@opentf/web-docs";
+
+# Programs
+
+Everything that runs in WorkerOS is an ordinary program invoked through the shell.
+Three families ship today.
+
+## Coreutils
+
+POSIX-style coreutils, each executing as a real, `ps`-visible, killable process
+over the `sys` ABI:
+
+```
+echo  cat  ls  cp  mv  rm  mkdir  pwd  env  true  false
+head  tail  wc  cut  tr  sort  uniq  seq
+```
+
+```sh
+seq 1 5 | tr '\n' ' '            # 1 2 3 4 5
+ls / | sort | uniq
+```
+
+## npm + node
+
+A real package manager and runtime run **inside** the OS as guest programs — the
+kernel stays Node-agnostic (INV-1).
+
+```sh
+npm init -y
+npm install is-even            # registry fetch → gunzip/untar → node_modules (+ deps)
+echo 'console.log(require("is-even")(42))' > app.js
+node app.js                    # CommonJS require resolves node_modules → true
+```
+
+- **`npm install`** fetches tarballs from the npm registry with semver resolution
+  and transitive dependencies, unpacks them into `node_modules`, and links each
+  package's `bin` into `node_modules/.bin` (put on `$PATH` by the shell).
+- **`node`** runs both CommonJS (`require`) and ESM (`import`) — resolving
+  `node_modules`, `package.json` `exports`/`main`, subpath exports, and `node:`
+  builtins, all in userland.
+- `npm install -g`, `npm create <x>` / `npm init <x>`, and `npm run` work too.
+
+<Callout type="note" title="Run on the host engine, not a foreign runtime">
+  `node` executes JavaScript on the browser's own JS engine. WorkerOS does not
+  embed a Node binary — Node compatibility is a swappable guest-side layer.
+</Callout>
+
+## WASI binaries
+
+An unmodified `wasm32-wasip1` binary runs as a WorkerOS process: the program
+worker instantiates the `.wasm` against a WASI Preview 1 host bound to the
+kernel's syscalls and calls `_start`. It gets stdio, args/env, clocks, random,
+`proc_exit`, and **real blocking I/O** (VFS reads/seek/`read_dir`/rename and
+blocking `stdin`) over the SharedArrayBuffer syscall channel.
+
+For example, `/bin/grep` is a Rust `regex` binary compiled to `wasm32-wasip1`:
+
+```sh
+ls / | grep bin                 # filters piped input through the WASI grep
+```
+
+A `curl` program speaks HTTP(S) over the worker's `fetch` (downloads, headers,
+methods, bodies, Basic auth) — subject to the browser's CORS rules.

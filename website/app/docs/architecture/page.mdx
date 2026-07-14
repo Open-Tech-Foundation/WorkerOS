@@ -1,0 +1,76 @@
+---
+title: Architecture
+description: The kernel, the worker model, the syscall ABI, and what "a process" means.
+---
+
+import { Callout } from "@opentf/web-docs";
+
+# Architecture
+
+WorkerOS is **kernel-authoritative**. The kernel makes every decision — the VFS,
+the process table, module resolution, capability granting — and the host runtime
+is a thin messenger. The kernel is written in **Rust**, compiled to WASM, and is
+**Node-agnostic**: nothing about Node leaks into the core (invariant INV-1,
+enforced by a CI grep gate).
+
+## The three layers
+
+| Layer | Runs in | Responsibility |
+|-------|---------|----------------|
+| **Client** | Main thread | A thin API (`boot()` → `WorkerOS`). Sends requests, streams output, exposes `fs`/`spawn`/`exec`/`ps`. |
+| **Kernel worker** | A dedicated Worker | Owns the wasm kernel: VFS, process table, syscall dispatch, module resolver, the `wsh` parser and glob. |
+| **Program workers** | One Worker per process | Run a guest JS or WASM module against the syscall ABI. |
+
+The main thread never touches kernel state directly; it posts messages to the
+kernel worker and receives streamed results.
+
+## What a process is
+
+The executable format is a **module**, not a native binary — a self-contained JS
+or WASM module. A program becomes a process when it needs no `fork`/`exec` of a
+native binary and no raw sockets.
+
+The kernel maintains a **POSIX-shaped** process table. Each entry carries `pid`,
+`ppid`, `argv`, `env`, `cwd`, `state` (`running` / `sleeping` / `zombie`), the
+stdio handles, `exit_code`, and `start_time`. Processes are real: streamed
+stdout/stderr, killable, and visible in `ps`.
+
+<Callout type="note" title="No native binaries">
+  There is no ELF, no `.exe`, and no native (`.node` / C-ABI) addons. Node
+  compatibility comes from running packages on the host JS engine, not from
+  embedding a foreign runtime.
+</Callout>
+
+## Signals
+
+Signals are **emulated**, honestly. `SIGTERM` and friends are delivered
+cooperatively — a flag / `AbortController` the guest observes at an `await` point.
+`SIGKILL` maps to `worker.terminate()`, a hard stop.
+
+## The syscall ABI and blocking I/O
+
+Guest modules reach the kernel through a syscall ABI. Asynchronous calls go over
+`postMessage`; **blocking** calls (a WASI guest doing `std::fs` reads, a `read`
+from stdin) use a `SharedArrayBuffer` synchronous-syscall channel so the guest can
+block on `Atomics.wait` while the kernel services the request. This is what lets an
+unmodified `wasm32-wasip1` binary do real blocking file and stdin I/O.
+
+## Cross-origin isolation
+
+`SharedArrayBuffer` requires the page to be **cross-origin isolated**:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+Set these headers on the document (and serve the `.wasm` with
+`Content-Type: application/wasm`). On static hosts that can't set headers, a
+same-origin service worker can inject them client-side. Without isolation,
+`boot()` throws.
+
+## Capabilities
+
+The kernel is the **sole authority** for granting capabilities. A guest gets
+exactly what it is handed — there is no ambient authority. This is the basis for
+running untrusted or AI-generated code as a bounded tenant.

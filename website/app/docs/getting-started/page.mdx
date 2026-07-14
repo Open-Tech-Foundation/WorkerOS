@@ -1,0 +1,77 @@
+---
+title: Getting started
+description: Boot WorkerOS in a page and run your first command.
+---
+
+import { Callout } from "@opentf/web-docs";
+
+# Getting started
+
+WorkerOS boots inside a Web Worker and runs as a tenant of the browser. This page
+gets a kernel booted in your own page and runs a command through the shell.
+
+<Callout type="warning" title="Cross-origin isolation required">
+  The kernel uses `SharedArrayBuffer`, which needs the page to be
+  **cross-origin isolated** — served with `COOP: same-origin` and
+  `COEP: require-corp`. Without it, `boot()` throws. See
+  [Architecture → Cross-origin isolation](/docs/architecture#cross-origin-isolation).
+</Callout>
+
+## Install
+
+```sh
+npm install @opentf/workeros-web
+```
+
+The package ships the host runtime (the kernel/program workers and the client
+API). The kernel `.wasm` is built from the Rust crate with `wasm-pack` — see the
+repository's `packages/workeros-web` for the `build:wasm` script.
+
+## Boot and run
+
+```js
+import { boot } from "@opentf/workeros-web";
+
+// Boot the Rust→WASM kernel inside a Web Worker.
+const os = await boot();
+
+// The VFS is real: write a file, then run a program.
+await os.fs.write("/hello.txt", "from the WorkerOS VFS\n");
+
+// wsh: pipes, &&, redirects, glob — executed by the kernel.
+const { code } = await os.exec("cat /hello.txt | cat && ls /", {
+  onStdout: (bytes) => process.stdout.write(bytes), // Uint8Array chunks
+});
+
+// Processes are real — inspect the live table.
+const procs = await os.ps();
+```
+
+## Drive an interactive terminal
+
+`boot()` returns a client whose kernel owns a TTY. Wire it to any terminal
+emulator (for example [xterm.js](https://xtermjs.org/)): forward keystrokes to
+`os.input()` and paint the bytes streamed back from `os.onOutput()`.
+
+```js
+os.onOutput((bytes) => term.write(bytes)); // prompt, echo, program output
+term.onData((data) => os.input(data));     // raw keystrokes → kernel TTY
+os.resize(term.rows, term.cols);           // keep the winsize in sync
+os.startTerminal();                        // start the interactive REPL
+```
+
+The line discipline — echo, editing, `Ctrl-C`/`Ctrl-D`, raw vs. cooked modes —
+lives in the kernel's TTY device, not in the page. The terminal is a dumb glass
+teletype; the OS owns the semantics.
+
+<Callout type="tip" title="Try it live">
+  The [playground](/playground) is exactly this: a real booted kernel driven
+  through an xterm.js terminal, in your browser.
+</Callout>
+
+## Next
+
+- **[Architecture](/docs/architecture)** — how the kernel, workers, and syscall
+  ABI fit together.
+- **[The shell](/docs/shell)** — everything `wsh` understands.
+- **[API reference](/docs/api)** — the full client surface.

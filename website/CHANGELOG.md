@@ -7,7 +7,36 @@ Notable changes to the WorkerOS website + live playground, built with the
 
 ## [Unreleased]
 
+### Added
+- **Documentation section (`/docs`)** built with `@opentf/web-docs` — MDX pages
+  under `app/docs/**`, a generated sidebar (`_meta.json` ordering), TOC, themed
+  callouts, and **Pagefind full-text search** (⌘K). Rendered with the full
+  `DocsLayout` (its own navbar + search + footer); `RootLayout` omits the marketing
+  shell on `/docs` (a reactive `router.pathname` check) so there's no double navbar.
+  Pages: Overview, Getting started, Architecture, The shell (wsh), Programs, and an
+  API reference (`boot()`, `WorkerOS`, `Process`). The docs theme is served from
+  `public/vendor/web-docs/theme.css` (refreshed from node_modules by
+  `tools/sync-runtime.mjs`, since the otfw CSS pipeline doesn't resolve
+  node_modules `@import`s). Adds `otfw.config.js` (a `docs` block enables the nav
+  generator, search, + `/llms.txt`). Verified end-to-end in headless Chromium:
+  sidebar order, callouts, tables, TOC, live search results, and chrome swapping
+  correctly on SSG load *and* SPA navigation — no console errors.
+
 ### Changed
+- **`build` is now an SSG build** (`otfw build --ssg`) — Pagefind search needs
+  pre-rendered HTML, so the default build pre-renders every route and indexes it.
+  The old SPA build is kept as `build:spa`.
+- **The whole site is theme-aware; one navbar spans it.** The landing page gained a
+  light palette (`global.css` splits its `--bg/--text/--accent/…` tokens into
+  `[data-theme="dark"]` and `[data-theme="light"]` sets; the hero terminal and code
+  sample stay dark in both), and `RootLayout` now renders the **same
+  `@opentf/web-docs` `<Navbar>`** as the docs (brand, Docs/Playground links, GitHub,
+  and the Light/Dark/System `ThemeToggle`) instead of a bespoke marketing nav — so
+  the toggle drives light/dark across landing *and* docs. The `index.html` no-flash
+  script now resolves the stored/system preference to `data-theme` on first paint
+  (was: force-dark). Verified in headless Chromium: single navbar on home and docs,
+  correct theme on dark- and light-preference systems, and the toggle choice
+  persisting across home↔docs SPA navigation — no console errors.
 - **Hero is now a live shell.** The homepage hero was a single centered column
   with a static one-line `quickstart`. It is now a two-column layout: copy on the
   left, and on the right a **real booted WorkerOS terminal** in a window frame —

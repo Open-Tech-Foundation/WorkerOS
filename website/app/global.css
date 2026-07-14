@@ -1,6 +1,16 @@
 /* WorkerOS website — OTF-flavored dark, terminal-inspired design system. */
 
-:root {
+/* Docs theme (@opentf/web-docs) — styles the /docs section. Served from public/
+   (the otfw CSS pipeline doesn't resolve bare/node_modules @imports); the copy is
+   refreshed from node_modules by tools/sync-runtime.mjs on each dev/build. */
+@import url("/vendor/web-docs/theme.css");
+
+/* The whole site (landing + docs) is theme-aware and driven by the shared navbar's
+   theme toggle (which sets data-theme on <html>; see the no-flash script in
+   index.html). Dark is the default; light is an override. Design-token names are
+   shared with — but distinct from — the docs `--otfw-*` tokens. */
+:root,
+:root[data-theme="dark"] {
   --bg: #0a0b0d;
   --bg-elev: #111317;
   --bg-elev-2: #16191f;
@@ -12,6 +22,26 @@
   --accent: #ff8a3d; /* OTF orange */
   --accent-soft: #ffb787;
   --accent-glow: rgba(255, 138, 61, 0.15);
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-elev: #f7f8fa;
+  --bg-elev-2: #eef1f5;
+  --line: #e2e6ec;
+  --line-soft: #edf0f4;
+  --text: #0f172a;
+  --text-dim: #475569;
+  --text-faint: #8a94a6;
+  --accent: #ea6a1e; /* OTF orange, darkened for contrast on light */
+  --accent-soft: #c2560a;
+  --accent-glow: rgba(234, 106, 30, 0.12);
+  color-scheme: light;
+}
+
+:root {
+  /* Theme-independent tokens. */
   --green: #4ade80;
   --cyan: #38bdf8;
   --violet: #a78bfa;
@@ -21,7 +51,19 @@
   --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --maxw: 1080px;
-  color-scheme: dark;
+}
+
+/* Always-dark islands: the hero terminal and the code sample stay dark in both
+   themes (a terminal/code surface reads as dark like a code block). Pin the tokens
+   they consume to dark values so their inner chrome/syntax doesn't flip to light. */
+.term-window,
+.code-wrap {
+  --bg-elev: #14171c;
+  --line-soft: #1a1d23;
+  --text: #e7e9ee;
+  --text-dim: #a3a9b5;
+  --text-faint: #6b7280;
+  --accent-soft: #ffb787;
 }
 
 * { box-sizing: border-box; }
@@ -53,55 +95,8 @@ code, pre, .mono { font-family: var(--mono); }
 
 .container { width: 100%; max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
 
-/* ---------- nav ---------- */
-.nav {
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  backdrop-filter: saturate(140%) blur(12px);
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  border-bottom: 1px solid var(--line-soft);
-}
-.nav-inner {
-  height: 60px;
-  display: flex;
-  align-items: center;
-  gap: 20px;
-}
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.01em; }
-.brand-mark {
-  width: 26px; height: 26px; border-radius: 7px;
-  background: linear-gradient(140deg, var(--accent), #ff5e3a);
-  display: grid; place-items: center;
-  font-family: var(--mono); font-size: 14px; font-weight: 800; color: #170a02;
-  box-shadow: 0 0 0 1px rgba(255, 138, 61, 0.35), 0 6px 18px -6px var(--accent);
-}
-.brand b { font-weight: 700; }
-.nav-spacer { flex: 1; }
-.nav-links { display: flex; align-items: center; gap: 22px; font-size: 14px; color: var(--text-dim); }
-.nav-links a { transition: color 0.15s, border-color 0.15s, background 0.15s, transform 0.15s; }
-.nav-links a:hover { color: var(--text); }
-.nav-icon {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 18px; height: 18px;
-  color: var(--text-dim);
-}
-.nav-icon:hover { color: var(--text); }
-.nav-icon svg { width: 18px; height: 18px; fill: currentColor; display: block; }
-.nav-icon-plain { margin-left: 2px; }
-.nav-cta {
-  padding: 8px 14px; border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
-  color: var(--accent-soft); font-weight: 650; font-size: 13.5px;
-  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line));
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-.nav-cta:hover {
-  transform: none;
-  color: var(--text);
-  background: color-mix(in srgb, var(--accent) 16%, var(--bg-elev-2));
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
-}
+/* The navbar is the shared @opentf/web-docs <Navbar> (styled by the docs theme's
+   .otfw-navbar-* rules); the marketing shell no longer ships its own nav chrome. */
 
 /* ---------- hero ---------- */
 .hero { padding: 88px 0 64px; }
@@ -367,6 +362,4 @@ pre.code .a { color: var(--accent-soft); }
   .hero-term-screen { height: 300px; }
   .pg-body { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
   .terminal { border-right: 0; border-bottom: 1px solid var(--line-soft); }
-  .nav-links { gap: 10px; }
-  .nav-cta { padding-inline: 12px; }
 }

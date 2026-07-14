@@ -71,6 +71,17 @@ async function main() {
     console.log(`  synced ${pkg}/src → public/workeros/packages/${pkg}/src`);
   }
   console.log("✓ WorkerOS runtime synced into public/workeros");
+
+  // The @opentf/web-docs theme styles the /docs section. The otfw CSS pipeline
+  // doesn't resolve bare/node_modules `@import`s, so global.css imports it from a
+  // same-origin public/ copy — refreshed here so it tracks the installed version.
+  const themeFrom = join(siteRoot, "node_modules", "@opentf", "web-docs", "theme", "index.css");
+  if (await exists(themeFrom)) {
+    const themeTo = join(siteRoot, "public", "vendor", "web-docs", "theme.css");
+    await mkdir(dirname(themeTo), { recursive: true });
+    await cp(themeFrom, themeTo);
+    console.log("  synced @opentf/web-docs theme → public/vendor/web-docs/theme.css");
+  }
 }
 
 main().catch((err) => {

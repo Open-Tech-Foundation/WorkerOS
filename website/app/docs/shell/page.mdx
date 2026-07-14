@@ -1,0 +1,53 @@
+---
+title: The shell (wsh)
+description: wsh — a bash-subset script interpreter whose grammar is parsed by the kernel.
+---
+
+# The shell (`wsh`)
+
+`wsh` is a **bash-subset script interpreter**, not a one-line command runner. Its
+grammar is parsed by the kernel (the Rust `shell_parse` returns an AST; ADR-012);
+the JS evaluator only walks that AST and drives the async spawn/wait plumbing that
+wasm can't. The kernel owns the VFS, the process table, and globbing.
+
+## What it understands
+
+| Feature | Examples |
+|---------|----------|
+| Pipes | `ls / \| grep bin \| sort` |
+| Redirects | `cmd > out.txt`, `cmd 2>&1`, `cmd >> log` |
+| Operators | `a && b`, `a \|\| b`, `a ; b` |
+| Background jobs | `node server.js &` |
+| Globbing | `for f in *.txt; do … done` |
+| Comments | `echo hi   # trailing comment` |
+| Expansion | `$VAR`, `${VAR}`, `$(cmd)`, `$(( 1 + 2 ))` |
+| Conditionals | `if`, `case` |
+| Loops | `for`, `while`, `until` |
+| Functions | `greet() { local n="$1"; echo "hi $n"; }` |
+
+Builtins with no external program include `test` / `[`, `read`, `export`,
+`set -e`, `trap`, `printf`, and `cd`.
+
+## A script runs as written
+
+```sh
+OS=$(uname -s)
+for f in *.txt; do
+  echo "$f on $OS"
+done
+```
+
+Everything that has an external program (the coreutils, `node`, `npm`, `grep`)
+runs as a real, `ps`-visible, killable process; the shell wires their stdio into
+pipes and redirects.
+
+## Tab completion
+
+The interactive shell completes file names, directory names, and command names on
+`Tab`.
+
+## Limits
+
+`curl … | bash` installers still fail — not on the shell grammar, but on what
+they *do*: they expect native binaries and `fork`/`exec`, which WorkerOS does not
+provide. See [Architecture](/docs/architecture#what-a-process-is).

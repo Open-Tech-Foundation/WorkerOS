@@ -1,0 +1,53 @@
+---
+title: API reference
+description: The @opentf/workeros-web client surface — boot() and package exports.
+---
+
+import { Callout } from "@opentf/web-docs";
+
+# API reference
+
+The host runtime is published as **`@opentf/workeros-web`**. It runs on the main
+thread and drives the kernel worker.
+
+```js
+import { boot, installPreviewBridge } from "@opentf/workeros-web";
+```
+
+## Exports
+
+| Export | Kind | Description |
+|--------|------|-------------|
+| `boot(opts?)` | function | Boot a kernel and resolve a [`WorkerOS`](/docs/api/workeros) client. |
+| `WorkerOS` | class | The client instance (usually obtained from `boot()`). |
+| `Process` | class | A handle to one spawned process (from [`spawn()`](/docs/api/workeros#spawn)). |
+| `installPreviewBridge(os)` | function | Route a service worker's preview requests into the kernel (ADR-021). |
+| `previewPath(port)` | function | Build the `/__preview__/<port>/` path used by the preview bridge. |
+| `RingBuffer`, `allocRingBuffer`, `HEADER_LEN` | — | Low-level SAB ring-buffer primitives. |
+
+## `boot(opts?)`
+
+```ts
+boot(opts?): Promise<WorkerOS>
+```
+
+Spawns the kernel worker, performs the boot handshake, and resolves a
+[`WorkerOS`](/docs/api/workeros) client. The returned instance carries the kernel
+`version` and `abi` from the handshake.
+
+<Callout type="warning" title="Requires cross-origin isolation">
+  `boot()` throws if `SharedArrayBuffer` is unavailable or
+  `globalThis.crossOriginIsolated` is `false`. Serve the page with `COOP`/`COEP`
+  (see [Architecture](/docs/architecture#cross-origin-isolation)).
+</Callout>
+
+```js
+const os = await boot();
+console.log(os.version, os.abi);
+```
+
+## Next
+
+- **[`WorkerOS`](/docs/api/workeros)** — the client: `fs`, `spawn`, `exec`, `ps`,
+  and the interactive terminal.
+- **[`Process`](/docs/api/process)** — a spawned-process handle.

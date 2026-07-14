@@ -9,6 +9,25 @@
     />
     <title>WorkerOS — an OS that boots in a Web Worker</title>
     <!--
+      No-flash theme resolution. The whole site (landing + docs) is theme-aware and
+      driven by the @opentf/web-docs ThemeToggle, which persists a mode to
+      localStorage("theme") = "light" | "dark" | "system" (default "system") and sets
+      data-theme on <html>. Resolve the effective theme here, before first paint, so
+      there's no light/dark flash and the toggle's onMount finds a matching attribute.
+    -->
+    <script>
+      try {
+        var mode = localStorage.getItem("theme") || "system";
+        var dark =
+          mode === "dark" ||
+          (mode === "system" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    </script>
+    <!--
       The single WorkerOS service worker (ADR-021). Two jobs in one SW (a page has
       one controlling worker): (1) inject COOP/COEP headers so SharedArrayBuffer
       works (ADR-010) on `otfw dev` and any static host; (2) intercept preview

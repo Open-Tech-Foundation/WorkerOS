@@ -7,12 +7,13 @@
   "scripts": {
     "sync": "node tools/sync-runtime.mjs",
     "dev": "node tools/sync-runtime.mjs && otfw dev",
-    "build": "node tools/sync-runtime.mjs && otfw build",
-    "build:ssg": "node tools/sync-runtime.mjs && otfw build --ssg",
+    "build": "node tools/sync-runtime.mjs && otfw build --ssg",
+    "build:spa": "node tools/sync-runtime.mjs && otfw build",
     "serve": "node tools/sync-runtime.mjs && otfw serve"
   },
   "dependencies": {
-    "@opentf/web": "^0.18.0"
+    "@opentf/web": "^0.18.0",
+    "@opentf/web-docs": "^0.15.0"
   },
   "devDependencies": {
     "@opentf/web-cli": "^1.14.0"

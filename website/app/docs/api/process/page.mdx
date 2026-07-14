@@ -1,0 +1,45 @@
+---
+title: Process
+description: A handle to one spawned process — streamed output, exit, stdin, and kill.
+---
+
+# `Process`
+
+A handle to one spawned process, returned by
+[`os.spawn(argv, opts?)`](/docs/api/workeros#spawn). Output arrives as
+`Uint8Array` chunks.
+
+## Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `pid` | `number` | The process id. |
+| `exited` | `Promise<number>` | Resolves with the exit code when the process exits. |
+
+## Methods
+
+```ts
+onStdout(cb: (chunk: Uint8Array) => void): () => void   // returns an unsubscribe fn
+onStderr(cb: (chunk: Uint8Array) => void): () => void
+writeStdin(data: Uint8Array | string): void
+kill(signal?: number): void                             // defaults to 9 (SIGKILL)
+```
+
+## Example
+
+```js
+const p = await os.spawn(["cat"]);
+
+p.onStdout((b) => term.write(b));
+p.writeStdin("hello\n");
+p.writeStdin("world\n");
+
+// A cooperative signal lets the guest clean up; SIGKILL is a hard stop.
+p.kill(15); // SIGTERM
+
+const code = await p.exited;
+console.log("cat exited with", code);
+```
+
+See [Architecture → Signals](/docs/architecture#signals) for how signals are
+delivered.

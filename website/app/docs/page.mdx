@@ -1,0 +1,24 @@
+---
+title: Overview
+description: What WorkerOS is and how the documentation is organized.
+---
+
+# WorkerOS
+
+An operating system that boots inside a Web Worker and runs JavaScript or
+WebAssembly programs as **real processes** — spawned, streamed, killable, and
+visible in `ps`.
+
+The executable format is a JS or WASM module instead of a native binary, and the
+"CPU" is the host's own JS/WASM engine. The kernel is written in Rust (compiled to
+WASM) and owns the VFS, the process table, module resolution, and capabilities.
+
+## Start here
+
+- **[Getting started](/docs/getting-started)** — boot the OS in a page and run a
+  command.
+- **[Architecture](/docs/architecture)** — the kernel, the workers, and the
+  syscall ABI.
+- **[The shell (`wsh`)](/docs/shell)** — pipes, redirects, scripting.
+- **[Programs](/docs/programs)** — coreutils, `npm` + `node`, and WASI binaries.
+- **[API reference](/docs/api)** — the `boot()` client and the `WorkerOS` object.

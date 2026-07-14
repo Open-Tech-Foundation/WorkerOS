@@ -1,0 +1,112 @@
+---
+title: WorkerOS
+description: The main-thread client returned by boot() — filesystem, processes, and the terminal.
+---
+
+# `WorkerOS`
+
+The main-thread client, returned by [`boot()`](/docs/api#boot). It talks to the
+kernel worker and exposes the filesystem, process control, and the interactive
+terminal. All byte parameters accept a `Uint8Array` or a `string`; all streamed
+output arrives as `Uint8Array` chunks.
+
+## Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `version` | `string` | Kernel version from the boot handshake. |
+| `abi` | `string` | Syscall ABI version. |
+| `fs` | `object` | The VFS accessor (below). |
+
+## Filesystem — `os.fs`
+
+```ts
+os.fs.write(path: string, data: Uint8Array | string): Promise<void>
+os.fs.read(path: string): Promise<Uint8Array>
+```
+
+```js
+await os.fs.write("/hello.txt", "hi\n");
+const bytes = await os.fs.read("/hello.txt");
+new TextDecoder().decode(bytes); // "hi\n"
+```
+
+## Processes
+
+### `spawn(argv, opts?)`
+
+```ts
+spawn(argv: string[], opts?: { env?: object, cwd?: string }): Promise<Process>
+```
+
+Spawn a program directly (no shell). Resolves a [`Process`](/docs/api/process)
+handle with streamed stdout/stderr, an `exited` promise, `writeStdin()`, and
+`kill()`.
+
+```js
+const p = await os.spawn(["ls", "/"], { cwd: "/" });
+p.onStdout((b) => term.write(b));
+const code = await p.exited;
+```
+
+### `exec(line, opts?)`
+
+```ts
+exec(line: string, opts?: {
+  onStdout?: (chunk: Uint8Array) => void,
+  onStderr?: (chunk: Uint8Array) => void,
+}): Promise<{ code: number, cwd: string }>
+```
+
+Run a `wsh` command line — pipes, redirects, `&&`/`||`/`;`, `&`, glob, `cd`. The
+resolved `cwd` reflects any `cd` the line performed.
+
+```js
+const { code } = await os.exec("ls / | grep bin", {
+  onStdout: (b) => term.write(b),
+});
+```
+
+### `ps()`
+
+```ts
+ps(): Promise<ProcessInfo[]>
+```
+
+A snapshot of the live process table.
+
+### `kill(pid, signal?)`
+
+```ts
+kill(pid: number, signal?: number): void   // signal defaults to 9 (SIGKILL)
+```
+
+## Interactive terminal
+
+The kernel owns a TTY (echo, line editing, `Ctrl-C`/`Ctrl-D`, raw/cooked modes).
+Wire it to a terminal emulator:
+
+```ts
+onOutput(cb: (chunk: Uint8Array) => void): () => void  // returns an unsubscribe fn
+input(data: Uint8Array | string): void                 // raw keystrokes → TTY
+resize(rows: number, cols: number): void               // report window size
+startTerminal(): void                                  // start the shell REPL
+```
+
+```js
+os.onOutput((b) => term.write(b));
+term.onData((d) => os.input(d));
+os.resize(term.rows, term.cols);
+os.startTerminal();
+```
+
+Output buffered before the first `onOutput` listener attaches is flushed to it
+immediately, so no early bytes are lost.
+
+## Preview & lifecycle
+
+```ts
+preview(port: number, bytes: Uint8Array): Promise<Uint8Array>  // inject an HTTP request (ADR-021)
+flush(): void       // flush pending persistence writes
+shutdown(): void    // terminate the kernel worker and all programs
+```
