@@ -61,6 +61,10 @@ directory trees; other copy-policy and metadata-preservation flags remain out of
 scope. `cp` rejects an identical source and destination path before opening
 either file for output.
 
+`rm -f` ignores a path only when it does not exist. Permission failures,
+directory operands without `-r`, and other removal errors remain visible and
+produce a non-zero status. `rm -r` removes nested directory trees.
+
 With multiple files, `head` and `tail` process each file independently and add
 section headers. `wc` prints a row per named file and a `total` row for multiple
 files. `uniq` accepts at most one input and one output file; omitting the input

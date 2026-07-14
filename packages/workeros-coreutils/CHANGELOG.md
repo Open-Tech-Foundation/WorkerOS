@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `rm -f` now suppresses only missing-path errors; permission failures,
+  directories without `-r`, and other removal errors remain visible. Recursive
+  tree removal is covered by the coreutils VFS tests.
 - `sort -n` now handles nonnumeric lines as numeric zero with deterministic
   lexical ties, `sort -nu` deduplicates numeric keys, and readable files are
   still sorted after an individual input error.

@@ -12,7 +12,7 @@ const enc = new TextEncoder(), dec = new TextDecoder();
 
 async function run(name, {
   argv = [], stdin = "", files = {}, dirs = [], readErrors = [], writeErrors = [], mkdirErrors = [], inspectFds = false,
-  inspectWrites = false, inspectReads = false,
+  unlinkErrors = [], inspectWrites = false, inspectReads = false,
 } = {}) {
   const body = coreutils["/sbin/" + name].replace(/^import .*?\n/, "");
   const outB = [], errB = [], stdoutWrites = [], readCalls = [];
@@ -73,6 +73,17 @@ async function run(name, {
       if (mkdirErrors.includes(path)) throw new Error("EPERM");
       if (dirSet.has(path) || vfs.has(path)) throw new Error("EEXIST");
       dirSet.add(path);
+    },
+    unlink: async (path) => {
+      if (unlinkErrors.includes(path)) throw new Error("EACCES");
+      if (!vfs.has(path)) throw new Error("ENOENT");
+      vfs.delete(path);
+    },
+    rmdir: async (path) => {
+      if (!dirSet.has(path)) throw new Error("ENOENT");
+      const prefix = path.replace(/\/+$/, "") + "/";
+      if ([...dirSet, ...vfs.keys()].some((candidate) => candidate.startsWith(prefix))) throw new Error("ENOTEMPTY");
+      dirSet.delete(path);
     },
     rename: async (from, to) => {
       if (!vfs.has(from)) throw new Error("ENOENT");
@@ -251,6 +262,34 @@ test("filesystem diagnostics preserve the underlying error", async () => {
   }
 
   assert.equal((await run("mkdir", { argv: ["-p", "/existing"], dirs: ["/existing"] })).code, 0);
+});
+
+test("rm -f suppresses only missing paths", async () => {
+  const missing = await run("rm", { argv: ["-f", "/missing"] });
+  assert.equal(missing.code, 0);
+  assert.equal(missing.err, "");
+
+  const blocked = await run("rm", {
+    argv: ["-f", "/blocked"], files: { "/blocked": "data" }, unlinkErrors: ["/blocked"],
+  });
+  assert.equal(blocked.code, 1);
+  assert.equal(blocked.err, "rm: cannot remove '/blocked': EACCES\n");
+  assert.equal(blocked.files["/blocked"], "data");
+
+  const directory = await run("rm", { argv: ["-f", "/dir"], dirs: ["/dir"] });
+  assert.equal(directory.code, 1);
+  assert.equal(directory.err, "rm: cannot remove '/dir': is a directory\n");
+});
+
+test("rm -r removes nested directory trees", async () => {
+  const result = await run("rm", {
+    argv: ["-r", "/tree"],
+    files: { "/tree/root": "root", "/tree/sub/nested": "nested" },
+    dirs: ["/tree", "/tree/sub"],
+  });
+  assert.equal(result.code, 0);
+  assert.equal(result.files["/tree/root"], undefined);
+  assert.equal(result.files["/tree/sub/nested"], undefined);
 });
 
 test("cp and mv accept multiple sources for a directory", async () => {

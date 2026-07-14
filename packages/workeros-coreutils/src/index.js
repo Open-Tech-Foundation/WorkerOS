@@ -319,7 +319,8 @@ for (const t of operands) {
       await sys.unlink(t);
     }
   } catch (e) {
-    if (!force) { err("rm: cannot remove '" + t + "': " + e.message + "\\n"); code = 1; }
+    const missing = e && (e.message === "ENOENT" || /no such file/i.test(e.message));
+    if (!(force && missing)) { err("rm: cannot remove '" + t + "': " + e.message + "\\n"); code = 1; }
   }
 }
 sys.exit(code);
