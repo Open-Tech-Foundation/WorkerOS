@@ -1610,6 +1610,62 @@ self.onmessage = async (ev) => {
         break;
       }
 
+      case MSG.FS_MKDIR: {
+        // `mkdir -p`: create each missing ancestor, ignoring ones that already
+        // exist as directories. Attributed to the injector host process.
+        if (injectorPid < 0) { post({ type: MSG.ERROR, id: msg.id, error: "kernel not ready" }); break; }
+        try {
+          const comps = String(msg.path).split("/").filter(Boolean);
+          let cur = "";
+          for (const c of comps) {
+            cur += "/" + c;
+            try {
+              kernel.sys_mkdir(injectorPid, cur);
+            } catch (e) {
+              // Tolerate an existing directory; rethrow anything else.
+              try { kernel.sys_readdir(injectorPid, cur); } catch { throw e; }
+            }
+          }
+          post({ type: MSG.FS_MKDIR, id: msg.id, ok: true });
+        } catch (e) {
+          post({ type: MSG.ERROR, id: msg.id, error: String(e?.message || e) });
+        }
+        break;
+      }
+
+      case MSG.FS_REMOVE: {
+        // `rm -r`: unlink a file, or recursively empty and remove a directory.
+        if (injectorPid < 0) { post({ type: MSG.ERROR, id: msg.id, error: "kernel not ready" }); break; }
+        const removeRec = (p) => {
+          let entries = null;
+          try { entries = kernel.sys_readdir(injectorPid, p); } catch { entries = null; }
+          if (entries !== null) {
+            for (const e of entries) removeRec((p === "/" ? "" : p) + "/" + e.name);
+            kernel.sys_rmdir(injectorPid, p);
+          } else {
+            kernel.sys_unlink(injectorPid, p);
+          }
+        };
+        try {
+          removeRec(String(msg.path));
+          post({ type: MSG.FS_REMOVE, id: msg.id, ok: true });
+        } catch (e) {
+          post({ type: MSG.ERROR, id: msg.id, error: String(e?.message || e) });
+        }
+        break;
+      }
+
+      case MSG.FS_RENAME: {
+        if (injectorPid < 0) { post({ type: MSG.ERROR, id: msg.id, error: "kernel not ready" }); break; }
+        try {
+          kernel.sys_rename(injectorPid, msg.from, msg.to);
+          post({ type: MSG.FS_RENAME, id: msg.id, ok: true });
+        } catch (e) {
+          post({ type: MSG.ERROR, id: msg.id, error: String(e?.message || e) });
+        }
+        break;
+      }
+
       // Opt-in tracing control (debugging). Toggle the tracer, read the recent
       // event ring buffer, and/or snapshot the live process table — then reply.
       case MSG.TRACE: {

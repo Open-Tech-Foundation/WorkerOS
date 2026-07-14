@@ -135,3 +135,28 @@ test("client fs.list enumerates a directory (name + is_dir)", opts, async () => 
     { name: "sub", is_dir: true },
   ]);
 });
+
+test("client fs mkdir -p / rename / remove operate on the real VFS", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const names = (dir) => os.fs.list(dir).then((es) => es.map((e) => e.name).sort());
+      await os.fs.mkdir("/work/proj/src"); // creates all three levels
+      await os.fs.write("/work/proj/src/a.txt", "A");
+      const afterCreate = await names("/work/proj/src");
+      await os.fs.rename("/work/proj/src/a.txt", "/work/proj/src/b.txt");
+      const afterRename = await names("/work/proj/src");
+      await os.fs.remove("/work/proj"); // recursive
+      let removed = false;
+      try { await os.fs.list("/work/proj"); } catch { removed = true; }
+      const workLeft = await names("/work");
+      return { afterCreate, afterRename, removed, workLeft };
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.deepEqual(result.afterCreate, ["a.txt"]);
+  assert.deepEqual(result.afterRename, ["b.txt"]);
+  assert.equal(result.removed, true, "recursive remove deleted the directory");
+  assert.deepEqual(result.workLeft, [], "only the removed subtree is gone");
+});

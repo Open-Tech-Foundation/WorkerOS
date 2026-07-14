@@ -95,6 +95,12 @@ export class WorkerOS {
       read: (path) => this._request(MSG.FS_READ, { path }),
       // List a directory. Resolves with `[{ name, is_dir }]`.
       list: (path) => this._request(MSG.FS_READDIR, { path }),
+      // Create a directory (and any missing parents; `mkdir -p` semantics).
+      mkdir: (path) => this._request(MSG.FS_MKDIR, { path }),
+      // Remove a file, or a directory and everything under it (`rm -r`).
+      remove: (path) => this._request(MSG.FS_REMOVE, { path }),
+      // Rename/move a path.
+      rename: (from, to) => this._request(MSG.FS_RENAME, { from, to }),
     };
 
     worker.addEventListener("message", (ev) => this._dispatch(ev.data));
@@ -132,6 +138,9 @@ export class WorkerOS {
       case MSG.FS_FLUSH:
       case MSG.FS_READ:
       case MSG.FS_READDIR:
+      case MSG.FS_MKDIR:
+      case MSG.FS_REMOVE:
+      case MSG.FS_RENAME:
       case MSG.TRACE_RESULT:
       case MSG.PS_RESULT: {
         const p = this._pending.get(msg.id);
