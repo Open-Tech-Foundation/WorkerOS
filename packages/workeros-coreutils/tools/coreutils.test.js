@@ -65,6 +65,36 @@ test("unsupported options fail clearly", async () => {
   }
 });
 
+test("missing, extra, and malformed operands fail clearly", async () => {
+  for (const [name, argv, message] of [
+    ["pwd", ["extra"], "extra operand 'extra'"],
+    ["env", ["NAME=value"], "unsupported operand 'NAME=value'"],
+    ["mkdir", [], "missing operand"],
+    ["rm", [], "missing operand"],
+    ["cp", ["a", "b", "c"], "extra operand 'c'"],
+    ["mv", ["a", "b", "c"], "extra operand 'c'"],
+    ["seq", [], "missing operand"],
+    ["seq", ["one"], "invalid number 'one'"],
+    ["seq", ["1", "2", "3", "4"], "extra operand '4'"],
+    ["head", ["-n"], "option requires an argument -- 'n'"],
+    ["tail", ["-n", "many"], "invalid number of lines: 'many'"],
+    ["cut", ["-d"], "option requires an argument -- 'd'"],
+    ["cut", ["-d::", "-f1"], "the delimiter must be a single character"],
+    ["cut", ["-f", "0"], "invalid field list '0'"],
+    ["cut", ["-f", "3-1"], "invalid field list '3-1'"],
+    ["tr", [], "missing operand"],
+    ["tr", ["a", "b", "c"], "extra operand 'c'"],
+    ["tr", ["-d", "a", "b"], "extra operand 'b'"],
+  ]) {
+    const result = await run(name, { argv });
+    assert.equal(result.code, 1, `${name} should reject ${JSON.stringify(argv)}`);
+    assert.equal(result.out, "");
+    assert.equal(result.err, `${name}: ${message}\n`);
+  }
+
+  assert.equal((await run("rm", { argv: ["-f"] })).code, 0, "rm -f accepts no operands");
+});
+
 test("-- preserves option-looking file operands", async () => {
   const files = { "-notes": "kept\n" };
   assert.deepEqual(await run("cat", { argv: ["--", "-notes"], files }), {

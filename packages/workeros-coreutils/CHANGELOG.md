@@ -8,6 +8,11 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- Commands now reject missing, extra, and malformed operands instead of
+  silently succeeding or ignoring input. Validation covers numeric `seq`
+  operands, `head`/`tail` line counts, `cut` delimiters and field lists,
+  `tr` operand counts, and the fixed-arity/filesystem utilities. `rm -f` keeps
+  its useful no-operand success behavior.
 - Unsupported options now produce a clear diagnostic and exit status `2`
   instead of being silently discarded by the shared argument tokenizer. This
   applies to both the shared-parser utilities and the custom parsers used by

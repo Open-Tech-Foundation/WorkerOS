@@ -26,6 +26,10 @@ const unsupportedOption = (option) => {
   err(commandName + ": unrecognized option '" + option + "'\\n");
   sys.exit(2);
 };
+const invalidUsage = (message) => {
+  err(commandName + ": " + message + "\\n");
+  sys.exit(1);
+};
 // These programs intentionally expose a small, useful option subset. Reject
 // everything else so an unsupported flag can never appear to have succeeded.
 const acceptOptions = (short = "", long = []) => {
@@ -106,10 +110,16 @@ sys.exit(0);
   "/sbin/true": `sys.exit(0);`,
   "/sbin/false": `sys.exit(1);`,
 
-  "/sbin/pwd": util(`acceptOptions(); out(sys.cwd + "\\n"); sys.exit(0);`),
+  "/sbin/pwd": util(`
+acceptOptions();
+if (operands.length) invalidUsage("extra operand '" + operands[0] + "'");
+out(sys.cwd + "\\n");
+sys.exit(0);
+`),
 
   "/sbin/env": util(`
 acceptOptions();
+if (operands.length) invalidUsage("unsupported operand '" + operands[0] + "'");
 const lines = Object.entries(sys.env).map(([k, v]) => k + "=" + v);
 out(lines.join("\\n") + (lines.length ? "\\n" : ""));
 sys.exit(0);
@@ -221,6 +231,7 @@ sys.exit(code);
 
   "/sbin/mkdir": util(`
 acceptOptions("p");
+if (operands.length === 0) invalidUsage("missing operand");
 const parents = has("p");
 async function mkone(p) {
   if (parents) {
@@ -246,6 +257,7 @@ sys.exit(code);
 acceptOptions("rRf");
 const recursive = has("r") || has("R");
 const force = has("f");
+if (operands.length === 0 && !force) invalidUsage("missing operand");
 async function rmrf(p) {
   const st = await sys.stat(p);
   if (st.kind === "dir") {
@@ -274,6 +286,7 @@ sys.exit(code);
   "/sbin/cp": util(`
 acceptOptions();
 if (operands.length < 2) { err("cp: missing file operand\\n"); sys.exit(1); }
+if (operands.length > 2) invalidUsage("extra operand '" + operands[2] + "'");
 const src = operands[0];
 let dst = operands[1];
 try {
@@ -298,6 +311,7 @@ try {
   "/sbin/mv": util(`
 acceptOptions();
 if (operands.length < 2) { err("mv: missing file operand\\n"); sys.exit(1); }
+if (operands.length > 2) invalidUsage("extra operand '" + operands[2] + "'");
 const src = operands[0];
 let dst = operands[1];
 try {
@@ -314,11 +328,15 @@ try {
   // seq [FIRST [INCR]] LAST — print a number sequence.
   "/sbin/seq": util(`
 const seqOperands = []; let seqTerminated = false;
+const seqNumber = /^[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?$/;
 for (const arg of sys.argv.slice(1)) {
   if (!seqTerminated && arg === "--") { seqTerminated = true; continue; }
-  if (!seqTerminated && arg.startsWith("-") && !/^-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$/.test(arg)) unsupportedOption(arg);
+  if (!seqTerminated && arg.startsWith("-") && !seqNumber.test(arg)) unsupportedOption(arg);
   seqOperands.push(arg);
 }
+if (seqOperands.length === 0) invalidUsage("missing operand");
+if (seqOperands.length > 3) invalidUsage("extra operand '" + seqOperands[3] + "'");
+for (const arg of seqOperands) if (!seqNumber.test(arg) || !Number.isFinite(Number(arg))) invalidUsage("invalid number '" + arg + "'");
 const a = seqOperands.map(Number);
 let first = 1, incr = 1, last = 0;
 if (a.length === 1) { last = a[0]; }
@@ -335,12 +353,17 @@ sys.exit(0);
   // head [-n N] [files] — first N lines (default 10).
   "/sbin/head": util(`
 let n = 10; const files = []; const av = sys.argv.slice(1);
+const lineCount = (raw) => {
+  if (raw === undefined) invalidUsage("option requires an argument -- 'n'");
+  if (!/^\\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) invalidUsage("invalid number of lines: '" + raw + "'");
+  return Number(raw);
+};
 for (let i = 0; i < av.length; i++) {
   const a = av[i];
   if (a === "--") { files.push(...av.slice(i + 1)); break; }
-  if (a === "-n") { n = parseInt(av[++i], 10); }
-  else if (/^-n/.test(a)) { n = parseInt(a.slice(2), 10); }
-  else if (/^-[0-9]+$/.test(a)) { n = parseInt(a.slice(1), 10); }
+  if (a === "-n") { n = lineCount(av[++i]); }
+  else if (/^-n/.test(a)) { n = lineCount(a.slice(2)); }
+  else if (/^-[0-9]+$/.test(a)) { n = lineCount(a.slice(1)); }
   else if (a.startsWith("-") && a !== "-") unsupportedOption(a);
   else files.push(a);
 }
@@ -351,12 +374,17 @@ sys.exit(0);
   // tail [-n N] [files] — last N lines (default 10).
   "/sbin/tail": util(`
 let n = 10; const files = []; const av = sys.argv.slice(1);
+const lineCount = (raw) => {
+  if (raw === undefined) invalidUsage("option requires an argument -- 'n'");
+  if (!/^\\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) invalidUsage("invalid number of lines: '" + raw + "'");
+  return Number(raw);
+};
 for (let i = 0; i < av.length; i++) {
   const a = av[i];
   if (a === "--") { files.push(...av.slice(i + 1)); break; }
-  if (a === "-n") { n = parseInt(av[++i], 10); }
-  else if (/^-n/.test(a)) { n = parseInt(a.slice(2), 10); }
-  else if (/^-[0-9]+$/.test(a)) { n = parseInt(a.slice(1), 10); }
+  if (a === "-n") { n = lineCount(av[++i]); }
+  else if (/^-n/.test(a)) { n = lineCount(a.slice(2)); }
+  else if (/^-[0-9]+$/.test(a)) { n = lineCount(a.slice(1)); }
   else if (a.startsWith("-") && a !== "-") unsupportedOption(a);
   else files.push(a);
 }
@@ -411,18 +439,35 @@ let delim = "\\t", spec = null; const files = []; const av = sys.argv.slice(1);
 for (let i = 0; i < av.length; i++) {
   const a = av[i];
   if (a === "--") { files.push(...av.slice(i + 1)); break; }
-  if (a === "-d") delim = av[++i];
+  if (a === "-d") {
+    if (av[i + 1] === undefined) invalidUsage("option requires an argument -- 'd'");
+    delim = av[++i];
+  }
   else if (/^-d/.test(a)) delim = a.slice(2);
-  else if (a === "-f") spec = av[++i];
+  else if (a === "-f") {
+    if (av[i + 1] === undefined) invalidUsage("option requires an argument -- 'f'");
+    spec = av[++i];
+  }
   else if (/^-f/.test(a)) spec = a.slice(2);
   else if (a.startsWith("-") && a !== "-") unsupportedOption(a);
   else files.push(a);
 }
 if (!spec) { err("cut: you must specify a list of fields with -f\\n"); sys.exit(1); }
+if ([...delim].length !== 1) invalidUsage("the delimiter must be a single character");
 const idx = [];
 for (const part of spec.split(",")) {
-  if (part.includes("-")) { const [x, y] = part.split("-").map(Number); for (let i = x; i <= y; i++) idx.push(i); }
-  else idx.push(Number(part));
+  const range = part.match(/^(\\d+)-(\\d+)$/);
+  const single = part.match(/^\\d+$/);
+  if (!range && !single) invalidUsage("invalid field list '" + spec + "'");
+  if (range) {
+    const x = Number(range[1]), y = Number(range[2]);
+    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 1 || y < x || y - x > 100000) invalidUsage("invalid field list '" + spec + "'");
+    for (let i = x; i <= y; i++) idx.push(i);
+  } else {
+    const value = Number(part);
+    if (!Number.isSafeInteger(value) || value < 1) invalidUsage("invalid field list '" + spec + "'");
+    idx.push(value);
+  }
 }
 const arr = toLines(await readInputs(files));
 emit(arr.map((l) => { const f = l.split(delim); return idx.map((i) => f[i - 1]).filter((v) => v !== undefined).join(delim); }));
@@ -432,6 +477,8 @@ sys.exit(0);
   // tr SET1 [SET2] / tr -d SET1 — translate or delete characters (reads stdin).
   "/sbin/tr": util(`
 acceptOptions("d");
+if (has("d") && operands.length !== 1) invalidUsage(operands.length < 1 ? "missing operand" : "extra operand '" + operands[1] + "'");
+if (!has("d") && operands.length !== 2) invalidUsage(operands.length < 2 ? "missing operand" : "extra operand '" + operands[2] + "'");
 const expand = (set) => {
   let r = "";
   for (let i = 0; i < set.length; i++) {
