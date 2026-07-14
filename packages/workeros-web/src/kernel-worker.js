@@ -253,6 +253,10 @@ class Terminal {
     this.termWaiter = null; // { resolve } awaiting the next committed input line
     this.history = []; // interactive command history (for the readline prompt)
     this.activeReadline = null; // the line editor while the prompt is being edited
+    // Whether the last byte sent to the display was a newline (cursor at column 0).
+    // Used to avoid the prompt redraw's `\r\x1b[K` erasing a command's trailing,
+    // non-newline-terminated output (e.g. `printf foo`, `cat` of an EOL-less file).
+    this.atLineStart = true;
     this.sink = { stdout: (b) => this.out(crlf(b)), stderr: (b) => this.out(crlf(b)) };
     // The shell driver for this terminal: its pipelines attach to this tty (ctty +
     // foreground), and its `read` builtin draws from this terminal's line editor.
@@ -266,7 +270,10 @@ class Terminal {
 
   // Send bytes to this terminal's display (main thread → the right xterm).
   out(bytes) {
-    if (bytes && bytes.length) post({ type: MSG.TERM_OUTPUT, session: this.ttyId, data: bytes });
+    if (bytes && bytes.length) {
+      post({ type: MSG.TERM_OUTPUT, session: this.ttyId, data: bytes });
+      this.atLineStart = bytes[bytes.length - 1] === 0x0a; // 0x0a === '\n'
+    }
   }
 
   // This terminal's foreground process group members (the control-key delivery
@@ -377,6 +384,10 @@ class Terminal {
   // or EOF (^D on an empty line).
   readCommandLine() {
     return new Promise((resolve) => {
+      // If the previous command left the cursor mid-line (output without a trailing
+      // newline), move to a fresh line first — otherwise the editor's initial
+      // `\r\x1b[K` prompt redraw would erase that output.
+      if (!this.atLineStart) this.out(enc.encode("\r\n"));
       const editor = createLineEditor({
         prompt: this.prompt(),
         history: this.history,
@@ -403,6 +414,7 @@ class Terminal {
       // is an ANSI screen wipe; `ps` formats the live process table.
       if (trimmed === "clear") {
         this.out(enc.encode("\x1b[2J\x1b[H"));
+        this.atLineStart = true; // cursor homed to column 0 by \x1b[H
         continue;
       }
       if (trimmed === "ps") {

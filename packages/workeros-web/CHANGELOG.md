@@ -258,6 +258,14 @@ main-thread client API). Format:
   isolation (ADR-010), plus headless boot/MVP/shell tests.
 
 ### Fixed
+- **Command output with no trailing newline is no longer erased by the next
+  prompt.** A program whose last write lacked a `\n` (e.g. `printf foo`, `echo -n`,
+  or `cat` of an EOL-less file) left the cursor mid-line; the REPL's next prompt
+  then redrew with `\r\x1b[K`, wiping that output off the terminal. The terminal now
+  tracks whether the last byte sent to the display was a newline and emits one
+  before the prompt when it wasn't — so the output survives on its own line (as in a
+  real shell). Fixes GUI-written files (`os.fs.write` content without a trailing
+  newline) appearing empty under `cat`. Covered by a new `tools/tty.test.js` case.
 - **`nano` no longer stair-steps a pasted block.** The editor now enables
   bracketed-paste mode (`ESC[?2004h`) and gathers the whole `ESC[200~ … ESC[201~`
   block, inserting it literally instead of feeding each newline through

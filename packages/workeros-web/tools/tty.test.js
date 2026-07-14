@@ -443,3 +443,31 @@ test("readline terminal interface powers a prompt-library flow (the create-vite 
   assert.match(buf, /FRAMEWORK=vanilla/, "a second interface re-armed after unpipe + close");
   assert.match(buf, /SCAFFOLDED/, "the flow ran to completion");
 });
+
+test("prompt preserves a command's output with no trailing newline", opts, async () => {
+  // A program whose last write has no trailing "\n" leaves the cursor mid-line.
+  // The next prompt must not erase it with its `\r\x1b[K` redraw — the REPL emits
+  // a newline first, so the output survives on its own line above the prompt.
+  const { buf, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    let out = "";
+    os.onOutput((b) => (out += dec.decode(b)));
+    os.startTerminal();
+    const waitFor = async (s, ms = 8000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (out.includes(s)) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error("timeout " + JSON.stringify(s) + " :: " + JSON.stringify(out));
+    };
+    await waitFor("$");
+    os.input("printf NO_TRAILING_EOL\r");
+    await waitFor("NO_TRAILING_EOL");
+    await new Promise((r) => setTimeout(r, 300));
+    return out;
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.match(buf, /NO_TRAILING_EOL/, "the EOL-less output is not erased by the next prompt");
+});
