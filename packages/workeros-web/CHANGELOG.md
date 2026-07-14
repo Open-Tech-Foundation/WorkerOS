@@ -8,6 +8,24 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **Multiple independent terminals (multi-PTY).** The single kernel-owned TTY is
+  now a table of controlling terminals: each has its own line discipline, termios,
+  window size, foreground process group, shell session (cwd/env), and history, so
+  several xterm windows can drive fully separate shells with no cross-talk. The
+  kernel gains `open_tty`/`close_tty` and a per-process `ctty` (inherited on spawn;
+  `sys_read` routes terminal stdin to the caller's terminal); tty ops and `spawn`
+  thread a tty id through the wasm bindings. The kernel worker runs one REPL per
+  terminal (a `Terminal` class keyed by tty id); captured `system(3)`/child_process
+  runs share a neutral `systemShell` that never seizes a terminal's foreground. New
+  client API: `os.openTerminal() → TerminalSession` (`onOutput`/`input`/`resize`/
+  `start`/`close`), alongside the unchanged legacy primary-terminal methods. New
+  protocol messages `TERM_OPEN`/`TERM_OPENED`/`TERM_CLOSE` and a `session` tag on
+  the TTY channel. Verified headlessly: two terminals hold independent cwds and
+  echo, input routes only to the addressed terminal, and the existing 84 single-
+  terminal tests (cooked discipline, ^C, SIGWINCH, isTTY, `nano`, readline,
+  child_process inherit) still pass. Adds `tools/multi-tty.test.js`; 4 new kernel
+  unit tests cover independent input queues, foreground/winsize, ctty inheritance,
+  and close→EOF.
 - **Node-compat website report + canonical test classifier.** New shared
   `tools/node-compat-classify.mjs` normalizes every official test to a canonical
   Node builtin (folding upstream naming quirks like `test-h2-*` → http2,

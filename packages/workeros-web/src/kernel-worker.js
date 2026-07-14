@@ -20,7 +20,7 @@ import { openPersistence } from "./persistence.js";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 let kernel = null;
-let shell = null;
+let systemShell = null;
 
 // Durable filesystem write-behind (ADR-022). `persistence` is the IndexedDB
 // store; we re-snapshot only when the kernel's mutation counter advances past
@@ -161,18 +161,21 @@ async function persistNow() {
   }
 }
 
-// The interactive shell session state (cwd/env), persisted across exec lines.
+// The shell session state (cwd/env) for non-interactive, host-driven runs: the
+// client `exec()` channel and captured `system(3)`/child_process runs. Each
+// interactive terminal keeps its *own* session (see `Terminal`); this is the base
+// env those non-terminal runs default to (they usually override cwd/env per call).
 // TERM/COLORTERM advertise the host xterm's ANSI color support so color-detecting
 // tools (chalk's supports-color, etc.) light up 24-bit color instead of falling
 // back to plain text on a TTY.
-const session = {
+const systemSession = {
   cwd: "/",
   env: { HOME: "/", PATH: "/bin:/sbin", TERM: "xterm-256color", COLORTERM: "truecolor" },
 };
 
 // The primary controlling terminal (kernel `PRIMARY_TTY`), present from boot. The
-// single interactive REPL runs on it. Multi-PTY threads a real per-session id here
-// in a follow-up; for now every terminal operation names the primary terminal.
+// legacy single-terminal client API (`startTerminal`/`input`/`onOutput` without a
+// session) drives this one; `openTerminal()` allocates additional ttys.
 const PRIMARY_TTY = 1;
 
 // pid → { worker, sink, onExit, resolveExit, done }.
@@ -195,25 +198,13 @@ function retryInjectReads() {
   for (const r of w) r();
 }
 
-// ---- interactive terminal (the kernel-owned TTY REPL) ----------------------
-// The controlling terminal is a single stream to the host (xterm). The kernel
-// owns the line discipline (echo/editing); this side runs the shell prompt loop
-// and delivers control-key signals to the foreground pipeline.
+// ---- interactive terminals (the kernel-owned TTY REPLs) --------------------
+// Each controlling terminal is a stream to one host terminal (an xterm window).
+// The kernel owns the line discipline (echo/editing) per terminal; this side runs
+// one shell prompt loop per terminal and delivers control-key signals to that
+// terminal's foreground pipeline. Multiple terminals run independently: each owns
+// its own kernel tty id, shell session (cwd/env), history, and foreground group.
 const INTERRUPT = Symbol("tty-interrupt");
-let termStarted = false;
-let execRunning = false; // a foreground command is running under the REPL
-let termWaiter = null; // { resolve } awaiting the next committed input line
-// The foreground pipeline is kernel state now (the terminal's foreground
-// process group, ADR-025): tcgetpgrp + the group's live members are the
-// control-key delivery set. Exec'd grandchildren inherit the group, so ^C
-// reaches them too.
-function fgMembers() {
-  if (!kernel) return [];
-  const g = kernel.tty_get_foreground(PRIMARY_TTY);
-  return g ? Array.from(kernel.pgrp_members(g)) : [];
-}
-const history = []; // interactive command history (for the readline prompt)
-let activeReadline = null; // the line editor while the prompt is being edited
 const caughtSignals = new Map(); // pid → Set<signal> the guest installed a handler for
 // node:worker_threads: pid → { parentPid, workerData, threadId } for a process
 // spawned as a Worker. Lets a worker answer `workerInit` (am I a worker? my data)
@@ -231,66 +222,6 @@ function catches(pid, signal) {
   return caughtSignals.get(pid)?.has(signal) ?? false;
 }
 
-// Send bytes to the terminal display (main thread → xterm).
-function termOut(bytes) {
-  if (bytes && bytes.length) post({ type: MSG.TERM_OUTPUT, data: bytes });
-}
-
-// Resolve a parked line-waiter if a full line has cleared the line discipline.
-function pumpWaiter() {
-  if (!termWaiter) return;
-  const line = kernel.tty_read_line(PRIMARY_TTY); // Uint8Array, or null if no full line yet
-  if (line != null) {
-    const w = termWaiter;
-    termWaiter = null;
-    w.resolve(line);
-  }
-}
-
-// Await the next committed input line (the REPL prompt and the shell `read`
-// builtin share this). Resolves with the line bytes, or INTERRUPT on ^C.
-function waitForLine() {
-  return new Promise((resolve) => {
-    termWaiter = { resolve };
-    pumpWaiter();
-  });
-}
-
-// A ^C from the line discipline: interrupt the foreground pipeline if one is
-// running, else cancel the line being typed at the prompt. A foreground process
-// that installed a SIGINT handler receives it cooperatively (and keeps running);
-// one that did not is hard-killed with the conventional 130 (128 + SIGINT).
-function onInterrupt() {
-  if (execRunning) {
-    for (const pid of fgMembers()) {
-      if (catches(pid, "SIGINT")) deliverSignal(pid, "SIGINT");
-      else handleExit(pid, 130);
-    }
-    if (termWaiter) {
-      const w = termWaiter;
-      termWaiter = null;
-      w.resolve(INTERRUPT); // unblock a `read` builtin so it doesn't hang
-    }
-  } else if (termWaiter) {
-    const w = termWaiter;
-    termWaiter = null;
-    w.resolve(INTERRUPT);
-  }
-}
-
-// A ^Z from the line discipline. WorkerOS has no job-control suspend yet, so the
-// default disposition is *ignore* (not stop); a foreground process that installed
-// a SIGTSTP handler is told, and can act on it.
-function onSusp() {
-  for (const pid of fgMembers()) {
-    if (catches(pid, "SIGTSTP")) deliverSignal(pid, "SIGTSTP");
-  }
-}
-
-function prompt() {
-  return `${session.cwd === "/" ? "/" : session.cwd} $ `;
-}
-
 // Shell builtins that have no on-disk program (mirrors interp.js BUILTINS) —
 // offered alongside PATH programs when completing a command name.
 const SHELL_BUILTINS = [
@@ -299,120 +230,229 @@ const SHELL_BUILTINS = [
   "trap", "eval", "source", ".", "command", "type", "uname",
 ];
 
-// Tab-completion for the interactive prompt. Completes the token under the
-// cursor against the live VFS: a command name (PATH programs + builtins) when
-// the token is in command position, or a filesystem path otherwise (directory
-// candidates carry a trailing "/" so the editor keeps completing into them).
-// Runs through the injector's kernel context (a valid pid) with absolute paths,
-// so its own cwd is irrelevant — paths resolve against the shell session's cwd.
-function completeLine(line, pos) {
-  // The token under the cursor: from the previous whitespace up to the cursor.
-  let start = pos;
-  while (start > 0 && !/\s/.test(line[start - 1])) start--;
-  const token = line.slice(start, pos);
-
-  const readdir = (absDir) => {
-    try { return kernel.sys_readdir(injectorPid, absDir) || []; } catch { return []; }
-  };
-
-  // Command position: only whitespace or a pipeline/list separator precedes the
-  // token, and it names a bare command (no slash → not an explicit path).
-  if (!token.includes("/") && /(^|[|&;(])\s*$/.test(line.slice(0, start))) {
-    const items = new Set();
-    for (const name of SHELL_BUILTINS) if (name.startsWith(token)) items.add(name);
-    const path = (session.env && session.env.PATH) || "/bin:/sbin";
-    for (const dir of path.split(":")) {
-      if (!dir) continue;
-      for (const e of readdir(dir)) if (!e.is_dir && e.name.startsWith(token)) items.add(e.name);
-    }
-    return { start, items: [...items].sort() };
-  }
-
-  // Filesystem path: split into the directory part (kept verbatim in each
-  // candidate) and the basename being matched; a leading ~ expands to $HOME
-  // only for resolution, so the candidate still shows the ~ the user typed.
-  const HOME = ((session.env && session.env.HOME) || "/").replace(/\/$/, "");
-  const slash = token.lastIndexOf("/");
-  const dirPart = slash < 0 ? "" : token.slice(0, slash + 1);
-  const base = slash < 0 ? token : token.slice(slash + 1);
-  const resolveTarget = dirPart.replace(/^~\//, HOME + "/");
-  let absDir;
-  try { absDir = kernel.resolve_dir(session.cwd, resolveTarget || "."); } catch { return { start, items: [] }; }
-  const items = [];
-  for (const e of readdir(absDir)) {
-    if (e.name.startsWith(".") && !base.startsWith(".")) continue; // hide dotfiles
-    if (!e.name.startsWith(base)) continue;
-    items.push(dirPart + e.name + (e.is_dir ? "/" : ""));
-  }
-  return { start, items: items.sort() };
-}
-
-// Read one command line through the raw-mode line editor (history + cursor
-// editing). Resolves with the editor's result: a submitted line, an abort (^C),
-// or EOF (^D on an empty line).
-function readCommandLine() {
-  return new Promise((resolve) => {
-    const editor = createLineEditor({
-      prompt: prompt(),
-      history,
-      write: (s) => termOut(enc.encode(s)),
-      columns: () => (kernel.tty_get_winsize(PRIMARY_TTY) || {}).cols || 80,
-      complete: completeLine,
-      done: (r) => { activeReadline = null; resolve(r); },
-    });
-    activeReadline = editor;
-    editor.start();
-  });
-}
-
-// The interactive read-eval-print loop, reading command lines from the TTY.
-async function repl() {
-  for (;;) {
-    const res = await readCommandLine();
-    if (res.aborted || res.eof) continue; // ^C / ^D on empty → fresh prompt
-    const line = res.line;
-    const trimmed = line.trim();
-    if (trimmed === "") continue;
-    // Record non-empty lines in history, collapsing immediate duplicates.
-    if (history[history.length - 1] !== line) history.push(line);
-    // Two conveniences the browser page used to own; now terminal-side. `clear`
-    // is an ANSI screen wipe; `ps` formats the live process table.
-    if (trimmed === "clear") {
-      termOut(enc.encode("\x1b[2J\x1b[H"));
-      continue;
-    }
-    if (trimmed === "ps") {
-      const rows = kernel
-        .list_processes()
-        .map((p) => `${String(p.pid).padStart(4)} ${p.state.padEnd(8)} ${p.argv.join(" ")}`);
-      termOut(enc.encode((rows.join("\r\n") || "(no live processes)") + "\r\n"));
-      continue;
-    }
-    execRunning = true;
-    try {
-      await shell.exec(line, termSink);
-    } catch (e) {
-      termOut(enc.encode("wsh: " + (e && e.message ? e.message : e) + "\r\n"));
-    } finally {
-      execRunning = false;
-    }
-  }
-}
-
-// The REPL's output sink: program stdout/stderr both flow to the single terminal
-// stream. \n is normalized to \r\n so a bare-LF program lands the cursor at col 0.
+// program stdout/stderr → terminal stream; \n normalized to \r\n so a bare-LF
+// program lands the cursor at col 0.
 const crlf = (b) => {
   const s = dec.decode(b);
   return s.includes("\n") && !s.includes("\r\n") ? enc.encode(s.replace(/\n/g, "\r\n")) : b;
 };
-const termSink = { stdout: (b) => termOut(crlf(b)), stderr: (b) => termOut(crlf(b)) };
 
-// The shell `read` builtin / prompts read a line from the terminal. Returns the
-// line text (newline stripped), or null on EOF / ^C.
-async function readLineFromTty() {
-  const b = await waitForLine();
-  if (b === INTERRUPT || b == null) return null;
-  return dec.decode(b).replace(/\n$/, "");
+// One interactive terminal session, bound to a kernel tty id. Owns its shell
+// session, prompt line editor, foreground bookkeeping, and REPL — all keyed to
+// `ttyId` so terminals never cross-talk. Registered in `terminals` by id.
+const terminals = new Map(); // ttyId → Terminal
+
+class Terminal {
+  constructor(ttyId) {
+    this.ttyId = ttyId;
+    // A private shell session, seeded from the base env (PATH etc. already applied
+    // by the boot profile) so a new terminal starts ready without re-sourcing.
+    this.session = { cwd: "/", env: { ...systemSession.env } };
+    this.started = false; // the REPL loop is running
+    this.execRunning = false; // a foreground command is running under the REPL
+    this.termWaiter = null; // { resolve } awaiting the next committed input line
+    this.history = []; // interactive command history (for the readline prompt)
+    this.activeReadline = null; // the line editor while the prompt is being edited
+    this.sink = { stdout: (b) => this.out(crlf(b)), stderr: (b) => this.out(crlf(b)) };
+    // The shell driver for this terminal: its pipelines attach to this tty (ctty +
+    // foreground), and its `read` builtin draws from this terminal's line editor.
+    this.shell = createShell({
+      kernel,
+      startProcess: (o) => startProcess({ ...o, ttyId: this.ttyId }),
+      session: this.session,
+      readLine: () => this.readLineFromTty(),
+    });
+  }
+
+  // Send bytes to this terminal's display (main thread → the right xterm).
+  out(bytes) {
+    if (bytes && bytes.length) post({ type: MSG.TERM_OUTPUT, session: this.ttyId, data: bytes });
+  }
+
+  // This terminal's foreground process group members (the control-key delivery
+  // set): tcgetpgrp on this tty + the group's live members (ADR-025). Exec'd
+  // grandchildren inherit the group, so ^C reaches them too.
+  fgMembers() {
+    if (!kernel) return [];
+    const g = kernel.tty_get_foreground(this.ttyId);
+    return g ? Array.from(kernel.pgrp_members(g)) : [];
+  }
+
+  // Resolve a parked line-waiter if a full line has cleared this tty's discipline.
+  pumpWaiter() {
+    if (!this.termWaiter) return;
+    const line = kernel.tty_read_line(this.ttyId); // Uint8Array, or null if no full line
+    if (line != null) {
+      const w = this.termWaiter;
+      this.termWaiter = null;
+      w.resolve(line);
+    }
+  }
+
+  // Await the next committed input line (the REPL prompt and the shell `read`
+  // builtin share this). Resolves with the line bytes, or INTERRUPT on ^C.
+  waitForLine() {
+    return new Promise((resolve) => {
+      this.termWaiter = { resolve };
+      this.pumpWaiter();
+    });
+  }
+
+  // A ^C from this tty's line discipline: interrupt the foreground pipeline if one
+  // is running, else cancel the line being typed. A foreground process that
+  // installed a SIGINT handler receives it cooperatively (and keeps running); one
+  // that did not is hard-killed with the conventional 130 (128 + SIGINT).
+  onInterrupt() {
+    if (this.execRunning) {
+      for (const pid of this.fgMembers()) {
+        if (catches(pid, "SIGINT")) deliverSignal(pid, "SIGINT");
+        else handleExit(pid, 130);
+      }
+    }
+    if (this.termWaiter) {
+      const w = this.termWaiter;
+      this.termWaiter = null;
+      w.resolve(INTERRUPT); // unblock a `read` builtin / the prompt so it doesn't hang
+    }
+  }
+
+  // A ^Z from the line discipline. WorkerOS has no job-control suspend yet, so the
+  // default disposition is *ignore* (not stop); a foreground process that installed
+  // a SIGTSTP handler is told, and can act on it.
+  onSusp() {
+    for (const pid of this.fgMembers()) {
+      if (catches(pid, "SIGTSTP")) deliverSignal(pid, "SIGTSTP");
+    }
+  }
+
+  prompt() {
+    const cwd = this.session.cwd;
+    return `${cwd === "/" ? "/" : cwd} $ `;
+  }
+
+  // Tab-completion for the prompt. Completes the token under the cursor against
+  // the live VFS: a command name (PATH programs + builtins) in command position,
+  // or a filesystem path otherwise (dir candidates carry a trailing "/"). Runs
+  // through the injector's kernel context with absolute paths, resolving against
+  // this terminal's session cwd.
+  completeLine(line, pos) {
+    const session = this.session;
+    let start = pos;
+    while (start > 0 && !/\s/.test(line[start - 1])) start--;
+    const token = line.slice(start, pos);
+
+    const readdir = (absDir) => {
+      try { return kernel.sys_readdir(injectorPid, absDir) || []; } catch { return []; }
+    };
+
+    if (!token.includes("/") && /(^|[|&;(])\s*$/.test(line.slice(0, start))) {
+      const items = new Set();
+      for (const name of SHELL_BUILTINS) if (name.startsWith(token)) items.add(name);
+      const path = (session.env && session.env.PATH) || "/bin:/sbin";
+      for (const dir of path.split(":")) {
+        if (!dir) continue;
+        for (const e of readdir(dir)) if (!e.is_dir && e.name.startsWith(token)) items.add(e.name);
+      }
+      return { start, items: [...items].sort() };
+    }
+
+    const HOME = ((session.env && session.env.HOME) || "/").replace(/\/$/, "");
+    const slash = token.lastIndexOf("/");
+    const dirPart = slash < 0 ? "" : token.slice(0, slash + 1);
+    const base = slash < 0 ? token : token.slice(slash + 1);
+    const resolveTarget = dirPart.replace(/^~\//, HOME + "/");
+    let absDir;
+    try { absDir = kernel.resolve_dir(session.cwd, resolveTarget || "."); } catch { return { start, items: [] }; }
+    const items = [];
+    for (const e of readdir(absDir)) {
+      if (e.name.startsWith(".") && !base.startsWith(".")) continue; // hide dotfiles
+      if (!e.name.startsWith(base)) continue;
+      items.push(dirPart + e.name + (e.is_dir ? "/" : ""));
+    }
+    return { start, items: items.sort() };
+  }
+
+  // Read one command line through the raw-mode line editor (history + cursor
+  // editing). Resolves with the editor's result: a submitted line, an abort (^C),
+  // or EOF (^D on an empty line).
+  readCommandLine() {
+    return new Promise((resolve) => {
+      const editor = createLineEditor({
+        prompt: this.prompt(),
+        history: this.history,
+        write: (s) => this.out(enc.encode(s)),
+        columns: () => (kernel.tty_get_winsize(this.ttyId) || {}).cols || 80,
+        complete: (line, pos) => this.completeLine(line, pos),
+        done: (r) => { this.activeReadline = null; resolve(r); },
+      });
+      this.activeReadline = editor;
+      editor.start();
+    });
+  }
+
+  // The interactive read-eval-print loop, reading command lines from this tty.
+  async repl() {
+    for (;;) {
+      const res = await this.readCommandLine();
+      if (res.aborted || res.eof) continue; // ^C / ^D on empty → fresh prompt
+      const line = res.line;
+      const trimmed = line.trim();
+      if (trimmed === "") continue;
+      if (this.history[this.history.length - 1] !== line) this.history.push(line);
+      // Two conveniences the browser page used to own; now terminal-side. `clear`
+      // is an ANSI screen wipe; `ps` formats the live process table.
+      if (trimmed === "clear") {
+        this.out(enc.encode("\x1b[2J\x1b[H"));
+        continue;
+      }
+      if (trimmed === "ps") {
+        const rows = kernel
+          .list_processes()
+          .map((p) => `${String(p.pid).padStart(4)} ${p.state.padEnd(8)} ${p.argv.join(" ")}`);
+        this.out(enc.encode((rows.join("\r\n") || "(no live processes)") + "\r\n"));
+        continue;
+      }
+      this.execRunning = true;
+      try {
+        await this.shell.exec(line, this.sink);
+      } catch (e) {
+        this.out(enc.encode("wsh: " + (e && e.message ? e.message : e) + "\r\n"));
+      } finally {
+        this.execRunning = false;
+      }
+    }
+  }
+
+  // The shell `read` builtin / prompts read a line from this terminal. Returns the
+  // line text (newline stripped), or null on EOF / ^C.
+  async readLineFromTty() {
+    const b = await this.waitForLine();
+    if (b === INTERRUPT || b == null) return null;
+    return dec.decode(b).replace(/\n$/, "");
+  }
+
+  // Start the REPL once (idempotent — a repeated TERM_START is a no-op). The
+  // session env was seeded from the already-profiled base env, so there's no need
+  // to re-source /etc/profile per terminal.
+  start() {
+    if (this.started) return;
+    this.started = true;
+    this.repl().catch((e) =>
+      this.out(enc.encode("wsh: repl crashed: " + (e && e.message ? e.message : e) + "\r\n")),
+    );
+  }
+}
+
+// Look up a terminal by kernel tty id, creating it on first use. The primary tty
+// (the legacy single-terminal client path) and any `openTerminal()`-allocated tty
+// resolve here; a stale id (its window already closed) yields `undefined`.
+function terminalFor(ttyId, create) {
+  let t = terminals.get(ttyId);
+  if (!t && create) {
+    t = new Terminal(ttyId);
+    terminals.set(ttyId, t);
+  }
+  return t;
 }
 
 const PROGRAM_WORKER_URL = new URL("./program-worker.js", import.meta.url);
@@ -476,7 +516,7 @@ function runCaptured(line, input, opts) {
   const outChunks = [];
   const errChunks = [];
   const sink = { stdout: (b) => outChunks.push(b), stderr: (b) => errChunks.push(b) };
-  return shell.exec(line, sink, input, opts).then((code) => ({
+  return systemShell.exec(line, sink, input, opts).then((code) => ({
     code: code | 0,
     stdout: concatChunks(outChunks),
     stderr: concatChunks(errChunks),
@@ -549,19 +589,23 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
   return exited;
 }
 
-/** Used by the shell driver: spawn one command with a stdio plan + sink.
+/** Used by a shell driver: spawn one command with a stdio plan + sink.
  *  `pgroup` ({ leader }) places the process in a pipeline's process group
- *  (ADR-025): the first spawn ({ leader: 0 }) becomes the group leader *and*
- *  the terminal's foreground group (tcsetpgrp) so ^C/^Z/SIGWINCH reach the
- *  whole pipeline; later stages join `pgroup.leader`. Without a pgroup the
- *  process inherits its parent's group (exec'd sub-commands stay inside the
- *  caller's job). */
-function startProcess({ argv, env, cwd, plan, sink, ppid, pgroup }) {
+ *  (ADR-025): the first spawn ({ leader: 0 }) becomes the group leader; with a
+ *  controlling terminal (`ttyId`, an interactive REPL) it also becomes that
+ *  terminal's foreground group (tcsetpgrp) so ^C/^Z/SIGWINCH reach the whole
+ *  pipeline. Later stages join `pgroup.leader`. `ttyId` undefined (captured
+ *  `system(3)`/child runs) touches no terminal — those inherit the parent's ctty
+ *  and never seize a foreground group. */
+function startProcess({ argv, env, cwd, plan, sink, ppid, pgroup, ttyId }) {
   const pgid = pgroup ? pgroup.leader || 0 : undefined;
-  const spawned = spawnKernel(argv, env, cwd, plan, { ppid, pgid });
+  // Interactive pipelines attach to their terminal; captured runs pass ctty=null
+  // to inherit the calling process's terminal (isatty/winsize stay truthful).
+  const ctty = ttyId != null ? ttyId : null;
+  const spawned = spawnKernel(argv, env, cwd, plan, { ppid, pgid, ctty });
   if (pgroup && !pgroup.leader) {
     pgroup.leader = spawned.pid;
-    kernel.tty_set_foreground(PRIMARY_TTY, spawned.pid);
+    if (ttyId != null) kernel.tty_set_foreground(ttyId, spawned.pid);
   }
   const exited = startWorker(spawned, { argv, env, cwd, sink, onExit: () => {} });
   return { pid: spawned.pid, exited };
@@ -573,6 +617,9 @@ function handleExit(pid, code) {
   if (!rec || rec.done) return;
   rec.done = true;
   tracer.record("proc", pid, "exit", `code=${code}`);
+  // The process's controlling terminal (captured before reap drops its context) —
+  // job-control cleanup must target the *right* terminal in a multi-terminal world.
+  const ctty = kernel.proc_ctty(pid);
   kernel.mark_exited(pid, code); // idempotent; closes its pipe/file fds → EOF downstream
   kernel.watchClosePid(pid); // drop this process's fs.watch registrations
   // Its parked I/O dies with it; then downstream pipe readers may see EOF and
@@ -580,18 +627,18 @@ function handleExit(pid, code) {
   syncPendingWrites = syncPendingWrites.filter((w) => w.pid !== pid);
   asyncWriteQueues.delete(pid);
   pumpIo();
-  const fg = kernel.tty_get_foreground(PRIMARY_TTY);
+  const fg = ctty ? kernel.tty_get_foreground(ctty) : 0;
   const wasForeground = fg !== 0 && kernel.proc_pgid(pid) === fg;
   kernel.reap(pid);
   rec.worker.terminate();
   programs.delete(pid);
   // Safety net: when the *last* member of the foreground group goes (e.g. an
-  // editor killed before restoring termios), return the terminal to the shell —
+  // editor killed before restoring termios), return its terminal to the shell —
   // cooked line discipline, foreground pgrp cleared (tcsetpgrp 0). A
   // well-behaved program restores termios itself; this covers the crash/kill path.
   if (wasForeground && kernel.pgrp_members(fg).length === 0) {
-    kernel.tty_set_attr(PRIMARY_TTY, { canonical: true, echo: true, isig: true });
-    kernel.tty_set_foreground(PRIMARY_TTY, 0);
+    kernel.tty_set_attr(ctty, { canonical: true, echo: true, isig: true });
+    kernel.tty_set_foreground(ctty, 0);
   }
   caughtSignals.delete(pid);
   workerContexts.delete(pid);
@@ -1278,7 +1325,7 @@ function handleSyscall(pid, msg) {
         const sink = rec
           ? rec.sink
           : { stdout: () => {}, stderr: () => {} };
-        shell
+        systemShell
           .exec(args.line, sink, undefined, rec && { env: rec.env, cwd: rec.cwd, ppid: pid })
           .then((code) => reply(pid, id, true, code | 0))
           .catch((e) => reply(pid, id, false, String(e && e.message ? e.message : e)));
@@ -1301,6 +1348,9 @@ function handleSyscall(pid, msg) {
         const stdio = args.stdio || ["pipe", "pipe", "pipe"];
         const parentRec = programs.get(pid);
         const parentWorker = parentRec && parentRec.worker;
+        // A stdio:'inherit' child shares the parent's controlling terminal — route
+        // its output to that terminal's display (multi-terminal aware).
+        const parentTty = terminalFor(kernel.proc_ctty(pid), false);
 
         // stdin: 'inherit' reads the terminal directly; otherwise a temp VFS file
         // (seeded from `input` for a pipe, empty for 'ignore') gives a clean EOF.
@@ -1318,7 +1368,9 @@ function handleSyscall(pid, msg) {
         const cleanup = () => { if (tmp) { try { kernel.sys_unlink(pid, tmp); } catch {} } };
         let spawned;
         try {
-          spawned = spawnKernel(args.argv, args.env || {}, args.cwd || session.cwd, plan, { ppid: pid });
+          // ctty=null: inherit the parent's controlling terminal, so an 'inherit'
+          // child's isatty/stdin/foreground track the parent's terminal (multi-PTY).
+          spawned = spawnKernel(args.argv, args.env || {}, args.cwd || systemSession.cwd, plan, { ppid: pid, ctty: null });
         } catch (e) {
           cleanup();
           reply(pid, id, false, String(e && e.message ? e.message : e));
@@ -1332,7 +1384,7 @@ function handleSyscall(pid, msg) {
         // parent worker's child streams; 'ignore' → dropped.
         const route = (fd, msgType) => {
           const mode = stdio[fd];
-          if (mode === "inherit") return (b) => termOut(crlf(b));
+          if (mode === "inherit") return (b) => parentTty && parentTty.out(crlf(b));
           if (mode === "ignore") return () => {};
           return (b) => parentWorker && parentWorker.postMessage({ type: msgType, pid: childPid, data: b });
         };
@@ -1340,7 +1392,7 @@ function handleSyscall(pid, msg) {
         startWorker(spawned, {
           argv: args.argv,
           env: args.env || {},
-          cwd: args.cwd || session.cwd,
+          cwd: args.cwd || systemSession.cwd,
           sink,
           onExit: (code) => {
             cleanup();
@@ -1369,7 +1421,7 @@ function handleSyscall(pid, msg) {
         const parentRec = programs.get(pid);
         const argv = args.eval ? ["node", "-e", args.file] : ["node", args.file, ...(args.argv || [])];
         const env = args.env || (parentRec && parentRec.env) || {};
-        const cwd = args.cwd || session.cwd;
+        const cwd = args.cwd || systemSession.cwd;
         let spawned;
         try {
           spawned = spawnKernel(argv, env, cwd, null);
@@ -1511,10 +1563,10 @@ self.onmessage = async (ev) => {
         // tests) ride the boot message; defaults mirror limits.rs WATCHDOG.
         if (msg.watchdog) Object.assign(watchdog, msg.watchdog);
         setInterval(watchdogTick, watchdog.sampleMs);
-        shell = createShell({ kernel, startProcess, session, readLine: readLineFromTty });
+        systemShell = createShell({ kernel, startProcess, session: systemSession, readLine: async () => null });
         // Apply the login profiles (PATH etc.) before any command can run, so
         // both the interactive REPL and programmatic exec see the global bin dir.
-        await shell.sourceProfile();
+        await systemShell.sourceProfile();
         post({ type: MSG.BOOTED, version: kernel.version, abi: kernel.abi });
         break;
       }
@@ -1550,7 +1602,7 @@ self.onmessage = async (ev) => {
         break;
 
       case MSG.SPAWN: {
-        const spawned = spawnKernel(msg.argv, msg.env, msg.cwd || session.cwd, null, { caps: msg.caps });
+        const spawned = spawnKernel(msg.argv, msg.env, msg.cwd || systemSession.cwd, null, { caps: msg.caps });
         const pid = spawned.pid;
         const sink = {
           stdout: (b) => post({ type: MSG.STDOUT, pid, data: b }),
@@ -1559,7 +1611,7 @@ self.onmessage = async (ev) => {
         startWorker(spawned, {
           argv: msg.argv,
           env: msg.env || {},
-          cwd: msg.cwd || session.cwd,
+          cwd: msg.cwd || systemSession.cwd,
           sink,
           onExit: (code) => post({ type: MSG.EXIT, pid, code }),
         });
@@ -1573,12 +1625,12 @@ self.onmessage = async (ev) => {
           stdout: (b) => post({ type: MSG.EXEC_STDOUT, execId, data: b }),
           stderr: (b) => post({ type: MSG.EXEC_STDERR, execId, data: b }),
         };
-        shell
+        systemShell
           .exec(msg.line, sink)
-          .then((code) => post({ type: MSG.EXEC_DONE, execId, code, cwd: session.cwd }))
+          .then((code) => post({ type: MSG.EXEC_DONE, execId, code, cwd: systemSession.cwd }))
           .catch((e) => {
             sink.stderr(enc.encode(String(e && e.stack ? e.stack : e) + "\n"));
-            post({ type: MSG.EXEC_DONE, execId, code: 1, cwd: session.cwd });
+            post({ type: MSG.EXEC_DONE, execId, code: 1, cwd: systemSession.cwd });
           });
         break;
       }
@@ -1613,44 +1665,71 @@ self.onmessage = async (ev) => {
         break;
       }
 
+      case MSG.TERM_OPEN: {
+        // Allocate a fresh controlling terminal (an additional xterm window) and
+        // its shell session. Reply with the kernel tty id the client tags all
+        // subsequent input/resize/start/close for this terminal with.
+        const ttyId = kernel.tty_open();
+        terminalFor(ttyId, true);
+        post({ type: MSG.TERM_OPENED, id: msg.id, session: ttyId });
+        break;
+      }
+
       case MSG.TTY_INPUT: {
+        // The legacy single-terminal client omits `session` → the primary tty.
+        const t = terminalFor(msg.session || PRIMARY_TTY, true);
         // While the shell prompt is being edited, the REPL owns the terminal in
         // raw mode: keystrokes go straight to the line editor (its own echo +
         // editing), bypassing the kernel's cooked discipline.
-        if (activeReadline) {
-          activeReadline.feed(msg.data);
+        if (t.activeReadline) {
+          t.activeReadline.feed(msg.data);
           break;
         }
         // Otherwise a program (or the `read` builtin) is reading: run keystrokes
         // through the kernel cooked line discipline (echo + control-key signals).
-        const res = kernel.tty_input(PRIMARY_TTY, msg.data);
-        termOut(res.echo);
-        if (res.signal === "int") onInterrupt();
-        else if (res.signal === "susp") onSusp();
+        const res = kernel.tty_input(t.ttyId, msg.data);
+        t.out(res.echo);
+        if (res.signal === "int") t.onInterrupt();
+        else if (res.signal === "susp") t.onSusp();
         // A committed line may now unblock a foreground program's read, or the
         // `read` builtin waiting on the prompt.
         pumpIo();
-        pumpWaiter();
+        t.pumpWaiter();
         break;
       }
 
-      case MSG.RESIZE:
-        kernel.tty_set_winsize(PRIMARY_TTY, msg.rows | 0, msg.cols | 0);
+      case MSG.RESIZE: {
+        const t = terminalFor(msg.session || PRIMARY_TTY, true);
+        kernel.tty_set_winsize(t.ttyId, msg.rows | 0, msg.cols | 0);
         // Re-wrap the shell prompt at the new width if it's being edited.
-        if (activeReadline) activeReadline.resize();
+        if (t.activeReadline) t.activeReadline.resize();
         // Notify the foreground process(es) so a TUI can re-layout. Default
         // disposition is ignore, so a program without a handler is unaffected.
-        for (const pid of fgMembers()) deliverSignal(pid, "SIGWINCH");
+        for (const pid of t.fgMembers()) deliverSignal(pid, "SIGWINCH");
         break;
+      }
 
-      case MSG.TERM_START:
-        if (!termStarted) {
-          termStarted = true;
-          repl().catch((e) =>
-            termOut(enc.encode("wsh: repl crashed: " + (e && e.message ? e.message : e) + "\r\n")),
-          );
+      case MSG.TERM_START: {
+        // Start (idempotently) the REPL for this terminal — primary by default.
+        terminalFor(msg.session || PRIMARY_TTY, true).start();
+        break;
+      }
+
+      case MSG.TERM_CLOSE: {
+        // The window closed: stop reading, kill its foreground job, release the
+        // kernel tty, and drop the session. The primary terminal is permanent.
+        const ttyId = msg.session || PRIMARY_TTY;
+        const t = terminals.get(ttyId);
+        if (t) {
+          for (const pid of t.fgMembers()) handleExit(pid, 129); // SIGHUP-ish
+          if (t.termWaiter) { const w = t.termWaiter; t.termWaiter = null; w.resolve(null); }
+        }
+        if (ttyId !== PRIMARY_TTY) {
+          kernel.tty_close(ttyId);
+          terminals.delete(ttyId);
         }
         break;
+      }
 
       default:
         post({ type: MSG.ERROR, error: `unknown message type: ${msg.type}` });

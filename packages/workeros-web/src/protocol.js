@@ -20,16 +20,22 @@ export const MSG = Object.freeze({
   STDIN: "stdin",
   // main → kernel: persist the durable filesystem now (e.g. tab hidden/closing).
   FS_FLUSH: "fs_flush",
-  // main → kernel: interactive terminal (xterm) channel
+  // main → kernel: interactive terminal (xterm) channel. Multi-PTY: each message
+  // carries a `session` = the kernel tty id (omitted ⇒ the primary terminal, the
+  // legacy single-terminal client path). TERM_OUTPUT back is tagged with the same
+  // `session` so the client routes bytes to the right window.
   TTY_INPUT: "tty_input", // raw keystrokes → the kernel line discipline
   RESIZE: "resize", // terminal window size changed
-  TERM_START: "term_start", // begin the interactive shell REPL
+  TERM_START: "term_start", // begin the interactive shell REPL for a terminal
+  TERM_OPEN: "term_open", // allocate a new controlling terminal; reply TERM_OPENED
+  TERM_CLOSE: "term_close", // release a terminal (its window closed)
   // main → kernel: a preview HTTP request to inject into a listening process
   // (ADR-021). Carries { id, port, bytes } (raw HTTP/1.1 request); the reply is
   // PREVIEW_RESPONSE with the raw HTTP/1.1 response bytes.
   PREVIEW_REQUEST: "preview_request",
   // kernel → main
-  TERM_OUTPUT: "term_output", // bytes for the terminal display (prompt/echo/stdout)
+  TERM_OUTPUT: "term_output", // bytes for a terminal display (tagged with `session`)
+  TERM_OPENED: "term_opened", // reply to TERM_OPEN: { id, session } (the new tty id)
   BOOTED: "booted",
   SPAWNED: "spawned",
   STDOUT: "stdout",

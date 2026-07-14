@@ -9,6 +9,11 @@ import { MSG } from "./protocol.js";
 
 const encoder = new TextEncoder();
 
+// The primary controlling terminal (kernel `PRIMARY_TTY`). The legacy
+// single-terminal API (`onOutput`/`input`/`resize`/`startTerminal`) drives it;
+// `openTerminal()` allocates additional independent terminals.
+const PRIMARY_TTY = 1;
+
 function toBytes(data) {
   return typeof data === "string" ? encoder.encode(data) : new Uint8Array(data);
 }
@@ -78,8 +83,9 @@ export class WorkerOS {
     this._pending = new Map(); // request id → {resolve, reject}
     this._procs = new Map(); // pid → Process
     this._execs = new Map(); // exec id → {onStdout, onStderr, resolve}
-    this._termListeners = []; // terminal-output subscribers (Uint8Array chunks)
-    this._termBuffer = []; // output emitted before a listener attached
+    // Terminal output is per session (kernel tty id → { listeners, buffer }); the
+    // buffer holds bytes emitted before a listener for that session attached.
+    this._termSessions = new Map();
 
     /** @type {{ write: (path: string, data: Uint8Array|string) => Promise<void>,
      *           read: (path: string) => Promise<Uint8Array> }} */
@@ -136,6 +142,14 @@ export class WorkerOS {
         }
         break;
       }
+      case MSG.TERM_OPENED: {
+        const p = this._pending.get(msg.id);
+        if (p) {
+          this._pending.delete(msg.id);
+          p.resolve(msg.session);
+        }
+        break;
+      }
       case MSG.PREVIEW_RESPONSE: {
         // The kernel injector's raw HTTP response bytes for a preview request
         // (ADR-021); resolve with the bytes or reject (e.g. ECONNREFUSED).
@@ -171,8 +185,10 @@ export class WorkerOS {
         break;
       }
       case MSG.TERM_OUTPUT: {
-        if (this._termListeners.length === 0) this._termBuffer.push(msg.data);
-        else for (const cb of this._termListeners) cb(msg.data);
+        // Route to the addressed terminal (omitted session ⇒ the primary one).
+        const s = this._termSession(msg.session || PRIMARY_TTY);
+        if (s.listeners.length === 0) s.buffer.push(msg.data);
+        else for (const cb of s.listeners) cb(msg.data);
         break;
       }
       case MSG.EXIT: {
@@ -254,38 +270,59 @@ export class WorkerOS {
     return this._request(MSG.PREVIEW_REQUEST, { port, bytes });
   }
 
-  // ---- interactive terminal (kernel-owned TTY) ----
+  // ---- interactive terminals (kernel-owned TTYs) ----
+
+  /** Per-session output record ({ listeners, buffer }), created on first use. */
+  _termSession(id) {
+    let s = this._termSessions.get(id);
+    if (!s) {
+      s = { listeners: [], buffer: [] };
+      this._termSessions.set(id, s);
+    }
+    return s;
+  }
 
   /**
-   * Subscribe to terminal-display output (Uint8Array chunks: prompt, echo, and
-   * program stdout/stderr). Any output buffered before the first listener
-   * attaches is flushed immediately. Returns an unsubscribe fn.
+   * Subscribe to the primary terminal's display output (Uint8Array chunks:
+   * prompt, echo, and program stdout/stderr). Any output buffered before the
+   * first listener attaches is flushed immediately. Returns an unsubscribe fn.
    */
   onOutput(cb) {
-    this._termListeners.push(cb);
-    if (this._termBuffer.length) {
-      const buffered = this._termBuffer;
-      this._termBuffer = [];
+    const s = this._termSession(PRIMARY_TTY);
+    s.listeners.push(cb);
+    if (s.buffer.length) {
+      const buffered = s.buffer;
+      s.buffer = [];
       for (const chunk of buffered) cb(chunk);
     }
     return () => {
-      this._termListeners = this._termListeners.filter((f) => f !== cb);
+      s.listeners = s.listeners.filter((f) => f !== cb);
     };
   }
 
-  /** Send raw keystrokes to the terminal (through the kernel line discipline). */
+  /** Send raw keystrokes to the primary terminal (through the line discipline). */
   input(data) {
     this._send({ type: MSG.TTY_INPUT, data: toBytes(data) });
   }
 
-  /** Report a new terminal window size (rows/cols in character cells). */
+  /** Report a new size for the primary terminal (rows/cols in character cells). */
   resize(rows, cols) {
     this._send({ type: MSG.RESIZE, rows: rows | 0, cols: cols | 0 });
   }
 
-  /** Start the interactive shell REPL. Call after attaching `onOutput`. */
+  /** Start the primary terminal's interactive shell REPL. Call after `onOutput`. */
   startTerminal() {
     this._send({ type: MSG.TERM_START });
+  }
+
+  /**
+   * Open an additional, independent terminal — its own shell session, line
+   * discipline, window size, and foreground job (multi-PTY). Resolves with a
+   * `TerminalSession` handle. Drives a second xterm window with no cross-talk.
+   */
+  async openTerminal() {
+    const id = await this._request(MSG.TERM_OPEN, {});
+    return new TerminalSession(this, id);
   }
 
   /** Send a signal to a process by pid (defaults to SIGKILL). */
@@ -300,6 +337,58 @@ export class WorkerOS {
   /** Tear down the instance (terminates the kernel worker and all programs). */
   shutdown() {
     this._worker.terminate();
+  }
+}
+
+/**
+ * A handle to one independent terminal opened with {@link WorkerOS#openTerminal}.
+ * Mirrors the primary-terminal methods (`onOutput`/`input`/`resize`/`start`) but
+ * scoped to its own kernel tty id, so several xterm windows drive fully separate
+ * shells. Call {@link TerminalSession#close} when the window closes.
+ */
+export class TerminalSession {
+  constructor(os, session) {
+    this._os = os;
+    /** The kernel tty id backing this terminal. */
+    this.session = session;
+    this._closed = false;
+  }
+
+  /** Subscribe to this terminal's display output. Returns an unsubscribe fn. */
+  onOutput(cb) {
+    const s = this._os._termSession(this.session);
+    s.listeners.push(cb);
+    if (s.buffer.length) {
+      const buffered = s.buffer;
+      s.buffer = [];
+      for (const chunk of buffered) cb(chunk);
+    }
+    return () => {
+      s.listeners = s.listeners.filter((f) => f !== cb);
+    };
+  }
+
+  /** Send raw keystrokes to this terminal (through its line discipline). */
+  input(data) {
+    this._os._send({ type: MSG.TTY_INPUT, session: this.session, data: toBytes(data) });
+  }
+
+  /** Report a new size for this terminal (rows/cols in character cells). */
+  resize(rows, cols) {
+    this._os._send({ type: MSG.RESIZE, session: this.session, rows: rows | 0, cols: cols | 0 });
+  }
+
+  /** Start this terminal's interactive shell REPL. Call after attaching `onOutput`. */
+  start() {
+    this._os._send({ type: MSG.TERM_START, session: this.session });
+  }
+
+  /** Close this terminal: kill its foreground job and release the kernel tty. */
+  close() {
+    if (this._closed) return;
+    this._closed = true;
+    this._os._send({ type: MSG.TERM_CLOSE, session: this.session });
+    this._os._termSessions.delete(this.session);
   }
 }
 
