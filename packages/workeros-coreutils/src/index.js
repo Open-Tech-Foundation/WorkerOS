@@ -334,6 +334,16 @@ const sources = operands.slice(0, -1);
 const destination = operands[operands.length - 1];
 const dstat = await sys.stat(destination).catch(() => null);
 if (sources.length > 1 && (!dstat || dstat.kind !== "dir")) invalidUsage("target '" + destination + "' is not a directory");
+const canonical = (path) => {
+  const absolute = path.startsWith("/") ? path : sys.cwd.replace(/\\/+$/, "") + "/" + path;
+  const parts = [];
+  for (const part of absolute.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return "/" + parts.join("/");
+};
 const ensureDir = async (path) => {
   const st = await sys.stat(path).catch(() => null);
   if (st) {
@@ -343,12 +353,14 @@ const ensureDir = async (path) => {
   await sys.mkdir(path);
 };
 const copyEntry = async (src, dst) => {
-  if (src === dst) throw new Error("source and destination are the same file");
+  const srcCanonical = canonical(src), dstCanonical = canonical(dst);
+  if (srcCanonical === dstCanonical) throw new Error("source and destination are the same file");
+  const sourcePrefix = srcCanonical === "/" ? "/" : srcCanonical + "/";
+  if (recursive && dstCanonical.startsWith(sourcePrefix)) throw new Error("cannot copy a directory into itself");
   const sstat = await sys.stat(src);
   if (sstat.kind === "dir") {
     if (!recursive) throw new Error("is a directory (use -r)");
     const prefix = src.replace(/\\/+$/, "") + "/";
-    if (dst.startsWith(prefix)) throw new Error("cannot copy a directory into itself");
     await ensureDir(dst);
     for (const entry of await sys.readdir(src)) {
       await copyEntry(prefix + entry.name, dst.replace(/\\/+$/, "") + "/" + entry.name);

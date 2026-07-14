@@ -337,6 +337,13 @@ test("cp refuses an identical source and destination", async () => {
   assert.equal(result.code, 1);
   assert.equal(result.err, "cp: /same: source and destination are the same file\n");
   assert.equal(result.files["/same"], "preserved");
+
+  const alias = await run("cp", {
+    argv: ["/dir/../same", "/same"], files: { "/same": "preserved" },
+  });
+  assert.equal(alias.code, 1);
+  assert.equal(alias.err, "cp: /dir/../same: source and destination are the same file\n");
+  assert.equal(alias.files["/same"], "preserved");
 });
 
 test("cp -r copies nested directory trees", async () => {
@@ -374,6 +381,12 @@ test("cp requires -r for directory sources", async () => {
   });
   assert.equal(self.code, 1);
   assert.equal(self.err, "cp: /src: cannot copy a directory into itself\n");
+
+  const aliasedSelf = await run("cp", {
+    argv: ["-r", "/src/../src", "/src/./copy"], files: { "/src/a": "A" }, dirs: ["/src"],
+  });
+  assert.equal(aliasedSelf.code, 1);
+  assert.equal(aliasedSelf.err, "cp: /src/../src: cannot copy a directory into itself\n");
 });
 
 test("head / tail", async () => {

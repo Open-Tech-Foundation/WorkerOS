@@ -64,7 +64,9 @@ existing directory. They process remaining sources after an individual source
 fails and return a non-zero final status. `cp -r` recursively creates and copies
 directory trees; other copy-policy and metadata-preservation flags remain out of
 scope. `cp` rejects an identical source and destination path before opening
-either file for output.
+either file for output. Safety comparisons canonicalize absolute/relative paths
+and `.`/`..` components, so aliases cannot bypass same-file or recursive
+self-copy protection.
 
 `rm -f` ignores a path only when it does not exist. Permission failures,
 directory operands without `-r`, and other removal errors remain visible and

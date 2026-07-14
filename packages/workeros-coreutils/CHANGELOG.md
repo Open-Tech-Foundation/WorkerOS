@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `cp` safety checks now canonicalize cwd-relative paths and `.`/`..`
+  components, preventing aliases from bypassing same-file or recursive
+  copy-into-self protection.
 - Decimal `seq` ranges now use safe scaled-integer iteration when possible,
   preserving inferred precision and reachable endpoints without binary
   floating-point artifacts in ascending, descending, or exponent-form ranges.
