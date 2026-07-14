@@ -749,6 +749,46 @@ pre.code .a { color: var(--accent-soft); }
 .dlg-danger { background: #e5484d; color: #fff; }
 .dlg-danger:hover { background: #d13b40; color: #fff; }
 
+/* ---------- context menu (shared by desktop / windows / apps) ---------- */
+.menu {
+  position: fixed;
+  z-index: 2500; /* above windows, dock, launcher, and dialogs */
+  min-width: 184px;
+  max-width: 300px;
+  padding: 5px;
+  background: color-mix(in srgb, var(--bg-elev-2) 96%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 18px 50px -16px rgba(0, 0, 0, 0.6), 0 2px 8px -4px rgba(0, 0, 0, 0.4);
+  backdrop-filter: saturate(150%) blur(12px);
+  animation: menu-in 0.1s ease-out;
+  font-size: 12.5px;
+}
+@keyframes menu-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.menu-item {
+  position: relative;
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 6px 10px 6px 8px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--text-dim);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.menu-item:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); }
+.menu-item.is-danger:hover { background: #e5484d; color: #fff; }
+.menu-item.is-disabled { opacity: 0.4; cursor: default; }
+.menu-item.is-disabled:hover { background: transparent; color: var(--text-dim); }
+.menu-ico { width: 16px; text-align: center; font-size: 13px; line-height: 1; flex: 0 0 auto; }
+.menu-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.menu-check { flex: 0 0 auto; color: var(--accent); font-size: 11px; }
+.menu-arrow { flex: 0 0 auto; color: var(--text-faint); font-size: 10px; }
+/* A separator is a non-interactive row (kept a <button> so the list stays
+   homogeneous for the reconciler) collapsed to a divider line. */
+.menu-item.is-sep {
+  height: 1px; margin: 4px 6px; padding: 0; gap: 0;
+  background: var(--line-soft); border-radius: 0; pointer-events: none;
+}
+.menu-item.is-sep > * { display: none; }
+.menu-item.is-sep:hover { background: var(--line-soft); }
+
 /* ---------- editor app ---------- */
 .app-editor { height: 100%; display: flex; flex-direction: column; background: var(--bg-elev); }
 .ed-bar {

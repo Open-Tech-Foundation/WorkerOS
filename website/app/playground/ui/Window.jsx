@@ -5,6 +5,7 @@
 // (minimize / maximize / close) on the right. Content is passed as children.
 
 import { wm, focusWindow, closeWindow, moveWindow, resizeWindow, minimize, toggleMax } from "../os/wm.js";
+import { contextMenu } from "../os/menus.js";
 
 // Drag/resize share this: track the pointer on `window` until release, so a fast
 // drag that outruns the element still follows.
@@ -59,6 +60,15 @@ export default function Window({ win, children }) {
 
   const stop = (e) => e.stopPropagation();
 
+  // The standard window menu — every window gets it on a title-bar right-click,
+  // regardless of which app fills it. Built at click time so labels track state.
+  const winMenu = contextMenu(() => [
+    { label: win.state === "min" ? "Restore" : "Minimize", icon: "▁", action: () => minimize(win.id) },
+    { label: win.state === "max" ? "Restore" : "Maximize", icon: "▢", action: () => toggleMax(win.id) },
+    { separator: true },
+    { label: "Close", icon: "✕", danger: true, action: () => closeWindow(win.id) },
+  ]);
+
   return (
     <section
       class={
@@ -76,7 +86,7 @@ export default function Window({ win, children }) {
       }
       onpointerdown={() => focusWindow(win.id)}
     >
-      <header class="win-bar" onpointerdown={startDrag} ondblclick={() => toggleMax(win.id)}>
+      <header class="win-bar" onpointerdown={startDrag} ondblclick={() => toggleMax(win.id)} oncontextmenu={winMenu}>
         <span class="win-title">
           <span class="win-ico">{win.icon}</span>
           <span class="win-name">{win.title}</span>

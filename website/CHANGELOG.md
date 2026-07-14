@@ -8,6 +8,21 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **UI toolkit — Pillar B (menus): one context-menu system for the whole DE.** A
+  shared, data-driven menu service (`os/menus.js`) rendered once at the desktop
+  level (`ui/ContextMenu.jsx`), so a right-click behaves identically on the desktop,
+  a window title bar, or inside any app — no app rolls its own. Menu items are plain
+  data (`{ label, icon?, action?, danger?, disabled?, checked?, separator?, submenu? }`),
+  keeping UI out of app code (per the framework's no-component-values rule). The menu
+  positions at the cursor and **clamps/flips inside the viewport**, dismisses on
+  outside-click / Escape / scroll / blur, and supports **cascading submenus** (a
+  sibling menu, not a nested list — a nested reactive list trips the list reconciler;
+  rows are homogeneous `<button>`s for the same reason). Wired up two standard menus:
+  the **window title-bar menu** (Minimize/Maximize/Close, labels tracking state) on
+  every window regardless of app, and the **desktop menu** (New Terminal, Open Files,
+  All Apps…, and an **Appearance** submenu that drives the theme engine). Verified
+  headlessly (12 checks): open on desktop + title bar, submenu hover + theme switch,
+  Close action, edge clamp, and all three dismiss paths — no console errors.
 - **UI toolkit — Pillar A: an OS-owned theme engine.** First piece of the WorkerOS
   UI toolkit (a GTK/Qt-analog layer so every app inherits the same chrome, menus,
   focus, and theme). The desktop now owns its own palette independent of the
