@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `wc` now counts files incrementally instead of retaining their complete
+  contents. Word classification uses a streaming UTF-8 decoder, so multibyte
+  characters split across read boundaries remain one character.
 - `tail` now retains only the requested final lines in a byte-preserving ring
   instead of decoding the entire input, including correct unterminated-line and
   chunk-boundary behavior.

@@ -74,9 +74,10 @@ time in UTC. WorkerOS does not currently model Unix owner/group or permission
 bits, so the leading access text is a conventional display profile based on the
 entry type rather than editable mode metadata.
 
-`wc` decodes text for word classification, but counts newlines and `-c` directly
-from the original bytes. UTF-8 multibyte characters therefore contribute their
-encoded byte length to `-c` and to the default third column.
+`wc` counts incrementally without retaining entire files. It counts newlines and
+`-c` directly from original input chunks, while a streaming UTF-8 decoder keeps
+word boundaries correct when a multibyte character crosses two reads. UTF-8
+characters contribute their encoded byte length to the default third column.
 
 `cut -f` preserves lines that do not contain the delimiter. Selected fields are
 written in their original input order, and overlapping field ranges do not

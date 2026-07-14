@@ -342,6 +342,16 @@ test("wc -c counts UTF-8 bytes instead of JavaScript string units", async () => 
   );
 });
 
+test("wc streams words across UTF-8 read boundaries", async () => {
+  const input = "a".repeat(65535) + "é x\n";
+  const result = await run("wc", { argv: ["-lwc"], stdin: input, inspectReads: true });
+  assert.equal(result.out, "1 2 65540\n");
+  assert.deepEqual(result.readCalls, [
+    { path: "-", bytes: 65536 },
+    { path: "-", bytes: 4 },
+  ]);
+});
+
 test("sort", async () => {
   assert.equal((await run("sort", { stdin: "banana\napple\ncherry\n" })).out, "apple\nbanana\ncherry\n");
   assert.equal((await run("sort", { argv: ["-rn"], stdin: "2\n10\n1\n" })).out, "10\n2\n1\n");

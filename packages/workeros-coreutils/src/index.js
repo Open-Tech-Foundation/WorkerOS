@@ -516,12 +516,29 @@ sys.exit(code);
   // wc [-l|-w|-c] [files] — count lines, words, characters.
   "/sbin/wc": util(`
 acceptOptions("lwc");
-const count = (bytes) => {
-  let lines = 0;
-  for (const byte of bytes) if (byte === 10) lines++;
-  const text = dec.decode(bytes);
-  const words = text.trim() === "" ? 0 : text.trim().split(/\\s+/).length;
-  return { lines, words, bytes: bytes.length };
+const countInput = async (file) => {
+  let fd = null, owned = false;
+  if (file === "-") fd = 0;
+  else { fd = await sys.open(file, {}); owned = true; }
+  try {
+    const decoder = new TextDecoder();
+    let lines = 0, words = 0, byteCount = 0, inWord = false;
+    const consume = (text) => {
+      for (const char of text) {
+        if (/\\s/.test(char)) inWord = false;
+        else if (!inWord) { words++; inWord = true; }
+      }
+    };
+    for (;;) {
+      const bytes = await sys.read(fd, 65536);
+      if (bytes.length === 0) break;
+      byteCount += bytes.length;
+      for (const byte of bytes) if (byte === 10) lines++;
+      consume(decoder.decode(bytes, { stream: true }));
+    }
+    consume(decoder.decode());
+    return { lines, words, bytes: byteCount };
+  } finally { if (owned) await closeQuietly(fd); }
 };
 const values = (counts) => {
   const parts = [];
@@ -535,7 +552,7 @@ const total = { lines: 0, words: 0, bytes: 0 };
 let code = 0;
 for (const file of inputs) {
   try {
-    const counts = count(await readInputBytes(file));
+    const counts = await countInput(file);
     total.lines += counts.lines; total.words += counts.words; total.bytes += counts.bytes;
     out(values(counts).join(" ") + (operands.length ? " " + file : "") + "\\n");
   } catch (e) {
