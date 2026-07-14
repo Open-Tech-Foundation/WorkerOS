@@ -7,6 +7,7 @@
 import WelcomeApp from "./apps/WelcomeApp.jsx";
 import TerminalApp from "./apps/TerminalApp.jsx";
 import ProcessesApp from "./apps/ProcessesApp.jsx";
+import FilesApp from "./apps/FilesApp.jsx";
 import AboutApp from "./apps/AboutApp.jsx";
 import PlaceholderApp from "./apps/PlaceholderApp.jsx";
 
@@ -15,6 +16,7 @@ export default function AppView({ win }) {
   const id = win.appId;
   return id === "terminal" ? <TerminalApp win={win} />
     : id === "processes" ? <ProcessesApp win={win} />
+    : id === "files" ? <FilesApp win={win} />
     : id === "welcome" ? <WelcomeApp win={win} />
     : id === "about" ? <AboutApp win={win} />
     : <PlaceholderApp win={win} />;

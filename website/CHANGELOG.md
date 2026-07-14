@@ -8,6 +8,15 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Playground desktop — Phase 3 (part 3): a Files browser.** A new Files app
+  (`ui/apps/FilesApp.jsx`) browses the real VFS via the new `os.fs.list(path)`:
+  directories sort first, clicking a folder navigates in, an up button climbs to the
+  parent, and clicking a text file previews it with `os.fs.read` (binary files are
+  detected and summarized rather than dumped). Each window keeps its own cwd in a
+  component-local reactive store. Verified headlessly: root lists the VFS with its
+  directories, a file created from a Terminal appears and previews its real content,
+  and folder navigation + the up button update the path — no console errors.
+  (Browser and Editor still render the placeholder.)
 - **Playground desktop — Phase 3 (part 2): a live Processes monitor.** A new
   Processes app (`ui/apps/ProcessesApp.jsx`) polls the kernel's real process table
   via `os.ps()` and renders PID/PPID/STATE/COMMAND with per-row **SIGTERM/SIGKILL**
