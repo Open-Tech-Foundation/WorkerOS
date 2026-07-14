@@ -371,10 +371,31 @@ if (a.length === 1) { last = a[0]; }
 else if (a.length === 2) { first = a[0]; last = a[1]; }
 else if (a.length >= 3) { first = a[0]; incr = a[1]; last = a[2]; }
 if (incr === 0) { err("seq: increment must not be zero\\n"); sys.exit(1); }
-const res = [];
-if (incr > 0) for (let i = first; i <= last; i += incr) res.push(i);
-else for (let i = first; i >= last; i += incr) res.push(i);
-emit(res.map(String));
+const inRange = incr > 0 ? first <= last : first >= last;
+if (inRange && first !== last && first + incr === first) invalidUsage("increment is too small to make progress");
+let buffer = "";
+const append = (value) => {
+  buffer += String(value) + "\\n";
+  if (buffer.length >= 8192) { out(buffer); buffer = ""; }
+};
+if (incr > 0) {
+  for (let i = first; i <= last;) {
+    append(i);
+    if (i === last) break;
+    const next = i + incr;
+    if (next === i) invalidUsage("increment is too small to make progress");
+    i = next;
+  }
+} else {
+  for (let i = first; i >= last;) {
+    append(i);
+    if (i === last) break;
+    const next = i + incr;
+    if (next === i) invalidUsage("increment is too small to make progress");
+    i = next;
+  }
+}
+if (buffer) out(buffer);
 sys.exit(0);
 `),
 

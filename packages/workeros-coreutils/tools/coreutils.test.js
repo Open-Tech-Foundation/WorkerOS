@@ -12,9 +12,10 @@ const enc = new TextEncoder(), dec = new TextDecoder();
 
 async function run(name, {
   argv = [], stdin = "", files = {}, dirs = [], readErrors = [], writeErrors = [], mkdirErrors = [], inspectFds = false,
+  inspectWrites = false,
 } = {}) {
   const body = coreutils["/sbin/" + name].replace(/^import .*?\n/, "");
-  const outB = [], errB = [];
+  const outB = [], errB = [], stdoutWrites = [];
   const vfs = new Map(Object.entries(files).map(([k, v]) => [k, enc.encode(v)]));
   const dirSet = new Set(dirs);
   const fds = new Map();
@@ -25,6 +26,7 @@ async function run(name, {
     write: (fd, bytes) => {
       if (fd === 1 || fd === 2) {
         (fd === 2 ? errB : outB).push(bytes);
+        if (fd === 1) stdoutWrites.push(bytes.length);
         return bytes.length;
       }
       const f = fds.get(fd);
@@ -80,6 +82,7 @@ async function run(name, {
     files: Object.fromEntries([...vfs].map(([path, data]) => [path, dec.decode(data)])),
   };
   if (inspectFds) result.openFds = [...fds.keys()].filter((fd) => fd > 2);
+  if (inspectWrites) result.stdoutWrites = stdoutWrites;
   return result;
 }
 
@@ -88,6 +91,20 @@ test("seq", async () => {
   assert.equal((await run("seq", { argv: ["2", "5"] })).out, "2\n3\n4\n5\n");
   assert.equal((await run("seq", { argv: ["1", "2", "5"] })).out, "1\n3\n5\n");
   assert.equal((await run("seq", { argv: ["-2", "2"] })).out, "-2\n-1\n0\n1\n2\n");
+});
+
+test("seq writes large output in bounded chunks", async () => {
+  const result = await run("seq", { argv: ["5000"], inspectWrites: true });
+  assert.equal(result.code, 0);
+  assert.ok(result.out.startsWith("1\n2\n3\n"));
+  assert.ok(result.out.endsWith("4999\n5000\n"));
+  assert.ok(result.stdoutWrites.length > 1);
+  assert.ok(Math.max(...result.stdoutWrites) <= 8256);
+
+  const stalled = await run("seq", { argv: ["10000000000000000", "0.1", "10000000000000002"] });
+  assert.equal(stalled.code, 1);
+  assert.equal(stalled.out, "");
+  assert.equal(stalled.err, "seq: increment is too small to make progress\n");
 });
 
 test("unsupported options fail clearly", async () => {

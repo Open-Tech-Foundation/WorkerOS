@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `seq` now streams bounded output chunks instead of retaining the complete
+  sequence, and rejects floating-point increments that cannot make numeric
+  progress rather than looping forever.
 - `cat`, `ls`, and `mkdir` diagnostics now retain the underlying kernel error
   instead of replacing it with a generic message. `mkdir -p` ignores a failed
   create only when `stat` confirms the path is already a directory.
