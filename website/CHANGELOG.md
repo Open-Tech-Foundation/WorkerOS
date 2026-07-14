@@ -8,6 +8,13 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Editor rebuilt with tabs (multi-file) + a reusable tab-strip widget.** The Editor
+  now holds several files at once: each tab is a buffer (path / name / content / dirty),
+  one shared textarea shows the active tab (buffers are preserved across switches), `+`
+  adds a tab, a per-tab close button and right-click **Close / Close Others** menu, and
+  a dirty dot that clears on save. The tab strip uses shared `.tabs`/`.tab` styles that
+  other apps can reuse. Verified headlessly (8 checks): dirty tracking, per-tab buffer
+  preservation on switch, save→FS→reopen round-trip, and tab close — no console errors.
 - **UI toolkit — toast notifications.** A DE-wide toast service (`os/notify.js` +
   `ui/Toasts.jsx`) so apps can report a non-modal outcome (`notify` / `notifySuccess`
   / `notifyError`) instead of a blocking dialog — a bottom-right stack above the dock

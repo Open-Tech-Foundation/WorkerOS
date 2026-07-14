@@ -1,79 +1,149 @@
-// A minimal text editor over the real VFS: open a path with os.fs.read, edit, and
-// save with os.fs.write (which also creates a new file). The path input and the
-// textarea are uncontrolled (driven via their DOM elements, keyed by window id) so
-// typing never fights a reactive value binding; only the status line is reactive.
-// A window may be opened with `props.path` (e.g. Files' "Edit" button) to load a
-// file on mount. Multi-instance, so several files can be edited at once.
+// A tabbed text editor over the real VFS. Each tab is a buffer ({ path, name,
+// content, dirty }); one shared textarea (DOM-driven, keyed by window id) shows the
+// active tab — on switch we flush the textarea into the current tab and load the
+// next, so typing never fights a reactive value binding. Open a path (path bar or
+// Files' "open") to load it; "+" adds a blank tab; Save writes the active tab.
+// Multi-instance, so several editor windows can each hold several files.
+//
+// The tab strip uses the shared .tabs/.tab widget styles (also usable by other
+// apps), so tabs look and behave the same across the DE.
 
 import { onMount, reactive } from "@opentf/web";
 import { getOS } from "../../os/os.js";
+import { basename } from "../../os/vfs.js";
+import { notifySuccess, notifyError } from "../../os/notify.js";
+import { contextMenu } from "../../os/menus.js";
 
 const dec = new TextDecoder();
 
 export default function EditorApp({ win }) {
-  const pathId = "edpath-" + win.id;
   const areaId = "edarea-" + win.id;
-  const st = reactive({ status: "", dirty: false, error: null });
+  const pathId = "edpath-" + win.id;
+  let seq = 1;
+  // `rev` bumps whenever a tab's own fields (name/dirty) change: mutating a field
+  // of a `.map`-arg element doesn't re-run its binding on its own, so the per-tab
+  // labels read `st.rev` to force a refresh. Structural changes to `st.tabs`
+  // (push/splice) reconcile the list by themselves.
+  const st = reactive({ tabs: [], activeId: null, error: null, rev: 0 });
+  const touch = () => st.rev++;
 
-  const pathEl = () => document.getElementById(pathId);
   const areaEl = () => document.getElementById(areaId);
+  const pathEl = () => document.getElementById(pathId);
+  const activeTab = () => st.tabs.find((t) => t.id === st.activeId) || null;
 
-  async function load(path) {
+  // Snapshot the textarea into the active tab before switching away or saving.
+  function flush() {
+    const t = activeTab();
+    const ta = areaEl();
+    if (t && ta) t.content = ta.value;
+  }
+
+  function showTab(t) {
+    st.activeId = t.id;
+    const ta = areaEl();
+    if (ta) ta.value = t.content;
+    const pe = pathEl();
+    if (pe) pe.value = t.path || "";
+    st.error = null;
+  }
+
+  function newTab(path = "", content = "", dirty = false) {
+    flush();
+    const t = { id: seq++, path, name: path ? basename(path) : "untitled", content, dirty };
+    st.tabs.push(t);
+    showTab(t);
+    return t;
+  }
+
+  function selectTab(t) {
+    if (t.id === st.activeId) return;
+    flush();
+    showTab(t);
+  }
+
+  function closeTab(t) {
+    const i = st.tabs.findIndex((x) => x.id === t.id);
+    if (i < 0) return;
+    const wasActive = st.activeId === t.id;
+    st.tabs.splice(i, 1);
+    if (st.tabs.length === 0) { newTab(); return; }
+    if (wasActive) showTab(st.tabs[i] || st.tabs[i - 1]);
+  }
+
+  async function openPath(path) {
+    path = (path || "").trim();
     if (!path) return;
     try {
       const os = await getOS();
       const bytes = await os.fs.read(path);
       const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      const ta = areaEl();
-      if (ta) ta.value = dec.decode(arr);
-      const pe = pathEl();
-      if (pe) pe.value = path;
-      st.dirty = false;
-      st.status = "opened";
-      st.error = null;
+      const content = dec.decode(arr);
+      const t = activeTab();
+      // Reuse a pristine blank tab; otherwise open the file in a new tab.
+      if (t && !t.path && !t.dirty && !(areaEl() && areaEl().value)) {
+        t.path = path; t.name = basename(path); t.content = content; t.dirty = false;
+        showTab(t); touch();
+      } else {
+        newTab(path, content, false);
+      }
     } catch (e) {
       st.error = String(e?.message || e);
     }
   }
 
   async function save() {
-    const path = (pathEl() && pathEl().value || "").trim();
-    if (!path) { st.error = "no path"; return; }
-    st.error = null;
-    st.status = "saving…"; // the kernel may still be booting on the very first save
+    const t = activeTab();
+    if (!t) return;
+    const path = ((pathEl() && pathEl().value) || t.path || "").trim();
+    if (!path) { st.error = "Enter a path to save to."; return; }
+    flush();
     try {
       const os = await getOS();
-      await os.fs.write(path, areaEl() ? areaEl().value : "");
-      st.dirty = false;
-      st.status = "saved " + path;
+      await os.fs.write(path, t.content);
+      t.path = path; t.name = basename(path); t.dirty = false; touch();
+      st.error = null;
+      notifySuccess("Saved " + path);
     } catch (e) {
       st.error = String(e?.message || e);
+      notifyError("Couldn't save: " + String(e?.message || e));
     }
   }
 
   onMount(() => {
     const initial = (win.props && win.props.path) || "";
-    if (initial) {
-      const pe = pathEl();
-      if (pe) pe.value = initial;
-      load(initial);
-    }
+    if (initial) openPath(initial);
+    else newTab();
   });
+
+  const tabMenu = (t) => contextMenu(() => [
+    { label: "Close", icon: "✕", action: () => closeTab(t) },
+    { label: "Close Others", disabled: st.tabs.length <= 1, action: () => st.tabs.slice().forEach((x) => x.id !== t.id && closeTab(x)) },
+  ]);
 
   return (
     <div class="app-editor">
+      <div class="tabs">
+        {st.tabs.map((t) => (
+          <div class={"tab" + (st.activeId === t.id ? " on" : "")} onpointerdown={() => selectTab(t)} oncontextmenu={tabMenu(t)}>
+            <span class="tab-dot">{() => (st.rev, t.dirty ? "●" : "")}</span>
+            <span class="tab-name">{() => (st.rev, t.name)}</span>
+            <button class="tab-x" title="Close" onpointerdown={(e) => e.stopPropagation()} onclick={() => closeTab(t)}>✕</button>
+          </div>
+        ))}
+        <button class="tab-new" title="New tab" onclick={() => newTab()}>+</button>
+      </div>
       <div class="ed-bar">
         <input
           id={pathId}
           class="ed-path"
           placeholder="/path/to/file"
           spellcheck="false"
-          onkeydown={(e) => { if (e.key === "Enter") load(e.target.value.trim()); }}
+          onkeydown={(e) => { if (e.key === "Enter") openPath(e.target.value); }}
         />
-        <button class="ed-btn" onclick={() => load((pathEl() && pathEl().value || "").trim())}>Open</button>
+        <button class="ed-btn" onclick={() => openPath(pathEl() && pathEl().value)}>Open</button>
         <button class="ed-btn ed-save" onclick={() => save()}>Save</button>
         <span class="ed-status">
-          {() => (st.error ? st.error : st.status ? st.status : st.dirty ? "● unsaved" : "")}
+          {() => (st.rev, st.error ? st.error : activeTab() && activeTab().dirty ? "● unsaved" : "")}
         </span>
       </div>
       <textarea
@@ -81,7 +151,7 @@ export default function EditorApp({ win }) {
         class="ed-area"
         spellcheck="false"
         placeholder="Open a file, or type a path above and start editing to create one."
-        oninput={() => { st.dirty = true; st.status = ""; }}
+        oninput={() => { const t = activeTab(); if (t && !t.dirty) { t.dirty = true; touch(); } st.error = null; }}
       />
     </div>
   );
