@@ -8,6 +8,33 @@ guest runtime. Format:
 ## [Unreleased]
 
 ### Added
+- **The uutils coreutils tier: 26 utilities as one wasm multicall binary**
+  (`crates/wsh-utils` → `/bin/coreutils`, ADR-026). Each utility is one `uu_*`
+  dependency line plus one dispatch arm; the registry entry's `links` list gets a
+  `/bin/<name>` symlink per utility at boot and the binary dispatches on argv[0]
+  basename (`coreutils NAME ARGS…` is the explicit form). First set: base32
+  base64 basename cksum comm date dd dirname expand fold join ln mktemp nl od
+  paste printf readlink realpath shuf sleep split tee touch truncate unexpand
+  yes. Built by `npm run build:utils`; like grep, boot tolerates the binary not
+  being built. Digests are `cksum -a sha256|md5|blake2b` (`uu_hashsum` on
+  crates.io is stale). Dropped as wasm-hostile: `expr` (onig), `tac` (mmap),
+  `test`/`stat`/`du` (Unix uid/mode/dev metadata).
+- **WASI host: the file ops the coreutils tier exercised** (`src/wasi/host.js`),
+  all mapped onto existing kernel syscalls: `path_symlink`/`path_link`/
+  `path_readlink`; `path_filestat_get` honors `SYMLINK_FOLLOW` (lstat + symlink
+  filetype); `path_`/`fd_filestat_set_times` → `utimes` (ns→ms); and
+  `fd_filestat_set_size` as a userland read+rewrite (the node/fs.js truncate
+  pattern — the kernel has no ftruncate). `poll_oneoff` handles clock-only
+  subscriptions with a blocking `Atomics.wait`, which is what wasi-libc compiles
+  `nanosleep`/`std::thread::sleep` to — `/bin/sleep` previously panicked. fd
+  subscriptions and sockets stay honestly NOSYS.
+
+### Fixed
+- **wasm guests adopt the kernel cwd.** WASI P1 has no process cwd (wasi-libc
+  emulates one starting at `/`), so a relative path in `grep pat file.txt` or
+  `touch f1` resolved against `/` regardless of the shell's directory. The
+  program worker passes the kernel cwd as `PWD`; `wsh-utils` and `wsh-grep`
+  chdir to it at startup.
 - **Outbound `node:https` + the npm-install network stack** (`src/node/https.js`,
   `http.js`, `tls.js`, `dns.js`, `http2.js`, `v8.js`). The browser can't open raw
   TCP, so outbound HTTP(S) rides the worker's `fetch` (which owns DNS/TLS): the

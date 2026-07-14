@@ -8,6 +8,12 @@ main-thread client API). Format:
 ## [Unreleased]
 
 ### Added
+- **Multicall program installs: a registry `links` field.** A `/bin` program
+  entry may list utility names; boot creates a `/bin/<name>` symlink per name to
+  the one installed binary (used by the uutils coreutils tier — one 6 MB blob
+  serves 26 commands, dispatching on argv[0]). The program worker passes the
+  kernel cwd to wasm guests as `PWD` so they can adopt it (WASI P1 has no cwd).
+  Covered by `tools/uutils.test.js` (skipped until `npm run build:utils`).
 - **Client filesystem API: `os.fs.list` / `mkdir` / `remove` / `rename`.** Alongside
   `fs.read`/`fs.write`, the client now exposes directory + mutation ops so host UIs
   (e.g. the playground's Files app / Desktop) can manage the real VFS without
