@@ -44,14 +44,18 @@ const readFd = async (fd) => {
   const u = new Uint8Array(n); let o = 0; for (const c of chunks) { u.set(c, o); o += c.length; }
   return dec.decode(u);
 };
+const readInput = async (file) => {
+  if (file === "-") return readFd(0);
+  const fd = await sys.open(file, {});
+  const text = await readFd(fd);
+  await sys.close(fd);
+  return text;
+};
 // Read a list of file operands (or stdin when empty / "-"), concatenated to text.
 const readInputs = async (files) => {
   if (!files || files.length === 0) return readFd(0);
   let s = "";
-  for (const f of files) {
-    if (f === "-") { s += await readFd(0); continue; }
-    const fd = await sys.open(f, {}); s += await readFd(fd); await sys.close(fd);
-  }
+  for (const f of files) s += await readInput(f);
   return s;
 };
 // Split text into lines, dropping a single trailing newline's empty element.
@@ -367,8 +371,22 @@ for (let i = 0; i < av.length; i++) {
   else if (a.startsWith("-") && a !== "-") unsupportedOption(a);
   else files.push(a);
 }
-emit(toLines(await readInputs(files)).slice(0, n));
-sys.exit(0);
+const inputs = files.length ? files : ["-"];
+let code = 0, sections = 0;
+for (const file of inputs) {
+  try {
+    const lines = toLines(await readInput(file)).slice(0, n);
+    if (inputs.length > 1) {
+      if (sections++) out("\\n");
+      out("==> " + (file === "-" ? "standard input" : file) + " <==\\n");
+    }
+    emit(lines);
+  } catch (e) {
+    err("head: cannot open '" + file + "': " + e.message + "\\n");
+    code = 1;
+  }
+}
+sys.exit(code);
 `),
 
   // tail [-n N] [files] — last N lines (default 10).
@@ -388,25 +406,55 @@ for (let i = 0; i < av.length; i++) {
   else if (a.startsWith("-") && a !== "-") unsupportedOption(a);
   else files.push(a);
 }
-const arr = toLines(await readInputs(files));
-emit(n >= arr.length ? arr : arr.slice(arr.length - n));
-sys.exit(0);
+const inputs = files.length ? files : ["-"];
+let code = 0, sections = 0;
+for (const file of inputs) {
+  try {
+    const arr = toLines(await readInput(file));
+    const lines = n >= arr.length ? arr : arr.slice(arr.length - n);
+    if (inputs.length > 1) {
+      if (sections++) out("\\n");
+      out("==> " + (file === "-" ? "standard input" : file) + " <==\\n");
+    }
+    emit(lines);
+  } catch (e) {
+    err("tail: cannot open '" + file + "': " + e.message + "\\n");
+    code = 1;
+  }
+}
+sys.exit(code);
 `),
 
   // wc [-l|-w|-c] [files] — count lines, words, characters.
   "/sbin/wc": util(`
 acceptOptions("lwc");
-const text = await readInputs(operands);
-const lines = (text.match(/\\n/g) || []).length;
-const words = text.trim() === "" ? 0 : text.trim().split(/\\s+/).length;
-const chars = text.length;
-let parts = [];
-if (has("l")) parts.push(lines);
-if (has("w")) parts.push(words);
-if (has("c")) parts.push(chars);
-if (parts.length === 0) parts = [lines, words, chars];
-out(parts.join(" ") + "\\n");
-sys.exit(0);
+const count = (text) => ({
+  lines: (text.match(/\\n/g) || []).length,
+  words: text.trim() === "" ? 0 : text.trim().split(/\\s+/).length,
+  chars: text.length,
+});
+const values = (counts) => {
+  const parts = [];
+  if (has("l")) parts.push(counts.lines);
+  if (has("w")) parts.push(counts.words);
+  if (has("c")) parts.push(counts.chars);
+  return parts.length ? parts : [counts.lines, counts.words, counts.chars];
+};
+const inputs = operands.length ? operands : ["-"];
+const total = { lines: 0, words: 0, chars: 0 };
+let code = 0;
+for (const file of inputs) {
+  try {
+    const counts = count(await readInput(file));
+    total.lines += counts.lines; total.words += counts.words; total.chars += counts.chars;
+    out(values(counts).join(" ") + (operands.length ? " " + file : "") + "\\n");
+  } catch (e) {
+    err("wc: " + file + ": " + e.message + "\\n");
+    code = 1;
+  }
+}
+if (operands.length > 1) out(values(total).join(" ") + " total\\n");
+sys.exit(code);
 `),
 
   // sort [-r] [-n] [-u] [files] — sort lines.
@@ -421,15 +469,21 @@ emit(arr);
 sys.exit(0);
 `),
 
-  // uniq [-c] [files] — collapse adjacent duplicate lines.
+  // uniq [-c] [input [output]] — collapse adjacent duplicate lines.
   "/sbin/uniq": util(`
 acceptOptions("c");
-const arr = toLines(await readInputs(operands));
+if (operands.length > 2) invalidUsage("extra operand '" + operands[2] + "'");
+const arr = toLines(await readInput(operands[0] || "-"));
 const res = []; let prev = null, count = 0;
 const push = () => { if (prev !== null) res.push(has("c") ? String(count).padStart(7) + " " + prev : prev); };
 for (const l of arr) { if (l === prev) count++; else { push(); prev = l; count = 1; } }
 push();
-emit(res);
+const result = res.length ? res.join("\\n") + "\\n" : "";
+if (operands[1]) {
+  const fd = await sys.open(operands[1], { create: true, truncate: true });
+  sys.write(fd, enc.encode(result));
+  await sys.close(fd);
+} else out(result);
 sys.exit(0);
 `),
 

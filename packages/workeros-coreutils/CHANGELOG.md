@@ -8,6 +8,10 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- Multi-file text processing now follows command boundaries: `head` and `tail`
+  process and label each file independently while continuing after read errors,
+  `wc` reports filenames and a total row, and `uniq` treats its second operand
+  as an output file instead of concatenating arbitrary input files.
 - Commands now reject missing, extra, and malformed operands instead of
   silently succeeding or ignoring input. Validation covers numeric `seq`
   operands, `head`/`tail` line counts, `cut` delimiters and field lists,

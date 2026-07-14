@@ -19,12 +19,27 @@ async function run(name, { argv = [], stdin = "", files = {} } = {}) {
   fds.set(0, { data: enc.encode(stdin), pos: 0 });
   const sys = {
     argv: [name, ...argv], env: { HOME: "/home" }, cwd: "/",
-    write: (fd, bytes) => { (fd === 2 ? errB : outB).push(bytes); return bytes.length; },
+    write: (fd, bytes) => {
+      if (fd === 1 || fd === 2) {
+        (fd === 2 ? errB : outB).push(bytes);
+        return bytes.length;
+      }
+      const f = fds.get(fd);
+      if (!f || !f.path) throw new Error("EBADF");
+      const data = new Uint8Array(Math.max(f.data.length, f.pos + bytes.length));
+      data.set(f.data); data.set(bytes, f.pos); f.pos += bytes.length; f.data = data;
+      vfs.set(f.path, data);
+      return bytes.length;
+    },
     read: async (fd, max) => {
       const f = fds.get(fd); if (!f || f.pos >= f.data.length) return new Uint8Array(0);
       const slice = f.data.subarray(f.pos, f.pos + max); f.pos += slice.length; return slice;
     },
-    open: async (path) => { if (!vfs.has(path)) throw new Error("ENOENT"); const fd = nextFd++; fds.set(fd, { data: vfs.get(path), pos: 0 }); return fd; },
+    open: async (path, opts = {}) => {
+      if (!vfs.has(path) && !opts.create) throw new Error("ENOENT");
+      if (!vfs.has(path) || opts.truncate) vfs.set(path, new Uint8Array(0));
+      const fd = nextFd++; fds.set(fd, { data: vfs.get(path), pos: 0, path }); return fd;
+    },
     close: async (fd) => { fds.delete(fd); },
     stat: async (path) => { if (vfs.has(path)) return { kind: "file", size: vfs.get(path).length }; throw new Error("ENOENT"); },
     readdir: async () => [],
@@ -38,7 +53,12 @@ async function run(name, { argv = [], stdin = "", files = {} } = {}) {
     "return (async () => {\n" + body + "\n})();",
   );
   try { await fn(sys, collectSimpleFlags, hasParsedFlag); } catch (e) { if (e && e.__exit !== undefined) code = e.__exit; else throw e; }
-  return { code, out: outB.map((b) => dec.decode(b)).join(""), err: errB.map((b) => dec.decode(b)).join("") };
+  return {
+    code,
+    out: outB.map((b) => dec.decode(b)).join(""),
+    err: errB.map((b) => dec.decode(b)).join(""),
+    files: Object.fromEntries([...vfs].map(([path, data]) => [path, dec.decode(data)])),
+  };
 }
 
 test("seq", async () => {
@@ -85,6 +105,7 @@ test("missing, extra, and malformed operands fail clearly", async () => {
     ["tr", [], "missing operand"],
     ["tr", ["a", "b", "c"], "extra operand 'c'"],
     ["tr", ["-d", "a", "b"], "extra operand 'b'"],
+    ["uniq", ["in", "out", "extra"], "extra operand 'extra'"],
   ]) {
     const result = await run(name, { argv });
     assert.equal(result.code, 1, `${name} should reject ${JSON.stringify(argv)}`);
@@ -101,6 +122,7 @@ test("-- preserves option-looking file operands", async () => {
     code: 0,
     out: "kept\n",
     err: "",
+    files,
   });
   assert.equal((await run("head", { argv: ["-n1", "--", "-notes"], files })).out, "kept\n");
 });
@@ -111,10 +133,35 @@ test("head / tail", async () => {
   assert.equal((await run("head", { argv: ["-n", "1", "/d.txt"], files: { "/d.txt": "L1\nL2\n" } })).out, "L1\n");
 });
 
+test("head / tail process multiple files independently", async () => {
+  const files = { "/a": "a1\na2\n", "/b": "b1\nb2\n" };
+  const head = await run("head", { argv: ["-n1", "/a", "/b"], files });
+  assert.equal(head.out, "==> /a <==\na1\n\n==> /b <==\nb1\n");
+  assert.equal(head.code, 0);
+
+  const tail = await run("tail", { argv: ["-n1", "/a", "/b"], files });
+  assert.equal(tail.out, "==> /a <==\na2\n\n==> /b <==\nb2\n");
+  assert.equal(tail.code, 0);
+
+  const partial = await run("head", { argv: ["-n1", "/missing", "/a"], files });
+  assert.equal(partial.code, 1);
+  assert.equal(partial.err, "head: cannot open '/missing': ENOENT\n");
+  assert.equal(partial.out, "==> /a <==\na1\n");
+});
+
 test("wc", async () => {
   assert.equal((await run("wc", { argv: ["-l"], stdin: "a\nb\nc\n" })).out, "3\n");
   assert.equal((await run("wc", { argv: ["-w"], stdin: "a b c d\n" })).out, "4\n");
   assert.equal((await run("wc", { stdin: "one two\nthree\n" })).out, "2 3 14\n");
+});
+
+test("wc reports each file and a total", async () => {
+  const files = { "/a": "one two\n", "/b": "x\n" };
+  assert.equal((await run("wc", { argv: ["-lw", "/a"], files })).out, "1 2 /a\n");
+  assert.equal(
+    (await run("wc", { argv: ["-lw", "/a", "/b"], files })).out,
+    "1 2 /a\n1 1 /b\n2 3 total\n",
+  );
 });
 
 test("sort", async () => {
@@ -126,6 +173,16 @@ test("sort", async () => {
 test("uniq", async () => {
   assert.equal((await run("uniq", { stdin: "a\na\nb\nb\nb\nc\n" })).out, "a\nb\nc\n");
   assert.equal((await run("uniq", { argv: ["-c"], stdin: "a\na\nb\n" })).out, "      2 a\n      1 b\n");
+});
+
+test("uniq accepts one input and one output file", async () => {
+  const result = await run("uniq", {
+    argv: ["/input", "/output"],
+    files: { "/input": "a\na\nb\nb\n" },
+  });
+  assert.equal(result.code, 0);
+  assert.equal(result.out, "");
+  assert.equal(result.files["/output"], "a\nb\n");
 });
 
 test("cut", async () => {
