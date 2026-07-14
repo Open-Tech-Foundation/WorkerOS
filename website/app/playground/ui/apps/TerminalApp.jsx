@@ -10,9 +10,29 @@
 
 import { onMount } from "@opentf/web";
 import { getOS, ensureXterm } from "../../os/os.js";
+import { contextMenu } from "../../os/menus.js";
+import { activateApp } from "../../os/wm.js";
 
 export default function TerminalApp({ win }) {
   const domId = "term-" + win.id;
+  // Lifted so the right-click menu (built at render time) can reach the live
+  // xterm + tty session created inside onMount.
+  let termRef = null;
+  let sessionRef = null;
+
+  // Every window carries the same context menu; the Terminal's is Copy/Paste/Clear
+  // plus a shortcut to spawn another shell. Built at click time so Copy disables
+  // when there's no selection.
+  const termMenu = contextMenu(() => {
+    const sel = termRef ? termRef.getSelection() : "";
+    return [
+      { label: "Copy", icon: "⧉", disabled: !sel, action: () => navigator.clipboard?.writeText(sel).catch(() => {}) },
+      { label: "Paste", icon: "📋", action: async () => { try { const t = await navigator.clipboard.readText(); if (sessionRef && t) sessionRef.input(t); } catch {} } },
+      { label: "Clear", icon: "␡", action: () => termRef && termRef.clear() },
+      { separator: true },
+      { label: "New Terminal", icon: "🖥️", action: () => activateApp("terminal") },
+    ];
+  });
 
   onMount(() => {
     let disposed = false;
@@ -46,9 +66,11 @@ export default function TerminalApp({ win }) {
       term.loadAddon(fit);
       term.open(el);
       fit.fit();
+      termRef = term;
 
       session = await os.openTerminal();
       if (disposed) { session.close(); term.dispose(); return; }
+      sessionRef = session;
 
       offOutput = session.onOutput((bytes) => term.write(bytes));
       term.onData((data) => session.input(data));
@@ -80,11 +102,13 @@ export default function TerminalApp({ win }) {
       if (offOutput) offOutput();
       if (session) session.close();
       if (term) term.dispose();
+      termRef = null;
+      sessionRef = null;
     };
   });
 
   return (
-    <div class="app-term">
+    <div class="app-term" oncontextmenu={termMenu}>
       <div id={domId} class="app-term-screen" />
     </div>
   );

@@ -4,12 +4,17 @@
 // <PostCard post={p}/>)` idiom — the reactive lookup lives in the parent's map.
 
 import { killProc } from "../../os/processes.js";
+import { contextMenu } from "../../os/menus.js";
 
 export default function ProcRow({ proc }) {
   const cmd = (proc.argv && proc.argv.join(" ")) || "—";
   const stop = proc.state !== "running" && proc.state !== "runnable";
+  const rowMenu = contextMenu([
+    { label: "Terminate (SIGTERM)", icon: "◼", action: () => killProc(proc.pid, 15) },
+    { label: "Force kill (SIGKILL)", icon: "✕", danger: true, action: () => killProc(proc.pid, 9) },
+  ]);
   return (
-    <div class={"proc-row" + (stop ? " is-stopped" : "")}>
+    <div class={"proc-row" + (stop ? " is-stopped" : "")} oncontextmenu={rowMenu}>
       <span class="proc-pid">{String(proc.pid)}</span>
       <span class="proc-ppid">{String(proc.ppid)}</span>
       <span class={"proc-state st-" + proc.state}>{proc.state}</span>

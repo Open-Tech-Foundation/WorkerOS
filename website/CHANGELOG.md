@@ -8,6 +8,12 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Context menus everywhere — every window carries its own.** Completed the
+  right-click story across all apps so it's a universal DE affordance: **Terminal**
+  (Copy / Paste / Clear / New Terminal, Copy disabled without a selection) and
+  **Processes** (a row → Terminate/Force-kill; empty area → Refresh), joining the
+  desktop, window title bar, Files, and Editor tabs — all through the one shared menu
+  service. Verified headlessly (4 checks) — no console errors.
 - **Editor rebuilt with tabs (multi-file) + a reusable tab-strip widget.** The Editor
   now holds several files at once: each tab is a buffer (path / name / content / dirty),
   one shared textarea shows the active tab (buffers are preserved across switches), `+`

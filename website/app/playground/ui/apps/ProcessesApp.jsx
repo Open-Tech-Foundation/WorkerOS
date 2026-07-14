@@ -4,13 +4,16 @@
 
 import { onMount } from "@opentf/web";
 import { procs, startPolling, refreshProcs } from "../../os/processes.js";
+import { contextMenu } from "../../os/menus.js";
 import ProcRow from "./ProcRow.jsx";
 
 export default function ProcessesApp() {
   onMount(() => startPolling());
 
+  const bgMenu = contextMenu([{ label: "Refresh", icon: "↻", action: () => refreshProcs() }]);
+
   return (
-    <div class="app-proc">
+    <div class="app-proc" oncontextmenu={bgMenu}>
       <div class="proc-bar">
         <span class="proc-count">
           {() => (procs.loaded ? `${procs.list.length} process${procs.list.length === 1 ? "" : "es"}` : "loading…")}
