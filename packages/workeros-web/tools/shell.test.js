@@ -77,6 +77,7 @@ test("coreutils behavior suite", opts, async () => {
         await sh("mkdir -p a/b/c");
         return sh("ls a");
       })();
+      r.lsDirectory = await sh("ls -d a");
       r.cpCat = await (async () => {
         await sh("echo content > src.txt");
         await sh("cp src.txt dst.txt");
@@ -124,6 +125,7 @@ test("coreutils behavior suite", opts, async () => {
   assert.equal(r.echoN.out, "x");
   assert.equal(r.pwd.out, "/\n");
   assert.equal(r.mkdirLs.out, "b\n");
+  assert.equal(r.lsDirectory.out, "a\n");
   assert.equal(r.cpCat.out, "content\n");
   assert.equal(r.catNumbered.out, "     1\ta\n     2\t\n");
   assert.equal(r.cpRecursive.copied.code, 0);

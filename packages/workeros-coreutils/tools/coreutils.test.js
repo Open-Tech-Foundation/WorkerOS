@@ -552,6 +552,12 @@ test("ls", async () => {
   assert.equal(await runLs(["/dir"]), "a.txt\nb.txt\n");
   assert.equal(await runLs(["-a", "/dir"]), ".hidden\na.txt\nb.txt\n");
   assert.equal(await runLs(["-r", "/dir"]), "b.txt\na.txt\n");
+  assert.equal(await runLs(["-d", "/dir"]), "/dir\n");
+  assert.equal(
+    await runLs(["-ld", "/dir"]),
+    "drwxr-xr-x  1        0 1970-01-01 00:00 /dir\n",
+  );
+  assert.equal(await runLs(["-dR", "/dir"]), "/dir\n");
   assert.equal(
     await runLs(["-l", "/dir"]),
     "-rw-r--r--  2        3 2024-01-02 03:04 a.txt\n" +

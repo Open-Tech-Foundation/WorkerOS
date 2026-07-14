@@ -62,6 +62,8 @@ Notable changes to the coreutils — guest programs written against the native
   unknown options.
 
 ### Added
+- `ls -d` lists directory operands themselves, composes with `-l`, and suppresses
+  descent when paired with `-R`.
 - `cat -n` numbers all streamed output lines, including blank lines, while
   continuing line state correctly across file operands and chunk boundaries.
 - `cp -r` recursively copies nested directory trees, either to a new destination

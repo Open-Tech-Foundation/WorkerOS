@@ -28,7 +28,7 @@ behavior. It does not aim to copy every GNU coreutils option.
 | `cp` | `[-r] SOURCE DEST` or `[-r] SOURCE... DIRECTORY` |
 | `mv` | `SOURCE DEST` or `SOURCE... DIRECTORY`; no options |
 | `seq` | `[FIRST [INCREMENT]] LAST`; finite decimal numbers |
-| `ls` | `[-alhrR] [FILE...]` |
+| `ls` | `[-alhrRd] [FILE...]` |
 | `mkdir` | `[-p] DIRECTORY...` |
 | `rm` | `[-rRf] FILE...`; `rm -f` also accepts no files |
 | `head`, `tail` | `[-n N] [FILE...]`, `-nN`, or `-N`; `N` is a non-negative integer |
@@ -83,6 +83,10 @@ unterminated.
 time in UTC. WorkerOS does not currently model Unix owner/group or permission
 bits, so the leading access text is a conventional display profile based on the
 entry type rather than editable mode metadata.
+
+`ls -d` lists directory operands themselves instead of their contents. It can be
+combined with `-l`; when combined with `-R`, treating the directory as an entry
+also means there is no recursive descent.
 
 `wc` counts incrementally without retaining entire files. It counts newlines and
 `-c` directly from original input chunks, while a streaming UTF-8 decoder keeps

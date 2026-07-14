@@ -178,12 +178,13 @@ sys.exit(code);
 `),
 
   "/sbin/ls": util(`
-acceptOptions("alhrR");
+acceptOptions("alhrRd");
 const showAll = has("a");
 const long = has("l");
 const human = has("h");
 const reverse = has("r");
 const recursive = has("R");
+const directoryAsFile = has("d");
 let code = 0;
 
 const formatSize = (bytes) => {
@@ -202,7 +203,7 @@ const formatLong = (st, name) =>
 async function listDir(t, many) {
   try {
     const st = await sys.stat(t);
-    if (st.kind !== "dir") {
+    if (st.kind !== "dir" || directoryAsFile) {
       if (long) out(formatLong(st, t));
       else out(t + "\\n");
       return;
