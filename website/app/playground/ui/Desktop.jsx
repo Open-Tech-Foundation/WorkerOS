@@ -6,6 +6,7 @@
 import { onMount } from "@opentf/web";
 import { wm, openWindow, closeLauncher } from "../os/wm.js";
 import { seedHome } from "../os/vfs.js";
+import { attachTheme } from "../os/theme.js";
 import WindowHost from "./WindowHost.jsx";
 import Launcher from "./Launcher.jsx";
 import Dock from "./Dock.jsx";
@@ -13,6 +14,10 @@ import Dialog from "./Dialog.jsx";
 
 export default function Desktop() {
   onMount(() => {
+    // Bind the OS theme engine to the desktop root so WorkerOS controls its own
+    // palette/accent/wallpaper (and follows the 'system' preference), independent
+    // of the site's light/dark toggle.
+    const detachTheme = attachTheme(document.querySelector(".dt"));
     // Seed the home directory early so it exists before Files/Editor open (idempotent).
     seedHome().catch(() => {});
     // Open a welcome window so the desktop isn't empty on first load. Guarded so a
@@ -25,7 +30,10 @@ export default function Desktop() {
       if (e.key === "Escape") closeLauncher();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      detachTheme();
+    };
   });
 
   return (

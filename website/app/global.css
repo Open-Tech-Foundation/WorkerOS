@@ -368,6 +368,52 @@ pre.code .a { color: var(--accent-soft); }
    Desktop shell (/playground) — a full-viewport window manager. Distinct
    WorkerOS look, theme-aware via the site's --bg/--text/--accent tokens.
    ============================================================================ */
+/* ---------- WorkerOS desktop theme (OS-owned) ----------
+   The desktop lives entirely under `.dt`, so redefining the palette tokens here
+   overrides the site's :root/[data-theme] for every desktop descendant — without
+   editing the 400+ DE rules below. This is what lets the OS own its own look,
+   independent of the website's light/dark toggle. os/theme.js stamps
+   `data-wos-theme` (light|dark, resolved from the 'system' setting) on this root
+   and may set `--wos-accent` / `--wos-wall` inline from user settings. */
+.dt {
+  /* Dark is the base (and the pre-hydration default before theme.js runs). */
+  --bg: #0a0b0d;
+  --bg-elev: #111317;
+  --bg-elev-2: #16191f;
+  --line: #23262e;
+  --line-soft: #1a1d23;
+  --text: #e7e9ee;
+  --text-dim: #a3a9b5;
+  --text-faint: #6b7280;
+  --_accent-default: #ff8a3d; /* OTF orange */
+  color-scheme: dark;
+
+  /* Accent flows from an optional custom `--wos-accent` (set inline by the theme
+     engine from settings), else the per-theme default; soft/glow derive from it
+     so a custom accent recolors the whole desktop in one shot. */
+  --accent: var(--wos-accent, var(--_accent-default));
+  --accent-soft: color-mix(in srgb, var(--accent) 68%, var(--text));
+  --accent-glow: color-mix(in srgb, var(--accent) 15%, transparent);
+
+  /* Wallpaper: the default desktop gradient, overridable via `--wos-wall`. */
+  --wos-wall:
+    radial-gradient(1200px 800px at 78% -10%, var(--accent-glow), transparent 60%),
+    radial-gradient(900px 700px at 8% 110%, color-mix(in srgb, var(--cyan) 12%, transparent), transparent 55%),
+    var(--bg);
+}
+.dt[data-wos-theme="light"] {
+  --bg: #ffffff;
+  --bg-elev: #f7f8fa;
+  --bg-elev-2: #eef1f5;
+  --line: #e2e6ec;
+  --line-soft: #edf0f4;
+  --text: #0f172a;
+  --text-dim: #475569;
+  --text-faint: #8a94a6;
+  --_accent-default: #ea6a1e; /* darkened for contrast on light */
+  color-scheme: light;
+}
+
 .dt {
   position: fixed;
   inset: 0;
@@ -382,10 +428,7 @@ pre.code .a { color: var(--accent-soft); }
 .dt-wall {
   position: absolute;
   inset: 0;
-  background:
-    radial-gradient(1200px 800px at 78% -10%, var(--accent-glow), transparent 60%),
-    radial-gradient(900px 700px at 8% 110%, color-mix(in srgb, var(--cyan) 12%, transparent), transparent 55%),
-    var(--bg);
+  background: var(--wos-wall);
 }
 .dt-wall::after {
   content: "";

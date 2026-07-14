@@ -8,6 +8,18 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **UI toolkit — Pillar A: an OS-owned theme engine.** First piece of the WorkerOS
+  UI toolkit (a GTK/Qt-analog layer so every app inherits the same chrome, menus,
+  focus, and theme). The desktop now owns its own palette independent of the
+  website's light/dark toggle: the palette tokens are redefined scoped to `.dt`
+  (keyed by `data-wos-theme`), so re-theming cascades to every window without
+  touching per-app CSS. `os/theme.js` stamps `data-wos-theme` (light|dark, resolved
+  from a `system` setting via `prefers-color-scheme`) on the desktop root and pushes
+  optional **accent** and **wallpaper** overrides inline (`--wos-accent` /
+  `--wos-wall`); accent-soft/glow derive from the accent so one custom color recolors
+  the whole desktop. Wired into `ui/Desktop.jsx` (`attachTheme`). Verified headlessly
+  (9 checks): system→dark/light flips live, palette + accent resolve per theme, a
+  custom accent overrides and reverts — no console errors.
 - **Desktop environment foundations + a real file manager.** The playground is
   becoming a proper WorkerOS DE, not a set of demo widgets. This lands the shared
   groundwork: a **home directory** (`/root` with `Desktop`/`Documents`/`Downloads`,
