@@ -440,6 +440,44 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
       return ERRNO_SUCCESS;
     },
     sched_yield: () => ERRNO_SUCCESS,
+    // Clock-only poll — what wasi-libc's nanosleep/thread::sleep compiles to.
+    // A worker thread may block, so the wait is a plain Atomics.wait on a
+    // scratch SAB. fd subscriptions stay honestly unimplemented (NOSYS).
+    poll_oneoff: (inPtr, outPtr, nsubs, neventsPtr) => {
+      const dv = view();
+      const SUB = 48; // __wasi_subscription_t
+      const EVT = 32; // __wasi_event_t
+      let shortestMs = null;
+      const clocks = [];
+      for (let i = 0; i < nsubs; i++) {
+        const p = inPtr + i * SUB;
+        const userdata = dv.getBigUint64(p, true);
+        const tag = dv.getUint8(p + 8);
+        if (tag !== 0) return ERRNO_NOSYS; // only eventtype clock
+        const timeoutNs = dv.getBigUint64(p + 24, true);
+        const abstime = dv.getUint16(p + 40, true) & 1;
+        const nowNs = BigInt(Date.now()) * 1000000n;
+        const relNs = abstime ? (timeoutNs > nowNs ? timeoutNs - nowNs : 0n) : timeoutNs;
+        const ms = Number(relNs / 1000000n);
+        clocks.push(userdata);
+        shortestMs = shortestMs === null ? ms : Math.min(shortestMs, ms);
+      }
+      if (shortestMs === null) return ERRNO_INVAL;
+      if (shortestMs > 0) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, shortestMs);
+      }
+      let n = 0;
+      for (const userdata of clocks) {
+        const e = outPtr + n * EVT;
+        dv.setBigUint64(e, userdata, true);
+        dv.setUint16(e + 8, ERRNO_SUCCESS, true);
+        dv.setUint8(e + 10, 0); // eventtype clock
+        n++;
+      }
+      dv.setUint32(neventsPtr, n, true);
+      return ERRNO_SUCCESS;
+    },
+
     proc_exit: (code) => {
       sys.exit(code | 0); // throws ProcessExit to unwind _start
     },
@@ -450,7 +488,7 @@ export function createWasiImports({ sys, syncCall, argv, env, getMemory }) {
   const NOT_YET = [
     "fd_advise", "fd_allocate", "fd_datasync",
     "fd_pread", "fd_pwrite", "fd_renumber",
-    "fd_sync", "fd_fdstat_set_rights", "poll_oneoff", "proc_raise",
+    "fd_sync", "fd_fdstat_set_rights", "proc_raise",
     "sock_accept", "sock_recv", "sock_send", "sock_shutdown", "clock_nanosleep",
   ];
   for (const name of NOT_YET) {

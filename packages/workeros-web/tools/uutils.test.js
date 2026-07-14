@@ -134,6 +134,21 @@ test("multicall dispatch: symlinked names, explicit form, unknown name", opts, a
   assert.equal(result.viaShell.out, "A\n-\n7\n");
 });
 
+test("sleep blocks on the poll_oneoff clock (thread::sleep works)", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const t0 = Date.now();
+      const r = await window.run(os, ["sleep", "1"], { cwd: "/" });
+      return { r, elapsed: Date.now() - t0 };
+    }),
+  );
+
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.r.code, 0, result.r.err);
+  assert.ok(result.elapsed >= 900, `sleep 1 returned after ${result.elapsed}ms`);
+});
+
 test("streams: seq | fold pipe in, tee out, split writes chunk files", opts, async () => {
   const { result, pageErrors } = await withPage((page) =>
     page.evaluate(async () => {
