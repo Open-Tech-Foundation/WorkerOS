@@ -464,19 +464,51 @@ for (let i = 0; i < av.length; i++) {
 }
 const inputs = files.length ? files : ["-"];
 let code = 0, sections = 0;
+const lastLines = async (fd) => {
+  const ring = [], pending = [];
+  let pendingSize = 0;
+  const finishLine = (segment) => {
+    const size = pendingSize + segment.length;
+    const line = new Uint8Array(size);
+    let offset = 0;
+    for (const part of pending) { line.set(part, offset); offset += part.length; }
+    line.set(segment, offset);
+    pending.length = 0; pendingSize = 0;
+    if (n > 0) { ring.push(line); if (ring.length > n) ring.shift(); }
+  };
+  for (;;) {
+    const bytes = await sys.read(fd, 65536);
+    if (bytes.length === 0) break;
+    if (n === 0) continue;
+    let start = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      if (bytes[i] !== 10) continue;
+      finishLine(bytes.subarray(start, i + 1));
+      start = i + 1;
+    }
+    if (start < bytes.length) {
+      const part = bytes.subarray(start);
+      pending.push(part); pendingSize += part.length;
+    }
+  }
+  if (pendingSize > 0) finishLine(new Uint8Array(0));
+  return ring;
+};
 for (const file of inputs) {
+  let fd = null, owned = false;
   try {
-    const arr = toLines(await readInput(file));
-    const lines = n >= arr.length ? arr : arr.slice(arr.length - n);
+    if (file === "-") fd = 0;
+    else { fd = await sys.open(file, {}); owned = true; }
+    const lines = await lastLines(fd);
     if (inputs.length > 1) {
       if (sections++) out("\\n");
       out("==> " + (file === "-" ? "standard input" : file) + " <==\\n");
     }
-    emit(lines);
+    for (const line of lines) sys.write(1, line);
   } catch (e) {
     err("tail: cannot open '" + file + "': " + e.message + "\\n");
     code = 1;
-  }
+  } finally { if (owned) await closeQuietly(fd); }
 }
 sys.exit(code);
 `),

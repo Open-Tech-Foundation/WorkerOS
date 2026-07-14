@@ -305,6 +305,17 @@ test("head stops reading after the requested lines", async () => {
   assert.deepEqual(zero.readCalls, []);
 });
 
+test("tail retains only the requested trailing lines", async () => {
+  const input = Array.from({ length: 20000 }, (_, i) => `line-${i + 1}`).join("\n") + "\n";
+  const result = await run("tail", { argv: ["-n3"], stdin: input, inspectWrites: true });
+  assert.equal(result.out, "line-19998\nline-19999\nline-20000\n");
+  assert.equal(result.stdoutWrites.length, 3);
+
+  assert.equal((await run("tail", { argv: ["-n1"], stdin: "first\nlast" })).out, "last");
+  const longLine = "x".repeat(100000);
+  assert.equal((await run("tail", { argv: ["-n1"], stdin: longLine })).out, longLine);
+});
+
 test("wc", async () => {
   assert.equal((await run("wc", { argv: ["-l"], stdin: "a\nb\nc\n" })).out, "3\n");
   assert.equal((await run("wc", { argv: ["-w"], stdin: "a b c d\n" })).out, "4\n");

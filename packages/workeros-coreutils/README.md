@@ -64,6 +64,11 @@ uses standard input, and omitting the output uses standard output.
 line count is reached. It does not manufacture a trailing newline when the
 selected input does not contain one.
 
+`tail` scans input bytes into a bounded ring containing only the requested final
+lines. Memory use therefore follows the selected output plus the current line,
+not the total number of input lines, and unterminated final lines stay
+unterminated.
+
 `ls -l` reports the VFS entry type, real hard-link count, size, and modification
 time in UTC. WorkerOS does not currently model Unix owner/group or permission
 bits, so the leading access text is a conventional display profile based on the

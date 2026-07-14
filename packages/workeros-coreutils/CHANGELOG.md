@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `tail` now retains only the requested final lines in a byte-preserving ring
+  instead of decoding the entire input, including correct unterminated-line and
+  chunk-boundary behavior.
 - `head` now scans bytes incrementally, stops reading after the requested line
   count, and preserves an unterminated final line without adding a newline.
 - `seq` now streams bounded output chunks instead of retaining the complete
