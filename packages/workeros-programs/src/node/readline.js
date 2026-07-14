@@ -90,8 +90,14 @@ function concat(chunks) {
 }
 
 async function readLine(input, sys) {
-  if (input && typeof input.fd === "number") return readLineFromFd(input, sys);
+  // A stream input (process.stdin) must be consumed *through the stream*: its
+  // pump is the fd's single reader (the terminal Interface already resumed it
+  // for keypress events). Reading the fd directly here as well would race two
+  // kernel reads on fd 0 — the typed line lands in the pump and this direct
+  // read parks forever, so `question()` never resolves. Only a bare `{ fd }`
+  // input (no stream surface) reads the fd itself.
   if (input && typeof input.on === "function") return readLineFromStream(input);
+  if (input && typeof input.fd === "number") return readLineFromFd(input, sys);
   return readLineFromFd(input, sys);
 }
 

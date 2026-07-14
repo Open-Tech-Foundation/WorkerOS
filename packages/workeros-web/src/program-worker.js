@@ -108,6 +108,10 @@ function makeSyncFs(syncCall) {
   };
   return {
     open: (path, opts) => json("open", { path, opts }).fd,
+    // How much one `read` can carry back: a chunk of exactly this size may have
+    // been clipped by the channel (caller should read again); a smaller short
+    // read is the fd's own semantics (EOF, a TTY line, a pipe chunk).
+    maxReadChunk: MAX_SYNC_PAYLOAD,
     read: (fd, max) => {
       // The kernel advances the fd offset by the bytes it reads, but the sync
       // channel only carries MAX_SYNC_PAYLOAD back. Requesting more would advance
@@ -151,11 +155,17 @@ function makeSys(start, syncCall) {
     pid: start.pid,
     write: (fd, bytes) => writeBytes(fd, bytes),
     // read resolves to a Uint8Array; empty means EOF (the kernel worker parks
-    // "would block" internally, so a guest never sees it).
+    // "would block" internally, so a guest never sees it). `null` means the
+    // read was withdrawn by `readCancel` — not EOF: the caller stops reading
+    // without treating the stream as ended.
     read: async (fd, max = 65536) => {
       const r = await call("read", { fd, max });
+      if (r.status === "cancelled") return null;
       return r.status === "data" ? r.data : new Uint8Array(0);
     },
+    // Withdraw any parked read this process has on `fd` (a paused stdin stream
+    // stops polling the TTY, like libuv). The parked read resolves `null`.
+    readCancel: (fd) => call("readCancel", { fd }),
     open: (path, opts = {}) => call("open", { path, opts }),
     close: (fd) => call("close", { fd }),
     // Terminal introspection: is this fd the controlling terminal, and how big is

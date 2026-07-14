@@ -40,10 +40,12 @@ export function colorDepth(env = {}) {
  *   getWinsize()       — current { cols, rows }
  *   getEnv()           — the live process.env (for color detection)
  *   setRawMode(fd, on) — flip the kernel line discipline (tcsetattr)
- *   readFd(fd, max)    — async read from a fd; resolves bytes, empty = EOF
+ *   readFd(fd, max)    — async read from a fd; resolves bytes, empty = EOF,
+ *                        null = withdrawn by cancelRead (not EOF)
+ *   cancelRead(fd)     — withdraw a parked readFd on `fd` (optional)
  *   emitter(obj)       — augment obj with the Node EventEmitter surface
  */
-export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, readFd, emitter }) {
+export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, readFd, cancelRead, emitter }) {
   const isatty = (fd) => isattyFor(fd);
   const fire = (cb) => { if (typeof cb === "function") queueMicrotask(cb); };
   // Buffer / event loop are installed on the global by /bin/node at runtime, after
@@ -162,6 +164,14 @@ export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, re
           while (this._flowing && this._buf.length) this.emit("data", this._buf.shift());
           const bytes = await readFd(this.fd, 1 << 16);
           if (this._ended) break;
+          // `null` = the read was withdrawn (pause() cancelled it): stop the
+          // pump without ending the stream — a later resume() pumps again. If a
+          // resume already landed while the cancel was in flight, keep pumping
+          // (exiting here would leave a flowing stream with no reader).
+          if (bytes === null) {
+            if (this._flowing) continue;
+            break;
+          }
           if (!bytes || bytes.length === 0) {
             this._ended = true;
             this.readable = false;
@@ -171,6 +181,14 @@ export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, re
           const chunk = this._wrap(bytes);
           if (this._flowing) {
             this.emit("data", chunk);
+            // A pause() inside that 'data' handler (readline close, npm's
+            // post-prompt teardown) takes effect *now* — before another read is
+            // issued. Re-reading here would park on the TTY again the instant
+            // the prompt was answered, and that stale read steals the next
+            // foreground reader's input (create-vite's install prompt); the
+            // pause-time readCancel can't help, it fires while nothing is
+            // parked yet.
+            if (!this._flowing) break;
           } else {
             this._buf.push(chunk);
             this.emit("readable");
@@ -193,7 +211,15 @@ export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, re
       return this;
     }
 
-    pause() { this._flowing = false; return this; }
+    pause() {
+      this._flowing = false;
+      // Withdraw a parked kernel read (libuv stops polling a paused stdin).
+      // Leaving it parked would swallow the next keystrokes into this paused
+      // stream's backlog — input meant for whoever reads the terminal next
+      // (npm's stale read ate the answer to create-vite's install prompt).
+      if (this._reading && cancelRead) cancelRead(this.fd);
+      return this;
+    }
 
     setEncoding(enc) { this._encoding = enc; this._decoder = null; return this; }
 
@@ -234,7 +260,14 @@ export function createTty({ write, isattyFor, getWinsize, getEnv, setRawMode, re
 
     ref() { this._ref(); return this; }
     unref() { this._unref(); return this; }
-    destroy() { this._ended = true; this.readable = false; this._unref(); this.emit("close"); return this; }
+    destroy() {
+      this._ended = true;
+      this.readable = false;
+      if (this._reading && cancelRead) cancelRead(this.fd);
+      this._unref();
+      this.emit("close");
+      return this;
+    }
     // `setRawMode` is attached per-instance only when isTTY (constructor), matching
     // Node: a redirected/piped stdin has no setRawMode, which libraries feature-test.
 

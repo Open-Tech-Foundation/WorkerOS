@@ -126,6 +126,7 @@ const tty = createTty({
   getEnv: () => process.env,
   setRawMode: (fd, on) => sys.tcsetattr({ canonical: !on, echo: !on, isig: !on }),
   readFd: (fd, max) => sys.read(fd, max),
+  cancelRead: (fd) => { if (typeof sys.readCancel === "function") sys.readCancel(fd); },
   emitter,
 });
 

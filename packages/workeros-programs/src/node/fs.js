@@ -332,13 +332,21 @@ export function createFs(syncFs, onFsEvent) {
     // `fs.read` and trusts the returned count, so a short read there truncates
     // the content and the integrity check fails (EBADSIZE — the bug that made
     // installs of large packuments/tarballs, e.g. a Vite scaffold, break).
+    //
+    // Only a chunk clipped by the channel cap can mean "more follows", though:
+    // a regular file never reads short except at EOF, while a TTY yields one
+    // line and a pipe what's buffered. Looping past those short reads blocks
+    // the process on input it already consumed (a child's `readSync(0)` on the
+    // terminal hung exactly this way after receiving its line).
     const path = openPaths.get(fd);
+    const cap = syncFs.maxReadChunk ?? Infinity;
     let got = 0;
     while (got < length) {
-      const bytes = guard(() => syncFs.read(fd, length - got), "read", path);
-      if (bytes.length === 0) break; // EOF
+      const want = length - got;
+      const bytes = guard(() => syncFs.read(fd, want), "read", path);
       buffer.set(bytes, offset + got);
       got += bytes.length;
+      if (bytes.length < Math.min(want, cap)) break; // EOF or a genuine short read
     }
     return got;
   }

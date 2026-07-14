@@ -1152,6 +1152,20 @@ function handleSyscall(pid, msg) {
         }
         break;
       }
+      case "readCancel": {
+        // Withdraw this process's parked reads on `fd` (libuv semantics: a
+        // paused stdin stops polling). Without this, a stream that paused after
+        // its prompt leaves a read parked on the TTY forever — and that stale
+        // read swallows the input a later foreground reader (an inherit-stdio
+        // child's prompt, e.g. create-vite's) is waiting for. Each withdrawn
+        // read resolves with status "cancelled" (distinct from EOF) so the
+        // guest pump stops without ending the stream.
+        const cancelled = pendingReads.filter((pr) => pr.pid === pid && pr.fd === args.fd);
+        pendingReads = pendingReads.filter((pr) => !(pr.pid === pid && pr.fd === args.fd));
+        for (const pr of cancelled) reply(pid, pr.id, true, { status: "cancelled" });
+        reply(pid, id, true, { cancelled: cancelled.length });
+        break;
+      }
       case "open":
         reply(pid, id, true, kernel.sys_open(pid, args.path, args.opts || {}));
         break;
