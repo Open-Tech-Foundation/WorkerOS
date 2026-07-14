@@ -132,6 +132,12 @@ test("seq writes large output in bounded chunks", async () => {
   assert.equal(stalled.err, "seq: increment is too small to make progress\n");
 });
 
+test("seq emits exact decimal endpoints without floating-point artifacts", async () => {
+  assert.equal((await run("seq", { argv: ["0", "0.1", "0.3"] })).out, "0.0\n0.1\n0.2\n0.3\n");
+  assert.equal((await run("seq", { argv: ["0.3", "-0.1", "0"] })).out, "0.3\n0.2\n0.1\n0.0\n");
+  assert.equal((await run("seq", { argv: ["1e-1", "1e-1", "3e-1"] })).out, "0.1\n0.2\n0.3\n");
+});
+
 test("unsupported options fail clearly", async () => {
   for (const [name, argv, option] of [
     ["cat", ["-z"], "-z"],

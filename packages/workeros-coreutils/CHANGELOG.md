@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- Decimal `seq` ranges now use safe scaled-integer iteration when possible,
+  preserving inferred precision and reachable endpoints without binary
+  floating-point artifacts in ascending, descending, or exponent-form ranges.
 - `rm -f` now suppresses only missing-path errors; permission failures,
   directories without `-r`, and other removal errors remain visible. Recursive
   tree removal is covered by the coreutils VFS tests.

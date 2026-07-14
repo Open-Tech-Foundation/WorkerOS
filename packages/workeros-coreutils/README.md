@@ -50,6 +50,11 @@ rather than silently ignored.
 sequence in memory. An increment that cannot advance at the current numeric
 magnitude is rejected rather than causing an infinite loop.
 
+Decimal `seq` operands use safe scaled-integer iteration when possible. This
+keeps inferred decimal precision, includes reachable endpoints, and avoids
+binary floating-point artifacts; other finite numeric forms use the guarded
+floating-point fallback.
+
 `cat -n` numbers every output line while streaming original bytes. Numbering
 continues across files, and adjacent files without an intervening newline remain
 one logical line.

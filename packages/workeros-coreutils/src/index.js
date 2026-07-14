@@ -415,9 +415,13 @@ if (seqOperands.length > 3) invalidUsage("extra operand '" + seqOperands[3] + "'
 for (const arg of seqOperands) if (!seqNumber.test(arg) || !Number.isFinite(Number(arg))) invalidUsage("invalid number '" + arg + "'");
 const a = seqOperands.map(Number);
 let first = 1, incr = 1, last = 0;
-if (a.length === 1) { last = a[0]; }
-else if (a.length === 2) { first = a[0]; last = a[1]; }
-else if (a.length >= 3) { first = a[0]; incr = a[1]; last = a[2]; }
+let firstRaw = "1", incrRaw = "1", lastRaw = "0";
+if (a.length === 1) { last = a[0]; lastRaw = seqOperands[0]; }
+else if (a.length === 2) { first = a[0]; last = a[1]; firstRaw = seqOperands[0]; lastRaw = seqOperands[1]; }
+else if (a.length >= 3) {
+  first = a[0]; incr = a[1]; last = a[2];
+  firstRaw = seqOperands[0]; incrRaw = seqOperands[1]; lastRaw = seqOperands[2];
+}
 if (incr === 0) { err("seq: increment must not be zero\\n"); sys.exit(1); }
 const inRange = incr > 0 ? first <= last : first >= last;
 if (inRange && first !== last && first + incr === first) invalidUsage("increment is too small to make progress");
@@ -426,7 +430,23 @@ const append = (value) => {
   buffer += String(value) + "\\n";
   if (buffer.length >= 8192) { out(buffer); buffer = ""; }
 };
-if (incr > 0) {
+const decimalPlaces = (raw) => {
+  const [mantissa, exponentRaw = "0"] = raw.toLowerCase().split("e");
+  const fraction = (mantissa.split(".")[1] || "").length;
+  return Math.max(0, fraction - Number(exponentRaw));
+};
+const precision = Math.max(decimalPlaces(firstRaw), decimalPlaces(incrRaw), decimalPlaces(lastRaw));
+const scale = precision <= 12 ? 10 ** precision : 0;
+const scaledValues = scale ? [first, incr, last].map((value) => Math.round(value * scale)) : [];
+const safelyScaled = scale && scaledValues.every((value, i) =>
+  Number.isSafeInteger(value) && Math.abs(value - [first, incr, last][i] * scale) <= Number.EPSILON * Math.max(1, Math.abs(value)) * 4
+);
+if (safelyScaled) {
+  const [scaledFirst, scaledIncr, scaledLast] = scaledValues;
+  const format = (value) => precision ? (value / scale).toFixed(precision) : String(value);
+  if (scaledIncr > 0) for (let i = scaledFirst; i <= scaledLast; i += scaledIncr) append(format(i));
+  else for (let i = scaledFirst; i >= scaledLast; i += scaledIncr) append(format(i));
+} else if (incr > 0) {
   for (let i = first; i <= last;) {
     append(i);
     if (i === last) break;
