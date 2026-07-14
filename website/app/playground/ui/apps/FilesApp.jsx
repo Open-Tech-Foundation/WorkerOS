@@ -10,6 +10,7 @@ import { HOME, join, parent, basename, displayPath, seedHome } from "../../os/vf
 import { promptDialog, confirmDialog, alertDialog } from "../../os/dialogs.js";
 import { openWindow } from "../../os/wm.js";
 import { contextMenu } from "../../os/menus.js";
+import { notifySuccess } from "../../os/notify.js";
 
 export default function FilesApp() {
   const st = reactive({ cwd: HOME, entries: [], selected: null, error: null });
@@ -70,7 +71,7 @@ export default function FilesApp() {
       danger: true,
     });
     if (!ok) return;
-    try { const os = await getOS(); await os.fs.remove(join(st.cwd, entry.name)); await refresh(); }
+    try { const os = await getOS(); await os.fs.remove(join(st.cwd, entry.name)); await refresh(); notifySuccess("Deleted " + entry.name); }
     catch (e) { await alertDialog({ title: "Couldn't delete", message: String(e?.message || e) }); }
   }
 

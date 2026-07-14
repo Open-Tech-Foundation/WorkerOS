@@ -14,6 +14,7 @@ import Launcher from "./Launcher.jsx";
 import Dock from "./Dock.jsx";
 import Dialog from "./Dialog.jsx";
 import ContextMenu from "./ContextMenu.jsx";
+import Toasts from "./Toasts.jsx";
 
 export default function Desktop() {
   onMount(() => {
@@ -82,6 +83,7 @@ export default function Desktop() {
       <Dock />
       <Dialog />
       <ContextMenu />
+      <Toasts />
     </div>
   );
 }

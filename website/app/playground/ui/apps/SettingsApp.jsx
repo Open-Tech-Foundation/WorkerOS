@@ -8,7 +8,7 @@
 import { onMount } from "@opentf/web";
 import { theme, setTheme } from "../../os/theme.js";
 import { getOS } from "../../os/os.js";
-import { alertDialog } from "../../os/dialogs.js";
+import { notifySuccess, notifyError } from "../../os/notify.js";
 
 // Accent presets ("" = the theme's built-in OTF orange).
 const ACCENTS = [
@@ -55,9 +55,9 @@ export default function SettingsApp() {
     try {
       const os = await getOS();
       if (os.flush) await os.flush();
-      await alertDialog({ title: "Snapshot saved", message: "The filesystem was flushed to durable storage." });
+      notifySuccess("Filesystem snapshot saved to durable storage.");
     } catch (e) {
-      await alertDialog({ title: "Couldn't save", message: String(e?.message || e) });
+      notifyError("Couldn't save: " + String(e?.message || e));
     }
     saving = false;
   };

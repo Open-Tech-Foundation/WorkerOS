@@ -8,6 +8,12 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **UI toolkit — toast notifications.** A DE-wide toast service (`os/notify.js` +
+  `ui/Toasts.jsx`) so apps can report a non-modal outcome (`notify` / `notifySuccess`
+  / `notifyError`) instead of a blocking dialog — a bottom-right stack above the dock
+  that auto-dismisses or clears on click, themed by kind (info/success/error). Wired
+  into Settings (“snapshot saved”) and Files (delete confirmation). Verified headlessly
+  (3 checks) — no console errors.
 - **Settings app — the OS control panel over the toolkit.** A real Settings app
   (`ui/apps/SettingsApp.jsx`, pinned to the dock) that drives the theme engine and
   FS-backed state directly: **Appearance** (theme mode System/Light/Dark, an accent
