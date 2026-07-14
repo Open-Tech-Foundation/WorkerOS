@@ -154,7 +154,7 @@ if (operands.length === 0) {
       try { await dump(fd); }
       finally { await sys.close(fd); }
     } catch (e) {
-      err("cat: " + f + ": No such file or directory\\n");
+      err("cat: " + f + ": " + e.message + "\\n");
       code = 1;
     }
   }
@@ -225,7 +225,7 @@ async function listDir(t, many) {
       }
     }
   } catch (e) {
-    err("ls: " + t + ": No such file or directory\\n");
+    err("ls: " + t + ": " + e.message + "\\n");
     code = 1;
   }
 }
@@ -252,7 +252,11 @@ async function mkone(p) {
     let cur = absolute ? "" : ".";
     for (const part of p.split("/").filter(Boolean)) {
       cur = cur + "/" + part;
-      try { await sys.mkdir(cur); } catch (e) { /* already exists — ok for -p */ }
+      try { await sys.mkdir(cur); }
+      catch (e) {
+        const st = await sys.stat(cur).catch(() => null);
+        if (!st || st.kind !== "dir") throw e;
+      }
     }
   } else {
     await sys.mkdir(p);
@@ -261,7 +265,7 @@ async function mkone(p) {
 let code = 0;
 for (const d of operands) {
   try { await mkone(d); }
-  catch (e) { err("mkdir: cannot create directory '" + d + "'\\n"); code = 1; }
+  catch (e) { err("mkdir: cannot create directory '" + d + "': " + e.message + "\\n"); code = 1; }
 }
 sys.exit(code);
 `),

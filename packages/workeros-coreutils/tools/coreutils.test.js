@@ -11,7 +11,7 @@ import { collectSimpleFlags, hasFlag as hasParsedFlag } from "../../workeros-pro
 const enc = new TextEncoder(), dec = new TextDecoder();
 
 async function run(name, {
-  argv = [], stdin = "", files = {}, dirs = [], readErrors = [], writeErrors = [], inspectFds = false,
+  argv = [], stdin = "", files = {}, dirs = [], readErrors = [], writeErrors = [], mkdirErrors = [], inspectFds = false,
 } = {}) {
   const body = coreutils["/sbin/" + name].replace(/^import .*?\n/, "");
   const outB = [], errB = [];
@@ -54,6 +54,11 @@ async function run(name, {
       throw new Error("ENOENT");
     },
     readdir: async () => [],
+    mkdir: async (path) => {
+      if (mkdirErrors.includes(path)) throw new Error("EPERM");
+      if (dirSet.has(path) || vfs.has(path)) throw new Error("EEXIST");
+      dirSet.add(path);
+    },
     rename: async (from, to) => {
       if (!vfs.has(from)) throw new Error("ENOENT");
       vfs.set(to, vfs.get(from)); vfs.delete(from);
@@ -176,6 +181,28 @@ test("file descriptors close after injected I/O failures", async () => {
   });
   assert.equal(uniq.code, 1);
   assert.deepEqual(uniq.openFds, []);
+});
+
+test("filesystem diagnostics preserve the underlying error", async () => {
+  assert.equal((await run("cat", { argv: ["/missing"] })).err, "cat: /missing: ENOENT\n");
+  assert.equal(
+    (await run("cat", {
+      argv: ["/input"], files: { "/input": "data" }, readErrors: ["/input"],
+    })).err,
+    "cat: /input: EIO\n",
+  );
+
+  const ls = await run("ls", { argv: ["/missing"] });
+  assert.equal(ls.code, 1);
+  assert.equal(ls.err, "ls: /missing: ENOENT\n");
+
+  for (const argv of [["/blocked"], ["-p", "/blocked"]]) {
+    const mkdir = await run("mkdir", { argv, mkdirErrors: ["/blocked"] });
+    assert.equal(mkdir.code, 1);
+    assert.equal(mkdir.err, "mkdir: cannot create directory '/blocked': EPERM\n");
+  }
+
+  assert.equal((await run("mkdir", { argv: ["-p", "/existing"], dirs: ["/existing"] })).code, 0);
 });
 
 test("cp and mv accept multiple sources for a directory", async () => {

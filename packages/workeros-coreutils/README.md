@@ -73,5 +73,9 @@ Utilities close every file descriptor they open, including when an input read,
 output write, or later open operation fails. Standard input and output remain
 owned by the process runtime and are not closed by a utility.
 
+Filesystem diagnostics retain the kernel-provided cause, such as `ENOENT`,
+`EIO`, or `EPERM`. `mkdir -p` suppresses an error only after confirming that the
+path already exists as a directory.
+
 `grep` is a separate Rust `wasm32-wasip1` program installed in `/bin`, rather
 than a JavaScript utility in this package.

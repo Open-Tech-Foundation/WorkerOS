@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `cat`, `ls`, and `mkdir` diagnostics now retain the underlying kernel error
+  instead of replacing it with a generic message. `mkdir -p` ignores a failed
+  create only when `stat` confirms the path is already a directory.
 - `ls -l` now includes real VFS hard-link counts and modification times, and
   distinguishes file, directory, and symlink display types. Its access text
   remains a documented conventional profile because the VFS has no Unix mode
