@@ -54,5 +54,9 @@ uses standard input, and omitting the output uses standard output.
 from the original bytes. UTF-8 multibyte characters therefore contribute their
 encoded byte length to `-c` and to the default third column.
 
+Utilities close every file descriptor they open, including when an input read,
+output write, or later open operation fails. Standard input and output remain
+owned by the process runtime and are not closed by a utility.
+
 `grep` is a separate Rust `wasm32-wasip1` program installed in `/bin`, rather
 than a JavaScript utility in this package.

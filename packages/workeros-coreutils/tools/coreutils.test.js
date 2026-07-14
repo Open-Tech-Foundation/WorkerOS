@@ -10,7 +10,9 @@ import { collectSimpleFlags, hasFlag as hasParsedFlag } from "../../workeros-pro
 
 const enc = new TextEncoder(), dec = new TextDecoder();
 
-async function run(name, { argv = [], stdin = "", files = {} } = {}) {
+async function run(name, {
+  argv = [], stdin = "", files = {}, readErrors = [], writeErrors = [], inspectFds = false,
+} = {}) {
   const body = coreutils["/sbin/" + name].replace(/^import .*?\n/, "");
   const outB = [], errB = [];
   const vfs = new Map(Object.entries(files).map(([k, v]) => [k, enc.encode(v)]));
@@ -26,13 +28,16 @@ async function run(name, { argv = [], stdin = "", files = {} } = {}) {
       }
       const f = fds.get(fd);
       if (!f || !f.path) throw new Error("EBADF");
+      if (writeErrors.includes(f.path)) throw new Error("EIO");
       const data = new Uint8Array(Math.max(f.data.length, f.pos + bytes.length));
       data.set(f.data); data.set(bytes, f.pos); f.pos += bytes.length; f.data = data;
       vfs.set(f.path, data);
       return bytes.length;
     },
     read: async (fd, max) => {
-      const f = fds.get(fd); if (!f || f.pos >= f.data.length) return new Uint8Array(0);
+      const f = fds.get(fd);
+      if (f?.path && readErrors.includes(f.path)) throw new Error("EIO");
+      if (!f || f.pos >= f.data.length) return new Uint8Array(0);
       const slice = f.data.subarray(f.pos, f.pos + max); f.pos += slice.length; return slice;
     },
     open: async (path, opts = {}) => {
@@ -53,12 +58,14 @@ async function run(name, { argv = [], stdin = "", files = {} } = {}) {
     "return (async () => {\n" + body + "\n})();",
   );
   try { await fn(sys, collectSimpleFlags, hasParsedFlag); } catch (e) { if (e && e.__exit !== undefined) code = e.__exit; else throw e; }
-  return {
+  const result = {
     code,
     out: outB.map((b) => dec.decode(b)).join(""),
     err: errB.map((b) => dec.decode(b)).join(""),
     files: Object.fromEntries([...vfs].map(([path, data]) => [path, dec.decode(data)])),
   };
+  if (inspectFds) result.openFds = [...fds.keys()].filter((fd) => fd > 2);
+  return result;
 }
 
 test("seq", async () => {
@@ -125,6 +132,40 @@ test("-- preserves option-looking file operands", async () => {
     files,
   });
   assert.equal((await run("head", { argv: ["-n1", "--", "-notes"], files })).out, "kept\n");
+});
+
+test("file descriptors close after injected I/O failures", async () => {
+  const cat = await run("cat", {
+    argv: ["/input"], files: { "/input": "data" }, readErrors: ["/input"], inspectFds: true,
+  });
+  assert.equal(cat.code, 1);
+  assert.deepEqual(cat.openFds, []);
+
+  const head = await run("head", {
+    argv: ["/input"], files: { "/input": "data" }, readErrors: ["/input"], inspectFds: true,
+  });
+  assert.equal(head.code, 1);
+  assert.deepEqual(head.openFds, []);
+
+  for (const failure of [
+    { readErrors: ["/source"] },
+    { writeErrors: ["/dest"] },
+  ]) {
+    const cp = await run("cp", {
+      argv: ["/source", "/dest"], files: { "/source": "data" }, inspectFds: true, ...failure,
+    });
+    assert.equal(cp.code, 1);
+    assert.deepEqual(cp.openFds, []);
+  }
+
+  const uniq = await run("uniq", {
+    argv: ["/input", "/output"],
+    files: { "/input": "a\na\n" },
+    writeErrors: ["/output"],
+    inspectFds: true,
+  });
+  assert.equal(uniq.code, 1);
+  assert.deepEqual(uniq.openFds, []);
 });
 
 test("head / tail", async () => {

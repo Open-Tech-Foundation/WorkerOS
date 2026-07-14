@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- File descriptors opened by shared input handling, `cat`, `cp`, and `uniq` are
+  now closed on read, write, and open failures instead of leaking until process
+  teardown.
 - `wc -c` and the default third column now count original input bytes instead
   of JavaScript UTF-16 string units, including correct totals for UTF-8 input.
 - Multi-file text processing now follows command boundaries: `head` and `tail`

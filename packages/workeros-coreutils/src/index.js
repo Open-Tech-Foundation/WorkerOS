@@ -48,11 +48,14 @@ const readFd = async (fd) => dec.decode(await readFdBytes(fd));
 const readInputBytes = async (file) => {
   if (file === "-") return readFdBytes(0);
   const fd = await sys.open(file, {});
-  const bytes = await readFdBytes(fd);
-  await sys.close(fd);
-  return bytes;
+  try { return await readFdBytes(fd); }
+  finally { await sys.close(fd); }
 };
 const readInput = async (file) => dec.decode(await readInputBytes(file));
+const closeQuietly = async (fd) => {
+  if (fd === null || fd === undefined) return;
+  try { await sys.close(fd); } catch (_) {}
+};
 // Read a list of file operands (or stdin when empty / "-"), concatenated to text.
 const readInputs = async (files) => {
   if (!files || files.length === 0) return readFd(0);
@@ -148,8 +151,8 @@ if (operands.length === 0) {
     if (f === "-") { await dump(0); continue; }
     try {
       const fd = await sys.open(f, {});
-      await dump(fd);
-      await sys.close(fd);
+      try { await dump(fd); }
+      finally { await sys.close(fd); }
     } catch (e) {
       err("cat: " + f + ": No such file or directory\\n");
       code = 1;
@@ -295,23 +298,25 @@ if (operands.length < 2) { err("cp: missing file operand\\n"); sys.exit(1); }
 if (operands.length > 2) invalidUsage("extra operand '" + operands[2] + "'");
 const src = operands[0];
 let dst = operands[1];
+let fin = null, fout = null, code = 0;
 try {
   const dstat = await sys.stat(dst).catch(() => null);
   if (dstat && dstat.kind === "dir") dst = dst.replace(/\\/+$/, "") + "/" + basename(src);
-  const fin = await sys.open(src, {});
-  const fout = await sys.open(dst, { create: true, truncate: true });
+  fin = await sys.open(src, {});
+  fout = await sys.open(dst, { create: true, truncate: true });
   for (;;) {
     const b = await sys.read(fin, 65536);
     if (b.length === 0) break;
     sys.write(fout, b);
   }
-  await sys.close(fin);
-  await sys.close(fout);
-  sys.exit(0);
 } catch (e) {
   err("cp: " + e.message + "\\n");
-  sys.exit(1);
+  code = 1;
+} finally {
+  await closeQuietly(fin);
+  await closeQuietly(fout);
 }
+sys.exit(code);
 `),
 
   "/sbin/mv": util(`
@@ -477,18 +482,24 @@ sys.exit(0);
   "/sbin/uniq": util(`
 acceptOptions("c");
 if (operands.length > 2) invalidUsage("extra operand '" + operands[2] + "'");
-const arr = toLines(await readInput(operands[0] || "-"));
-const res = []; let prev = null, count = 0;
-const push = () => { if (prev !== null) res.push(has("c") ? String(count).padStart(7) + " " + prev : prev); };
-for (const l of arr) { if (l === prev) count++; else { push(); prev = l; count = 1; } }
-push();
-const result = res.length ? res.join("\\n") + "\\n" : "";
-if (operands[1]) {
-  const fd = await sys.open(operands[1], { create: true, truncate: true });
-  sys.write(fd, enc.encode(result));
-  await sys.close(fd);
-} else out(result);
-sys.exit(0);
+let code = 0;
+try {
+  const arr = toLines(await readInput(operands[0] || "-"));
+  const res = []; let prev = null, count = 0;
+  const push = () => { if (prev !== null) res.push(has("c") ? String(count).padStart(7) + " " + prev : prev); };
+  for (const l of arr) { if (l === prev) count++; else { push(); prev = l; count = 1; } }
+  push();
+  const result = res.length ? res.join("\\n") + "\\n" : "";
+  if (operands[1]) {
+    const fd = await sys.open(operands[1], { create: true, truncate: true });
+    try { sys.write(fd, enc.encode(result)); }
+    finally { await sys.close(fd); }
+  } else out(result);
+} catch (e) {
+  err("uniq: " + e.message + "\\n");
+  code = 1;
+}
+sys.exit(code);
 `),
 
   // cut -d DELIM -f LIST [files] — select fields (1-based; ranges 1-3, lists 1,3).
