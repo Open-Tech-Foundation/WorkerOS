@@ -9,6 +9,7 @@ import { getOS } from "../../os/os.js";
 import { HOME, join, parent, basename, displayPath, seedHome } from "../../os/vfs.js";
 import { promptDialog, confirmDialog, alertDialog } from "../../os/dialogs.js";
 import { openWindow } from "../../os/wm.js";
+import { contextMenu } from "../../os/menus.js";
 
 export default function FilesApp() {
   const st = reactive({ cwd: HOME, entries: [], selected: null, error: null });
@@ -77,6 +78,15 @@ export default function FilesApp() {
     seedHome().then(() => load(HOME)).catch(() => load(HOME));
   });
 
+  // Right-click menus, built with the shared context-menu service so Files looks
+  // and behaves like every other app's menu — but its actions stay in-instance.
+  const bgMenu = contextMenu([
+    { label: "New Folder", icon: "📁", action: () => newFolder() },
+    { label: "New File", icon: "📄", action: () => newFile() },
+    { separator: true },
+    { label: "Refresh", icon: "⟳", action: () => refresh() },
+  ]);
+
   return (
     <div class="app-files">
       <div class="fm-bar">
@@ -93,12 +103,21 @@ export default function FilesApp() {
         </div>
       </div>
 
-      <div class="fm-list" onpointerdown={() => (st.selected = null)}>
+      <div class="fm-list" onpointerdown={() => (st.selected = null)} oncontextmenu={bgMenu}>
         {st.entries.map((e) => (
           <button
             class={"fm-row" + (e.is_dir ? " is-dir" : "") + (st.selected === e.name ? " sel" : "")}
             onpointerdown={(ev) => { ev.stopPropagation(); st.selected = e.name; }}
             ondblclick={() => open(e)}
+            oncontextmenu={contextMenu(() => {
+              st.selected = e.name;
+              return [
+                { label: e.is_dir ? "Open" : "Open in Editor", icon: e.is_dir ? "📂" : "✏️", action: () => open(e) },
+                { label: "Rename", icon: "✎", action: () => rename() },
+                { separator: true },
+                { label: "Delete", icon: "🗑", danger: true, action: () => remove() },
+              ];
+            })}
           >
             <span class="fm-row-ico">{e.is_dir ? "📁" : "📄"}</span>
             <span class="fm-row-name">{e.name}</span>

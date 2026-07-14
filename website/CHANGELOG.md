@@ -8,6 +8,17 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **UI toolkit — Pillar C (part 1): window reliability + per-app context menus.**
+  The window manager gained a **dock-aware work area** so windows behave predictably:
+  maximizing now reserves the dock strip (the dock stays visible and clickable), and
+  dragging clamps the title bar above it instead of letting a window hide behind the
+  dock or leave the screen. Stacking z-indexes **renormalize** before they can climb
+  past the dock/overlay layers, so a long session can't push a window on top of the
+  dock. And the shared context-menu service now reaches into apps: **Files** has
+  right-click menus (empty area → New Folder / New File / Refresh; a row → Open /
+  Rename / Delete, which also selects the row) — same menu widget as the desktop and
+  window chrome, but with the app's own in-instance actions, which is the pattern
+  every app will follow. Verified headlessly (7 checks) — no console errors.
 - **UI toolkit — Pillar B (menus): one context-menu system for the whole DE.** A
   shared, data-driven menu service (`os/menus.js`) rendered once at the desktop
   level (`ui/ContextMenu.jsx`), so a right-click behaves identically on the desktop,

@@ -464,7 +464,8 @@ pre.code .a { color: var(--accent-soft); }
     0 22px 60px -18px rgba(0, 0, 0, 0.7),
     0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
 }
-.win.is-max { inset: 0 !important; border-radius: 0; border: 0; }
+/* Maximize fills the work area, leaving the dock strip clear at the bottom. */
+.win.is-max { inset: 0 0 72px 0 !important; border-radius: 0; border: 0; }
 .win.is-min { display: none; }
 
 .win-bar {

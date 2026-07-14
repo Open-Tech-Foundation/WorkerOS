@@ -4,7 +4,7 @@
 // title bar with the app icon + title on the left and the window controls
 // (minimize / maximize / close) on the right. Content is passed as children.
 
-import { wm, focusWindow, closeWindow, moveWindow, resizeWindow, minimize, toggleMax } from "../os/wm.js";
+import { wm, focusWindow, closeWindow, moveWindow, resizeWindow, minimize, toggleMax, workArea } from "../os/wm.js";
 import { contextMenu } from "../os/menus.js";
 
 // Drag/resize share this: track the pointer on `window` until release, so a fast
@@ -26,10 +26,12 @@ export default function Window({ win, children }) {
     const ox = e.clientX - win.x;
     const oy = e.clientY - win.y;
     e.preventDefault();
+    const area = workArea();
     trackPointer((ev) => {
-      // Keep the title bar reachable: clamp so it can't be dragged fully off-screen.
-      const x = Math.min(Math.max(ev.clientX - ox, -win.w + 80), window.innerWidth - 80);
-      const y = Math.min(Math.max(ev.clientY - oy, 0), window.innerHeight - 40);
+      // Keep the title bar reachable: clamp so it can't be dragged fully off-screen
+      // or hidden behind the dock (the title bar stays above the work-area bottom).
+      const x = Math.min(Math.max(ev.clientX - ox, -win.w + 80), area.right - 80);
+      const y = Math.min(Math.max(ev.clientY - oy, 0), area.bottom - 40);
       moveWindow(win.id, x, y);
     });
   };

@@ -26,6 +26,34 @@ export const wm = reactive({
 let nextId = 1;
 let cascade = 0;
 
+// Height reserved at the bottom for the dock, so maximized and dragged windows
+// keep clear of it — a dock-aware "work area" (matches the CSS `.win.is-max`
+// inset and the `.dt-dock` footprint).
+export const DOCK_RESERVE = 72;
+
+/** The usable desktop rect (viewport minus the dock strip). Windows clamp to it. */
+export function workArea() {
+  const w = typeof window !== "undefined" ? window.innerWidth : 1280;
+  const h = typeof window !== "undefined" ? window.innerHeight : 720;
+  return { top: 0, left: 0, right: w, bottom: h - DOCK_RESERVE };
+}
+
+// Focus keeps bumping z; renormalize before it can climb past the dock/overlay
+// layers (dock z=1000). Compacting to a small dense range keeps windows below it.
+const Z_CEILING = 500;
+
+function renormalizeZ() {
+  const order = [...wm.windows].sort((a, b) => a.z - b.z);
+  order.forEach((o, k) => { o.z = 10 + k; });
+  wm.topZ = 10 + Math.max(0, order.length - 1);
+}
+
+/** Next stacking z for a raise/open, renormalizing if we near the ceiling. */
+function bumpZ() {
+  if (wm.topZ >= Z_CEILING) renormalizeZ();
+  return ++wm.topZ;
+}
+
 // Reactive element by id (via index, so the returned object is the store proxy —
 // mutating it propagates). `null` if the window is gone.
 function win(id) {
@@ -60,7 +88,7 @@ export function openWindow(spec) {
     y: spec.y ?? place.y,
     w,
     h,
-    z: ++wm.topZ,
+    z: bumpZ(),
     state: "normal",
     prev: null,
     props: spec.props || {},
@@ -86,7 +114,7 @@ export function focusWindow(id) {
   const w = win(id);
   if (!w) return;
   if (wm.focusedId !== id) wm.focusedId = id;
-  if (w.z !== wm.topZ) w.z = ++wm.topZ;
+  if (w.z !== wm.topZ) w.z = bumpZ();
 }
 
 export function moveWindow(id, x, y) {
