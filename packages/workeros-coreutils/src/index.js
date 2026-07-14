@@ -708,16 +708,26 @@ const expand = (set) => {
   }
   return r;
 };
-const text = await readFd(0);
 const set1 = expand(operands[0] || "");
-let res;
-if (has("d")) { const s = new Set(set1); res = [...text].filter((c) => !s.has(c)).join(""); }
-else {
-  const set2 = expand(operands[1] || "");
-  const map = {}; for (let i = 0; i < set1.length; i++) map[set1[i]] = set2[Math.min(i, set2.length - 1)] ?? set1[i];
-  res = [...text].map((c) => (c in map ? map[c] : c)).join("");
+const deleting = has("d");
+const deleted = deleting ? new Set(set1) : null;
+const map = {};
+if (!deleting) {
+  const chars1 = [...set1], chars2 = [...expand(operands[1] || "")];
+  for (let i = 0; i < chars1.length; i++) map[chars1[i]] = chars2[Math.min(i, chars2.length - 1)] ?? chars1[i];
 }
-out(res);
+const transform = (text) => deleting
+  ? [...text].filter((char) => !deleted.has(char)).join("")
+  : [...text].map((char) => (char in map ? map[char] : char)).join("");
+const decoder = new TextDecoder();
+for (;;) {
+  const bytes = await sys.read(0, 65536);
+  if (bytes.length === 0) break;
+  const result = transform(decoder.decode(bytes, { stream: true }));
+  if (result) out(result);
+}
+const final = transform(decoder.decode());
+if (final) out(final);
 sys.exit(0);
 `),
 };

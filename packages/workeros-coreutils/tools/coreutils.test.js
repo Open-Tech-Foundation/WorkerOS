@@ -428,6 +428,20 @@ test("tr", async () => {
   assert.equal((await run("tr", { argv: ["-d", "aeiou"], stdin: "hello world\n" })).out, "hll wrld\n");
 });
 
+test("tr streams UTF-8 safely across read boundaries", async () => {
+  const input = "a".repeat(65535) + "éa\n";
+  const result = await run("tr", {
+    argv: ["-d", "é"], stdin: input, inspectReads: true, inspectWrites: true,
+  });
+  assert.equal(result.out, "a".repeat(65536) + "\n");
+  assert.deepEqual(result.readCalls, [
+    { path: "-", bytes: 65536 },
+    { path: "-", bytes: 3 },
+  ]);
+  assert.ok(result.stdoutWrites.length > 1);
+  assert.equal((await run("tr", { argv: ["🙂", "X"], stdin: "a🙂b" })).out, "aXb");
+});
+
 test("ls", async () => {
   const vfs = { "/dir/.hidden": "", "/dir/a.txt": "123", "/dir/b.txt": "1234567" };
   const metadata = {

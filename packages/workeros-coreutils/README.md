@@ -91,6 +91,11 @@ duplicate output fields.
 split across reads. Output is flushed in bounded chunks, an unterminated final
 line remains unterminated, and later files are still processed after one fails.
 
+`tr` translates or deletes characters incrementally from standard input. Its
+streaming UTF-8 decoder keeps multibyte characters intact across read boundaries,
+and translation mappings operate on Unicode code points rather than UTF-16
+surrogate halves.
+
 Utilities close every file descriptor they open, including when an input read,
 output write, or later open operation fails. Standard input and output remain
 owned by the process runtime and are not closed by a utility.

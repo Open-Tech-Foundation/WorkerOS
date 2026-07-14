@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `tr` now translates and deletes incrementally with a streaming UTF-8 decoder,
+  including code-point-safe mappings and multibyte characters split across
+  reads.
 - `cut` now transforms lines incrementally with bounded output chunks, preserves
   unterminated final lines, handles UTF-8 split across reads, and continues with
   later files after an input error.
