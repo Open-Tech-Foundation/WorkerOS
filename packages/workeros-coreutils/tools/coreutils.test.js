@@ -11,11 +11,12 @@ import { collectSimpleFlags, hasFlag as hasParsedFlag } from "../../workeros-pro
 const enc = new TextEncoder(), dec = new TextDecoder();
 
 async function run(name, {
-  argv = [], stdin = "", files = {}, readErrors = [], writeErrors = [], inspectFds = false,
+  argv = [], stdin = "", files = {}, dirs = [], readErrors = [], writeErrors = [], inspectFds = false,
 } = {}) {
   const body = coreutils["/sbin/" + name].replace(/^import .*?\n/, "");
   const outB = [], errB = [];
   const vfs = new Map(Object.entries(files).map(([k, v]) => [k, enc.encode(v)]));
+  const dirSet = new Set(dirs);
   const fds = new Map();
   let nextFd = 3;
   fds.set(0, { data: enc.encode(stdin), pos: 0 });
@@ -41,13 +42,22 @@ async function run(name, {
       const slice = f.data.subarray(f.pos, f.pos + max); f.pos += slice.length; return slice;
     },
     open: async (path, opts = {}) => {
+      if (dirSet.has(path)) throw new Error("EISDIR");
       if (!vfs.has(path) && !opts.create) throw new Error("ENOENT");
       if (!vfs.has(path) || opts.truncate) vfs.set(path, new Uint8Array(0));
       const fd = nextFd++; fds.set(fd, { data: vfs.get(path), pos: 0, path }); return fd;
     },
     close: async (fd) => { fds.delete(fd); },
-    stat: async (path) => { if (vfs.has(path)) return { kind: "file", size: vfs.get(path).length }; throw new Error("ENOENT"); },
+    stat: async (path) => {
+      if (dirSet.has(path)) return { kind: "dir", size: 0 };
+      if (vfs.has(path)) return { kind: "file", size: vfs.get(path).length };
+      throw new Error("ENOENT");
+    },
     readdir: async () => [],
+    rename: async (from, to) => {
+      if (!vfs.has(from)) throw new Error("ENOENT");
+      vfs.set(to, vfs.get(from)); vfs.delete(from);
+    },
     exit: (code) => { const e = new Error("exit"); e.__exit = code | 0; throw e; },
   };
   let code = 0;
@@ -98,8 +108,8 @@ test("missing, extra, and malformed operands fail clearly", async () => {
     ["env", ["NAME=value"], "unsupported operand 'NAME=value'"],
     ["mkdir", [], "missing operand"],
     ["rm", [], "missing operand"],
-    ["cp", ["a", "b", "c"], "extra operand 'c'"],
-    ["mv", ["a", "b", "c"], "extra operand 'c'"],
+    ["cp", ["a", "b", "c"], "target 'c' is not a directory"],
+    ["mv", ["a", "b", "c"], "target 'c' is not a directory"],
     ["seq", [], "missing operand"],
     ["seq", ["one"], "invalid number 'one'"],
     ["seq", ["1", "2", "3", "4"], "extra operand '4'"],
@@ -166,6 +176,47 @@ test("file descriptors close after injected I/O failures", async () => {
   });
   assert.equal(uniq.code, 1);
   assert.deepEqual(uniq.openFds, []);
+});
+
+test("cp and mv accept multiple sources for a directory", async () => {
+  const cp = await run("cp", {
+    argv: ["/a", "/b", "/dest"],
+    files: { "/a": "A", "/b": "B" },
+    dirs: ["/dest"],
+  });
+  assert.equal(cp.code, 0);
+  assert.equal(cp.files["/dest/a"], "A");
+  assert.equal(cp.files["/dest/b"], "B");
+  assert.equal(cp.files["/a"], "A");
+
+  const mv = await run("mv", {
+    argv: ["/a", "/b", "/dest"],
+    files: { "/a": "A", "/b": "B" },
+    dirs: ["/dest"],
+  });
+  assert.equal(mv.code, 0);
+  assert.equal(mv.files["/dest/a"], "A");
+  assert.equal(mv.files["/dest/b"], "B");
+  assert.equal(mv.files["/a"], undefined);
+  assert.equal(mv.files["/b"], undefined);
+});
+
+test("multi-source cp continues after one source fails", async () => {
+  const result = await run("cp", {
+    argv: ["/missing", "/good", "/dest"],
+    files: { "/good": "kept" },
+    dirs: ["/dest"],
+  });
+  assert.equal(result.code, 1);
+  assert.equal(result.err, "cp: /missing: ENOENT\n");
+  assert.equal(result.files["/dest/good"], "kept");
+});
+
+test("cp refuses an identical source and destination", async () => {
+  const result = await run("cp", { argv: ["/same", "/same"], files: { "/same": "preserved" } });
+  assert.equal(result.code, 1);
+  assert.equal(result.err, "cp: /same: source and destination are the same file\n");
+  assert.equal(result.files["/same"], "preserved");
 });
 
 test("head / tail", async () => {

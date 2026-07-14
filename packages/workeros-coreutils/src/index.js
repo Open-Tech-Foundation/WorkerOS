@@ -299,26 +299,34 @@ sys.exit(code);
   "/sbin/cp": util(`
 acceptOptions();
 if (operands.length < 2) { err("cp: missing file operand\\n"); sys.exit(1); }
-if (operands.length > 2) invalidUsage("extra operand '" + operands[2] + "'");
-const src = operands[0];
-let dst = operands[1];
-let fin = null, fout = null, code = 0;
-try {
-  const dstat = await sys.stat(dst).catch(() => null);
-  if (dstat && dstat.kind === "dir") dst = dst.replace(/\\/+$/, "") + "/" + basename(src);
-  fin = await sys.open(src, {});
-  fout = await sys.open(dst, { create: true, truncate: true });
-  for (;;) {
-    const b = await sys.read(fin, 65536);
-    if (b.length === 0) break;
-    sys.write(fout, b);
+const sources = operands.slice(0, -1);
+const destination = operands[operands.length - 1];
+const dstat = await sys.stat(destination).catch(() => null);
+if (sources.length > 1 && (!dstat || dstat.kind !== "dir")) invalidUsage("target '" + destination + "' is not a directory");
+let code = 0;
+for (const src of sources) {
+  const dst = dstat && dstat.kind === "dir"
+    ? destination.replace(/\\/+$/, "") + "/" + basename(src)
+    : destination;
+  let fin = null, fout = null;
+  try {
+    if (src === dst) throw new Error("source and destination are the same file");
+    const sstat = await sys.stat(src);
+    if (sstat.kind === "dir") throw new Error("is a directory");
+    fin = await sys.open(src, {});
+    fout = await sys.open(dst, { create: true, truncate: true });
+    for (;;) {
+      const b = await sys.read(fin, 65536);
+      if (b.length === 0) break;
+      sys.write(fout, b);
+    }
+  } catch (e) {
+    err("cp: " + src + ": " + e.message + "\\n");
+    code = 1;
+  } finally {
+    await closeQuietly(fin);
+    await closeQuietly(fout);
   }
-} catch (e) {
-  err("cp: " + e.message + "\\n");
-  code = 1;
-} finally {
-  await closeQuietly(fin);
-  await closeQuietly(fout);
 }
 sys.exit(code);
 `),
@@ -326,18 +334,19 @@ sys.exit(code);
   "/sbin/mv": util(`
 acceptOptions();
 if (operands.length < 2) { err("mv: missing file operand\\n"); sys.exit(1); }
-if (operands.length > 2) invalidUsage("extra operand '" + operands[2] + "'");
-const src = operands[0];
-let dst = operands[1];
-try {
-  const dstat = await sys.stat(dst).catch(() => null);
-  if (dstat && dstat.kind === "dir") dst = dst.replace(/\\/+$/, "") + "/" + basename(src);
-  await sys.rename(src, dst);
-  sys.exit(0);
-} catch (e) {
-  err("mv: " + e.message + "\\n");
-  sys.exit(1);
+const sources = operands.slice(0, -1);
+const destination = operands[operands.length - 1];
+const dstat = await sys.stat(destination).catch(() => null);
+if (sources.length > 1 && (!dstat || dstat.kind !== "dir")) invalidUsage("target '" + destination + "' is not a directory");
+let code = 0;
+for (const src of sources) {
+  const dst = dstat && dstat.kind === "dir"
+    ? destination.replace(/\\/+$/, "") + "/" + basename(src)
+    : destination;
+  try { await sys.rename(src, dst); }
+  catch (e) { err("mv: " + src + ": " + e.message + "\\n"); code = 1; }
 }
+sys.exit(code);
 `),
 
   // seq [FIRST [INCR]] LAST — print a number sequence.

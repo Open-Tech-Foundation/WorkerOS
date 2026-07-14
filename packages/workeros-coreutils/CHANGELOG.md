@@ -12,6 +12,8 @@ Notable changes to the coreutils — guest programs written against the native
   distinguishes file, directory, and symlink display types. Its access text
   remains a documented conventional profile because the VFS has no Unix mode
   or ownership metadata.
+- `cp` now rejects an identical source and destination path before opening the
+  destination, preventing accidental truncation.
 - `cut -f` now preserves non-delimited lines and emits selected fields in input
   order without duplicating fields selected by overlapping or reordered lists.
 - File descriptors opened by shared input handling, `cat`, `cp`, and `uniq` are
@@ -37,6 +39,9 @@ Notable changes to the coreutils — guest programs written against the native
   unknown options.
 
 ### Added
+- `cp SOURCE... DIRECTORY` and `mv SOURCE... DIRECTORY` now process multiple
+  source files, require an existing directory target, continue after individual
+  source failures, and return a combined non-zero status when needed.
 - **Shared argv parsing in the coreutils prelude** (`src/index.js`). The
   builtins now use the same guest-side POSIX/GNU-style argument tokenizer as the
   user programs, so grouped short flags, long flags, and the `--` operand
