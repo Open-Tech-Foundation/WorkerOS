@@ -25,7 +25,8 @@ behavior. It does not aim to copy every GNU coreutils option.
 | `true`, `false` | No options |
 | `pwd`, `env` | No options or operands |
 | `cat` | `[FILE...]`; no options |
-| `cp`, `mv` | `SOURCE DEST` or `SOURCE... DIRECTORY`; no options |
+| `cp` | `[-r] SOURCE DEST` or `[-r] SOURCE... DIRECTORY` |
+| `mv` | `SOURCE DEST` or `SOURCE... DIRECTORY`; no options |
 | `seq` | `[FIRST [INCREMENT]] LAST`; finite decimal numbers |
 | `ls` | `[-alhrR] [FILE...]` |
 | `mkdir` | `[-p] DIRECTORY...` |
@@ -51,9 +52,10 @@ magnitude is rejected rather than causing an infinite loop.
 
 `cp` and `mv` accept multiple source files only when the final operand is an
 existing directory. They process remaining sources after an individual source
-fails and return a non-zero final status. Recursive directory copying is not
-part of the supported `cp` subset. `cp` rejects an identical source and
-destination path before opening either file for output.
+fails and return a non-zero final status. `cp -r` recursively creates and copies
+directory trees; other copy-policy and metadata-preservation flags remain out of
+scope. `cp` rejects an identical source and destination path before opening
+either file for output.
 
 With multiple files, `head` and `tail` process each file independently and add
 section headers. `wc` prints a row per named file and a `total` row for multiple

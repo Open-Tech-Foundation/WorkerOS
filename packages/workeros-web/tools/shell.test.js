@@ -82,6 +82,13 @@ test("coreutils behavior suite", opts, async () => {
         await sh("cp src.txt dst.txt");
         return sh("cat dst.txt");
       })();
+      r.cpRecursive = await (async () => {
+        await sh("mkdir -p tree/sub");
+        await sh("echo nested > tree/sub/file.txt");
+        const copied = await sh("cp -r tree clone");
+        const read = await sh("cat clone/sub/file.txt");
+        return { copied, read };
+      })();
       r.mv = await (async () => {
         await sh("echo m > m1.txt");
         await sh("mv m1.txt m2.txt");
@@ -117,6 +124,8 @@ test("coreutils behavior suite", opts, async () => {
   assert.equal(r.pwd.out, "/\n");
   assert.equal(r.mkdirLs.out, "b\n");
   assert.equal(r.cpCat.out, "content\n");
+  assert.equal(r.cpRecursive.copied.code, 0);
+  assert.equal(r.cpRecursive.read.out, "nested\n");
   assert.equal(r.mv.out, "m\n");
   assert.notEqual(r.rm.code, 0, "cat of removed file fails");
   assert.equal(r.andor.out, "rescued\n");

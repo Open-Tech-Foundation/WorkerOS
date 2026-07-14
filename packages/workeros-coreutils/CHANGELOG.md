@@ -62,6 +62,9 @@ Notable changes to the coreutils — guest programs written against the native
   unknown options.
 
 ### Added
+- `cp -r` recursively copies nested directory trees, either to a new destination
+  or beneath an existing directory. Directory operands without `-r` fail
+  explicitly; unrelated copy-policy flags remain unsupported.
 - `cp SOURCE... DIRECTORY` and `mv SOURCE... DIRECTORY` now process multiple
   source files, require an existing directory target, continue after individual
   source failures, and return a combined non-zero status when needed.

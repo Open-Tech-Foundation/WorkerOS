@@ -301,35 +301,57 @@ sys.exit(code);
 `),
 
   "/sbin/cp": util(`
-acceptOptions();
+acceptOptions("r");
 if (operands.length < 2) { err("cp: missing file operand\\n"); sys.exit(1); }
+const recursive = has("r");
 const sources = operands.slice(0, -1);
 const destination = operands[operands.length - 1];
 const dstat = await sys.stat(destination).catch(() => null);
 if (sources.length > 1 && (!dstat || dstat.kind !== "dir")) invalidUsage("target '" + destination + "' is not a directory");
+const ensureDir = async (path) => {
+  const st = await sys.stat(path).catch(() => null);
+  if (st) {
+    if (st.kind !== "dir") throw new Error("destination is not a directory");
+    return;
+  }
+  await sys.mkdir(path);
+};
+const copyEntry = async (src, dst) => {
+  if (src === dst) throw new Error("source and destination are the same file");
+  const sstat = await sys.stat(src);
+  if (sstat.kind === "dir") {
+    if (!recursive) throw new Error("is a directory (use -r)");
+    const prefix = src.replace(/\\/+$/, "") + "/";
+    if (dst.startsWith(prefix)) throw new Error("cannot copy a directory into itself");
+    await ensureDir(dst);
+    for (const entry of await sys.readdir(src)) {
+      await copyEntry(prefix + entry.name, dst.replace(/\\/+$/, "") + "/" + entry.name);
+    }
+    return;
+  }
+  let fin = null, fout = null;
+  try {
+    fin = await sys.open(src, {});
+    fout = await sys.open(dst, { create: true, truncate: true });
+    for (;;) {
+      const bytes = await sys.read(fin, 65536);
+      if (bytes.length === 0) break;
+      sys.write(fout, bytes);
+    }
+  } finally {
+    await closeQuietly(fin);
+    await closeQuietly(fout);
+  }
+};
 let code = 0;
 for (const src of sources) {
   const dst = dstat && dstat.kind === "dir"
     ? destination.replace(/\\/+$/, "") + "/" + basename(src)
     : destination;
-  let fin = null, fout = null;
-  try {
-    if (src === dst) throw new Error("source and destination are the same file");
-    const sstat = await sys.stat(src);
-    if (sstat.kind === "dir") throw new Error("is a directory");
-    fin = await sys.open(src, {});
-    fout = await sys.open(dst, { create: true, truncate: true });
-    for (;;) {
-      const b = await sys.read(fin, 65536);
-      if (b.length === 0) break;
-      sys.write(fout, b);
-    }
-  } catch (e) {
+  try { await copyEntry(src, dst); }
+  catch (e) {
     err("cp: " + src + ": " + e.message + "\\n");
     code = 1;
-  } finally {
-    await closeQuietly(fin);
-    await closeQuietly(fout);
   }
 }
 sys.exit(code);

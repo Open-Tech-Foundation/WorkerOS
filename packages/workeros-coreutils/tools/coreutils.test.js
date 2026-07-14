@@ -57,7 +57,18 @@ async function run(name, {
       if (vfs.has(path)) return { kind: "file", size: vfs.get(path).length };
       throw new Error("ENOENT");
     },
-    readdir: async () => [],
+    readdir: async (path) => {
+      if (!dirSet.has(path)) throw new Error("ENOTDIR");
+      const prefix = path.replace(/\/+$/, "") + "/";
+      const entries = new Map();
+      for (const candidate of [...dirSet, ...vfs.keys()]) {
+        if (!candidate.startsWith(prefix)) continue;
+        const rest = candidate.slice(prefix.length);
+        if (!rest || rest.includes("/")) continue;
+        entries.set(rest, { name: rest, is_dir: dirSet.has(candidate) });
+      }
+      return [...entries.values()];
+    },
     mkdir: async (path) => {
       if (mkdirErrors.includes(path)) throw new Error("EPERM");
       if (dirSet.has(path) || vfs.has(path)) throw new Error("EEXIST");
@@ -115,7 +126,7 @@ test("unsupported options fail clearly", async () => {
     ["cat", ["-z"], "-z"],
     ["ls", ["-az"], "-z"],
     ["pwd", ["--physical"], "--physical"],
-    ["cp", ["-r", "from", "to"], "-r"],
+    ["cp", ["-x", "from", "to"], "-x"],
     ["head", ["-q"], "-q"],
     ["cut", ["-s", "-f1"], "-s"],
     ["seq", ["-x"], "-x"],
@@ -264,6 +275,43 @@ test("cp refuses an identical source and destination", async () => {
   assert.equal(result.code, 1);
   assert.equal(result.err, "cp: /same: source and destination are the same file\n");
   assert.equal(result.files["/same"], "preserved");
+});
+
+test("cp -r copies nested directory trees", async () => {
+  const tree = {
+    "/src/root.txt": "root",
+    "/src/sub/nested.txt": "nested",
+  };
+  const result = await run("cp", {
+    argv: ["-r", "/src", "/copy"],
+    files: tree,
+    dirs: ["/src", "/src/sub"],
+  });
+  assert.equal(result.code, 0);
+  assert.equal(result.files["/copy/root.txt"], "root");
+  assert.equal(result.files["/copy/sub/nested.txt"], "nested");
+
+  const intoDirectory = await run("cp", {
+    argv: ["-r", "/src", "/dest"],
+    files: tree,
+    dirs: ["/src", "/src/sub", "/dest"],
+  });
+  assert.equal(intoDirectory.files["/dest/src/sub/nested.txt"], "nested");
+});
+
+test("cp requires -r for directory sources", async () => {
+  const result = await run("cp", {
+    argv: ["/src", "/copy"], files: { "/src/a": "A" }, dirs: ["/src"],
+  });
+  assert.equal(result.code, 1);
+  assert.equal(result.err, "cp: /src: is a directory (use -r)\n");
+  assert.equal(result.files["/copy/a"], undefined);
+
+  const self = await run("cp", {
+    argv: ["-r", "/src", "/src/copy"], files: { "/src/a": "A" }, dirs: ["/src"],
+  });
+  assert.equal(self.code, 1);
+  assert.equal(self.err, "cp: /src: cannot copy a directory into itself\n");
 });
 
 test("head / tail", async () => {
