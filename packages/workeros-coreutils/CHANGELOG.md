@@ -62,6 +62,8 @@ Notable changes to the coreutils — guest programs written against the native
   unknown options.
 
 ### Added
+- `cat -n` numbers all streamed output lines, including blank lines, while
+  continuing line state correctly across file operands and chunk boundaries.
 - `cp -r` recursively copies nested directory trees, either to a new destination
   or beneath an existing directory. Directory operands without `-r` fail
   explicitly; unrelated copy-policy flags remain unsupported.

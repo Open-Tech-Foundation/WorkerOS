@@ -135,12 +135,27 @@ sys.exit(0);
 `),
 
   "/sbin/cat": util(`
-acceptOptions();
+acceptOptions("n");
+const numbered = has("n");
+let lineNumber = 1, atLineStart = true;
+const prefix = () => sys.write(1, enc.encode(String(lineNumber++).padStart(6) + "\\t"));
 async function dump(fd) {
   for (;;) {
     const b = await sys.read(fd, 65536);
     if (b.length === 0) break;
-    sys.write(1, b);
+    if (!numbered) { sys.write(1, b); continue; }
+    let start = 0;
+    for (let i = 0; i < b.length; i++) {
+      if (b[i] !== 10) continue;
+      if (atLineStart) prefix();
+      sys.write(1, b.subarray(start, i + 1));
+      atLineStart = true; start = i + 1;
+    }
+    if (start < b.length) {
+      if (atLineStart) prefix();
+      sys.write(1, b.subarray(start));
+      atLineStart = false;
+    }
   }
 }
 let code = 0;

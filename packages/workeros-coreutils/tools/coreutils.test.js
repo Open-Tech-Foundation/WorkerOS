@@ -180,6 +180,23 @@ test("-- preserves option-looking file operands", async () => {
   assert.equal((await run("head", { argv: ["-n1", "--", "-notes"], files })).out, "kept\n");
 });
 
+test("cat -n numbers streamed lines across file boundaries", async () => {
+  assert.equal(
+    (await run("cat", { argv: ["-n"], stdin: "a\n\nlast" })).out,
+    "     1\ta\n     2\t\n     3\tlast",
+  );
+
+  const files = { "/a": "one", "/b": "-continued\nnext\n" };
+  assert.equal(
+    (await run("cat", { argv: ["-n", "/a", "/b"], files })).out,
+    "     1\tone-continued\n     2\tnext\n",
+  );
+
+  const longLine = "x".repeat(70000) + "\n";
+  const long = await run("cat", { argv: ["-n"], stdin: longLine });
+  assert.equal(long.out, "     1\t" + longLine);
+});
+
 test("file descriptors close after injected I/O failures", async () => {
   const cat = await run("cat", {
     argv: ["/input"], files: { "/input": "data" }, readErrors: ["/input"], inspectFds: true,

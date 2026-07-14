@@ -82,6 +82,7 @@ test("coreutils behavior suite", opts, async () => {
         await sh("cp src.txt dst.txt");
         return sh("cat dst.txt");
       })();
+      r.catNumbered = await sh('printf "a\\n\\n" | cat -n');
       r.cpRecursive = await (async () => {
         await sh("mkdir -p tree/sub");
         await sh("echo nested > tree/sub/file.txt");
@@ -124,6 +125,7 @@ test("coreutils behavior suite", opts, async () => {
   assert.equal(r.pwd.out, "/\n");
   assert.equal(r.mkdirLs.out, "b\n");
   assert.equal(r.cpCat.out, "content\n");
+  assert.equal(r.catNumbered.out, "     1\ta\n     2\t\n");
   assert.equal(r.cpRecursive.copied.code, 0);
   assert.equal(r.cpRecursive.read.out, "nested\n");
   assert.equal(r.mv.out, "m\n");

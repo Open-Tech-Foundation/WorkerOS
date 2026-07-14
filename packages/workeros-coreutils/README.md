@@ -24,7 +24,7 @@ behavior. It does not aim to copy every GNU coreutils option.
 | `echo` | `-n`, `-e`, `-E` |
 | `true`, `false` | No options |
 | `pwd`, `env` | No options or operands |
-| `cat` | `[FILE...]`; no options |
+| `cat` | `[-n] [FILE...]` |
 | `cp` | `[-r] SOURCE DEST` or `[-r] SOURCE... DIRECTORY` |
 | `mv` | `SOURCE DEST` or `SOURCE... DIRECTORY`; no options |
 | `seq` | `[FIRST [INCREMENT]] LAST`; finite decimal numbers |
@@ -49,6 +49,10 @@ rather than silently ignored.
 `seq` writes output in bounded chunks instead of constructing the entire
 sequence in memory. An increment that cannot advance at the current numeric
 magnitude is rejected rather than causing an infinite loop.
+
+`cat -n` numbers every output line while streaming original bytes. Numbering
+continues across files, and adjacent files without an intervening newline remain
+one logical line.
 
 `cp` and `mv` accept multiple source files only when the final operand is an
 existing directory. They process remaining sources after an individual source
