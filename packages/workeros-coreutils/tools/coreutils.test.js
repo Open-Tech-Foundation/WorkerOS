@@ -255,10 +255,20 @@ test("tr", async () => {
 
 test("ls", async () => {
   const vfs = { "/dir/.hidden": "", "/dir/a.txt": "123", "/dir/b.txt": "1234567" };
+  const metadata = {
+    "/dir/a.txt": { mtime: Date.UTC(2024, 0, 2, 3, 4), nlink: 2 },
+    "/dir/b.txt": { kind: "symlink" },
+  };
   const st = {
     argv: ["-a", "/dir"], files: vfs,
     sysOverrides: {
-      stat: async (p) => ({ kind: Object.keys(vfs).some(k => k.startsWith(p + "/")) ? "dir" : "file", size: vfs[p] ? vfs[p].length : 0 }),
+      stat: async (p) => ({
+        kind: Object.keys(vfs).some(k => k.startsWith(p + "/")) ? "dir" : "file",
+        size: vfs[p] ? vfs[p].length : 0,
+        mtime: 0,
+        nlink: 1,
+        ...(metadata[p] || {}),
+      }),
       readdir: async (p) => Object.keys(vfs).filter(k => k.startsWith(p + "/") && k.slice(p.length + 1).indexOf("/") === -1).map(k => ({ name: k.slice(p.length + 1) }))
     }
   };
@@ -288,7 +298,11 @@ test("ls", async () => {
   assert.equal(await runLs(["/dir"]), "a.txt\nb.txt\n");
   assert.equal(await runLs(["-a", "/dir"]), ".hidden\na.txt\nb.txt\n");
   assert.equal(await runLs(["-r", "/dir"]), "b.txt\na.txt\n");
-  assert.equal(await runLs(["-l", "/dir"]), "-rw-r--r--        3 a.txt\n-rw-r--r--        7 b.txt\n");
+  assert.equal(
+    await runLs(["-l", "/dir"]),
+    "-rw-r--r--  2        3 2024-01-02 03:04 a.txt\n" +
+      "lrwxrwxrwx  1        7 1970-01-01 00:00 b.txt\n",
+  );
 });
 
 // grep is a Rust `wasm32-wasip1` binary (crates/wsh-grep), not a JS coreutil —

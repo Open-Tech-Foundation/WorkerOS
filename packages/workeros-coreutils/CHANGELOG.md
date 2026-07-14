@@ -8,6 +8,10 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `ls -l` now includes real VFS hard-link counts and modification times, and
+  distinguishes file, directory, and symlink display types. Its access text
+  remains a documented conventional profile because the VFS has no Unix mode
+  or ownership metadata.
 - `cut -f` now preserves non-delimited lines and emits selected fields in input
   order without duplicating fields selected by overlapping or reordered lists.
 - File descriptors opened by shared input handling, `cat`, `cp`, and `uniq` are

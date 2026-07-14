@@ -178,12 +178,17 @@ const formatSize = (bytes) => {
   while (bytes >= 1024 && u < units.length - 1) { bytes /= 1024; u++; }
   return (u === 0 ? String(bytes) : bytes.toFixed(1)) + units[u];
 };
+const displayMode = (kind) => kind === "dir" ? "drwxr-xr-x" : kind === "symlink" ? "lrwxrwxrwx" : "-rw-r--r--";
+const formatTime = (mtime) => new Date(Number(mtime) || 0).toISOString().slice(0, 16).replace("T", " ");
+const formatLong = (st, name) =>
+  displayMode(st.kind) + " " + String(st.nlink || 1).padStart(2) + " " +
+  formatSize(st.size).padStart(8) + " " + formatTime(st.mtime) + " " + name + "\\n";
 
 async function listDir(t, many) {
   try {
     const st = await sys.stat(t);
     if (st.kind !== "dir") {
-      if (long) out((st.kind === "dir" ? "d" : "-") + "rw-r--r-- " + formatSize(st.size).padStart(8) + " " + t + "\\n");
+      if (long) out(formatLong(st, t));
       else out(t + "\\n");
       return;
     }
@@ -199,10 +204,9 @@ async function listDir(t, many) {
         const path = t.replace(/\\/+$/, "") + "/" + n;
         try {
           const cst = await sys.stat(path);
-          const mode = (cst.kind === "dir" ? "d" : "-") + "rw-r--r--";
-          out(mode + " " + formatSize(cst.size).padStart(8) + " " + n + "\\n");
+          out(formatLong(cst, n));
         } catch(e) {
-          out("????????? ???????? " + n + "\\n");
+          out("?????????? ?? ???????? ???????????????? " + n + "\\n");
         }
       }
     } else {

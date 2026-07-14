@@ -50,6 +50,11 @@ section headers. `wc` prints a row per named file and a `total` row for multiple
 files. `uniq` accepts at most one input and one output file; omitting the input
 uses standard input, and omitting the output uses standard output.
 
+`ls -l` reports the VFS entry type, real hard-link count, size, and modification
+time in UTC. WorkerOS does not currently model Unix owner/group or permission
+bits, so the leading access text is a conventional display profile based on the
+entry type rather than editable mode metadata.
+
 `wc` decodes text for word classification, but counts newlines and `-c` directly
 from the original bytes. UTF-8 multibyte characters therefore contribute their
 encoded byte length to `-c` and to the default third column.
