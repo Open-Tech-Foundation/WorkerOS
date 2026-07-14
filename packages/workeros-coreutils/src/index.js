@@ -178,13 +178,14 @@ sys.exit(code);
 `),
 
   "/sbin/ls": util(`
-acceptOptions("alhrRd");
+acceptOptions("alhrRdt");
 const showAll = has("a");
 const long = has("l");
 const human = has("h");
 const reverse = has("r");
 const recursive = has("R");
 const directoryAsFile = has("d");
+const sortTime = has("t");
 let code = 0;
 
 const formatSize = (bytes) => {
@@ -210,7 +211,15 @@ async function listDir(t, many) {
     }
     const entries = await sys.readdir(t);
     let names = entries.map((e) => e.name).filter((n) => showAll || !n.startsWith("."));
-    names.sort();
+    if (sortTime) {
+      const stamped = await Promise.all(names.map(async (name) => {
+        const path = t.replace(/\\/+$/, "") + "/" + name;
+        const st = await sys.stat(path).catch(() => null);
+        return { name, mtime: Number(st?.mtime) || 0 };
+      }));
+      stamped.sort((a, b) => b.mtime - a.mtime || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      names = stamped.map((entry) => entry.name);
+    } else names.sort();
     if (reverse) names.reverse();
 
     if (many) out(t + ":\\n");

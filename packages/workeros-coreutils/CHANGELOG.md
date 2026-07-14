@@ -62,6 +62,8 @@ Notable changes to the coreutils — guest programs written against the native
   unknown options.
 
 ### Added
+- `ls -t` sorts entries newest-first using real VFS modification times, with
+  deterministic name ties and `-r` composition.
 - `ls -d` lists directory operands themselves, composes with `-l`, and suppresses
   descent when paired with `-R`.
 - `cat -n` numbers all streamed output lines, including blank lines, while

@@ -511,7 +511,7 @@ test("ls", async () => {
   const vfs = { "/dir/.hidden": "", "/dir/a.txt": "123", "/dir/b.txt": "1234567" };
   const metadata = {
     "/dir/a.txt": { mtime: Date.UTC(2024, 0, 2, 3, 4), nlink: 2 },
-    "/dir/b.txt": { kind: "symlink" },
+    "/dir/b.txt": { kind: "symlink", mtime: Date.UTC(2025, 5, 7, 8, 9) },
   };
   const st = {
     argv: ["-a", "/dir"], files: vfs,
@@ -552,6 +552,8 @@ test("ls", async () => {
   assert.equal(await runLs(["/dir"]), "a.txt\nb.txt\n");
   assert.equal(await runLs(["-a", "/dir"]), ".hidden\na.txt\nb.txt\n");
   assert.equal(await runLs(["-r", "/dir"]), "b.txt\na.txt\n");
+  assert.equal(await runLs(["-t", "/dir"]), "b.txt\na.txt\n");
+  assert.equal(await runLs(["-tr", "/dir"]), "a.txt\nb.txt\n");
   assert.equal(await runLs(["-d", "/dir"]), "/dir\n");
   assert.equal(
     await runLs(["-ld", "/dir"]),
@@ -561,7 +563,7 @@ test("ls", async () => {
   assert.equal(
     await runLs(["-l", "/dir"]),
     "-rw-r--r--  2        3 2024-01-02 03:04 a.txt\n" +
-      "lrwxrwxrwx  1        7 1970-01-01 00:00 b.txt\n",
+      "lrwxrwxrwx  1        7 2025-06-07 08:09 b.txt\n",
   );
 });
 

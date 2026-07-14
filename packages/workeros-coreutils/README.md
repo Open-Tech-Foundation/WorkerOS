@@ -28,7 +28,7 @@ behavior. It does not aim to copy every GNU coreutils option.
 | `cp` | `[-r] SOURCE DEST` or `[-r] SOURCE... DIRECTORY` |
 | `mv` | `SOURCE DEST` or `SOURCE... DIRECTORY`; no options |
 | `seq` | `[FIRST [INCREMENT]] LAST`; finite decimal numbers |
-| `ls` | `[-alhrRd] [FILE...]` |
+| `ls` | `[-alhrRdt] [FILE...]` |
 | `mkdir` | `[-p] DIRECTORY...` |
 | `rm` | `[-rRf] FILE...`; `rm -f` also accepts no files |
 | `head`, `tail` | `[-n N] [FILE...]`, `-nN`, or `-N`; `N` is a non-negative integer |
@@ -87,6 +87,10 @@ entry type rather than editable mode metadata.
 `ls -d` lists directory operands themselves instead of their contents. It can be
 combined with `-l`; when combined with `-R`, treating the directory as an entry
 also means there is no recursive descent.
+
+`ls -t` sorts directory entries by real VFS modification time, newest first.
+Equal timestamps use name order for deterministic output, and `-r` reverses the
+result.
 
 `wc` counts incrementally without retaining entire files. It counts newlines and
 `-c` directly from original input chunks, while a streaming UTF-8 decoder keeps
