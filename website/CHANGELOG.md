@@ -8,6 +8,15 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Settings app — the OS control panel over the toolkit.** A real Settings app
+  (`ui/apps/SettingsApp.jsx`, pinned to the dock) that drives the theme engine and
+  FS-backed state directly: **Appearance** (theme mode System/Light/Dark, an accent
+  swatch row, and wallpaper presets that reference the live tokens so they adapt to
+  theme + accent), **Storage** (force a durable FS snapshot; shows where settings and
+  session live on disk), and **About** (live kernel version / ABI). Every change
+  repaints the desktop instantly and is persisted by the state layer — no save button.
+  Verified headlessly (8 checks): accent/theme/wallpaper apply live with correct active
+  states, and About reads the booted kernel — no console errors.
 - **UI toolkit — Pillar D: system state persisted in the real filesystem.** Because
   this is a real OS, the desktop's state lives on the durable kernel FS (ADR-022), not
   in `localStorage` — the Terminal sees the same files. `os/state.js` hydrates on boot
