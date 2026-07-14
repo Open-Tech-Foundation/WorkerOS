@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `cut` now transforms lines incrementally with bounded output chunks, preserves
+  unterminated final lines, handles UTF-8 split across reads, and continues with
+  later files after an input error.
 - `uniq` now processes adjacent groups incrementally instead of retaining the
   complete input, preserves unterminated final lines, and rejects identical
   input/output paths before truncation.

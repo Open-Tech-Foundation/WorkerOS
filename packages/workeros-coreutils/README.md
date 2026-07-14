@@ -87,6 +87,10 @@ characters contribute their encoded byte length to the default third column.
 written in their original input order, and overlapping field ranges do not
 duplicate output fields.
 
+`cut` decodes and transforms input incrementally, including UTF-8 characters
+split across reads. Output is flushed in bounded chunks, an unterminated final
+line remains unterminated, and later files are still processed after one fails.
+
 Utilities close every file descriptor they open, including when an input read,
 output write, or later open operation fails. Standard input and output remain
 owned by the process runtime and are not closed by a utility.

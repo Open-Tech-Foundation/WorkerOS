@@ -403,6 +403,26 @@ test("cut preserves source field order and non-delimited lines", async () => {
   assert.equal((await run("cut", { argv: ["-d:", "-f1-3,2-4"], stdin: "a:b:c:d\n" })).out, "a:b:c:d\n");
 });
 
+test("cut streams lines in bounded output chunks", async () => {
+  const result = await run("cut", {
+    argv: ["-d:", "-f2"], stdin: "a:b:c\n".repeat(20000), inspectWrites: true,
+  });
+  assert.equal(result.out, "b\n".repeat(20000));
+  assert.ok(result.stdoutWrites.length > 1);
+  assert.ok(Math.max(...result.stdoutWrites) <= 8200);
+
+  assert.equal((await run("cut", { argv: ["-d:", "-f2"], stdin: "a:last" })).out, "last");
+  const splitUtf8 = "x".repeat(65535) + ":é\n";
+  assert.equal((await run("cut", { argv: ["-d:", "-f2"], stdin: splitUtf8 })).out, "é\n");
+
+  const partial = await run("cut", {
+    argv: ["-d:", "-f2", "/missing", "/good"], files: { "/good": "a:kept\n" },
+  });
+  assert.equal(partial.code, 1);
+  assert.equal(partial.err, "cut: /missing: ENOENT\n");
+  assert.equal(partial.out, "kept\n");
+});
+
 test("tr", async () => {
   assert.equal((await run("tr", { argv: ["a-z", "A-Z"], stdin: "hello\n" })).out, "HELLO\n");
   assert.equal((await run("tr", { argv: ["-d", "aeiou"], stdin: "hello world\n" })).out, "hll wrld\n");

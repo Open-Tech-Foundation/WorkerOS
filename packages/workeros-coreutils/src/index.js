@@ -658,12 +658,39 @@ for (const part of spec.split(",")) {
   }
 }
 const selected = new Set(idx);
-const arr = toLines(await readInputs(files));
-emit(arr.map((line) => {
+const selectFields = (line) => {
   if (!line.includes(delim)) return line;
   return line.split(delim).filter((_, i) => selected.has(i + 1)).join(delim);
-}));
-sys.exit(0);
+};
+let buffer = "", code = 0;
+const emitLine = (line, terminated) => {
+  buffer += selectFields(line) + (terminated ? "\\n" : "");
+  if (buffer.length >= 8192) { out(buffer); buffer = ""; }
+};
+const inputs = files.length ? files : ["-"];
+for (const file of inputs) {
+  let fd = null, owned = false;
+  try {
+    if (file === "-") fd = 0;
+    else { fd = await sys.open(file, {}); owned = true; }
+    const decoder = new TextDecoder();
+    let carry = "";
+    for (;;) {
+      const bytes = await sys.read(fd, 65536);
+      if (bytes.length === 0) break;
+      const lines = (carry + decoder.decode(bytes, { stream: true })).split("\\n");
+      carry = lines.pop();
+      for (const line of lines) emitLine(line, true);
+    }
+    carry += decoder.decode();
+    if (carry !== "") emitLine(carry, false);
+  } catch (e) {
+    err("cut: " + file + ": " + e.message + "\\n");
+    code = 1;
+  } finally { if (owned) await closeQuietly(fd); }
+}
+if (buffer) out(buffer);
+sys.exit(code);
 `),
 
   // tr SET1 [SET2] / tr -d SET1 — translate or delete characters (reads stdin).
