@@ -13,7 +13,18 @@
 //! `isatty` tells the truth. Keeping it pure Rust means the whole discipline is
 //! unit-tested natively (INV-2).
 
+use crate::process::Pid;
 use std::collections::VecDeque;
+
+/// Identifies one controlling terminal in the kernel's TTY table. WorkerOS keeps a
+/// map of these so several independent terminal sessions (e.g. desktop windows) can
+/// each own a private line discipline, winsize, and foreground process group. Id `0`
+/// is the reserved "no controlling terminal" sentinel; real terminals start at `1`.
+pub type TtyId = u32;
+
+/// The reserved "no controlling terminal" id — a context-only process (the network
+/// injector) or a session that has been closed.
+pub const NO_TTY: TtyId = 0;
 
 // Control characters the line discipline recognizes (the conventional c_cc set).
 const CTRL_C: u8 = 0x03; // INTR  → SIGINT
@@ -117,6 +128,10 @@ pub struct Tty {
     esc: EscState,
     pub termios: Termios,
     pub winsize: Winsize,
+    /// This terminal's foreground process group (`tcgetpgrp`; `0` = the shell owns
+    /// it — no foreground job). Control-key signals (^C/^Z) and `SIGWINCH` are
+    /// delivered to this group. Per-terminal so each session has its own job control.
+    pub foreground_pgid: Pid,
 }
 
 impl Default for Tty {
@@ -128,6 +143,7 @@ impl Default for Tty {
             esc: EscState::None,
             termios: Termios::default(),
             winsize: Winsize::default(),
+            foreground_pgid: 0,
         }
     }
 }

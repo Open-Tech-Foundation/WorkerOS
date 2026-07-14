@@ -15,7 +15,7 @@ use workeros_kernel::resolver::{ModuleGraph, ModuleKind};
 use workeros_kernel::shell::{self, AndOrOp, RedirectOp};
 use workeros_kernel::syscall::{Fd, PipeEnd, PipeId, RedirectMode};
 use workeros_kernel::vfs::OpenOptions;
-use workeros_kernel::tty::{Termios, TtySignal, Winsize};
+use workeros_kernel::tty::{Termios, TtyId, TtySignal, Winsize};
 use workeros_kernel::{Kernel, ReadResult, SpawnError, StdioPlan, StdioTarget, WriteEffect};
 
 /// A booted kernel handle, held by the kernel worker's JS glue.
@@ -409,6 +409,7 @@ impl WebKernel {
         plan: JsValue,
         caps: JsValue,
         pgid: Option<u32>,
+        ctty: Option<TtyId>,
     ) -> Result<JsValue, JsError> {
         let env: Vec<(String, String)> = if env.is_undefined() || env.is_null() {
             Vec::new()
@@ -439,7 +440,7 @@ impl WebKernel {
         };
         let spawned = self
             .inner
-            .spawn(argv, env, cwd, start_time as u64, caps, ppid, pgid, plan)
+            .spawn(argv, env, cwd, start_time as u64, caps, ppid, pgid, ctty, plan)
             .map_err(spawn_err_to_js)?;
         to_js(&SpawnDto {
             pid: spawned.pid,
@@ -485,13 +486,33 @@ impl WebKernel {
         Ok(obj.into())
     }
 
-    /// Feed host keystrokes through the terminal's line discipline. Returns
+    /// Allocate a fresh controlling terminal (multi-PTY) and return its id. Backs
+    /// the host opening another terminal window; free it with `tty_close`.
+    #[wasm_bindgen]
+    pub fn tty_open(&mut self) -> TtyId {
+        self.inner.open_tty()
+    }
+
+    /// Release terminal `tty_id` (its window closed). The primary terminal is
+    /// permanent. Returns whether a terminal was removed.
+    #[wasm_bindgen]
+    pub fn tty_close(&mut self, tty_id: TtyId) -> bool {
+        self.inner.close_tty(tty_id)
+    }
+
+    /// The controlling terminal a process reads/writes (`0` = none).
+    #[wasm_bindgen]
+    pub fn proc_ctty(&self, pid: Pid) -> TtyId {
+        self.inner.proc_ctty(pid)
+    }
+
+    /// Feed host keystrokes through terminal `tty_id`'s line discipline. Returns
     /// `{ echo: Uint8Array, signal?: "int"|"susp" }` — the bytes the host writes
     /// back to the terminal display, and any control-key signal to deliver to the
     /// foreground process.
     #[wasm_bindgen]
-    pub fn tty_input(&mut self, data: &[u8]) -> JsValue {
-        let out = self.inner.tty_input(data);
+    pub fn tty_input(&mut self, tty_id: TtyId, data: &[u8]) -> JsValue {
+        let out = self.inner.tty_input(tty_id, data);
         let obj = js_sys::Object::new();
         let set = |k: &str, v: &JsValue| {
             js_sys::Reflect::set(&obj, &JsValue::from_str(k), v).unwrap();
@@ -507,11 +528,11 @@ impl WebKernel {
         obj.into()
     }
 
-    /// Take the next committed input line for the shell prompt as a `Uint8Array`,
-    /// or `null` if no full line is buffered yet.
+    /// Take the next committed input line from terminal `tty_id` for its shell
+    /// prompt as a `Uint8Array`, or `null` if no full line is buffered yet.
     #[wasm_bindgen]
-    pub fn tty_read_line(&mut self) -> JsValue {
-        match self.inner.tty_read_line() {
+    pub fn tty_read_line(&mut self, tty_id: TtyId) -> JsValue {
+        match self.inner.tty_read_line(tty_id) {
             Some(line) => js_sys::Uint8Array::from(&line[..]).into(),
             None => JsValue::NULL,
         }
@@ -531,17 +552,17 @@ impl WebKernel {
         self.inner.feed_stdin(pid, data).map_err(errno_to_js)
     }
 
-    /// `tcgetattr` — the terminal's current line-discipline flags.
+    /// `tcgetattr` — terminal `tty_id`'s current line-discipline flags.
     #[wasm_bindgen]
-    pub fn tty_get_attr(&self) -> JsValue {
-        termios_to_js(self.inner.tty_get_attr())
+    pub fn tty_get_attr(&self, tty_id: TtyId) -> JsValue {
+        termios_to_js(self.inner.tty_get_attr(tty_id))
     }
 
-    /// `tcsetattr` — set the line-discipline flags (e.g. a program going raw).
-    /// Accepts `{ canonical, echo, isig }`; missing keys keep their current value.
+    /// `tcsetattr` — set terminal `tty_id`'s line-discipline flags (e.g. a program
+    /// going raw). Accepts `{ canonical, echo, isig }`; missing keys keep current.
     #[wasm_bindgen]
-    pub fn tty_set_attr(&mut self, attr: JsValue) -> Result<(), JsError> {
-        let mut t = self.inner.tty_get_attr();
+    pub fn tty_set_attr(&mut self, tty_id: TtyId, attr: JsValue) -> Result<(), JsError> {
+        let mut t = self.inner.tty_get_attr(tty_id);
         let get = |k: &str| js_sys::Reflect::get(&attr, &JsValue::from_str(k)).ok();
         if let Some(v) = get("canonical").filter(|v| !v.is_undefined()) {
             t.canonical = v.is_truthy();
@@ -552,25 +573,25 @@ impl WebKernel {
         if let Some(v) = get("isig").filter(|v| !v.is_undefined()) {
             t.isig = v.is_truthy();
         }
-        self.inner.tty_set_attr(t);
+        self.inner.tty_set_attr(tty_id, t);
         Ok(())
     }
 
-    /// `TIOCGWINSZ` — the terminal window size as `{ rows, cols }`.
+    /// `TIOCGWINSZ` — terminal `tty_id`'s window size as `{ rows, cols }`.
     #[wasm_bindgen]
-    pub fn tty_get_winsize(&self) -> JsValue {
-        let ws = self.inner.tty_winsize();
+    pub fn tty_get_winsize(&self, tty_id: TtyId) -> JsValue {
+        let ws = self.inner.tty_winsize(tty_id);
         let obj = js_sys::Object::new();
         js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &JsValue::from_f64(ws.rows as f64)).unwrap();
         js_sys::Reflect::set(&obj, &JsValue::from_str("cols"), &JsValue::from_f64(ws.cols as f64)).unwrap();
         obj.into()
     }
 
-    /// Update the terminal window size after a host resize. The host then signals
-    /// `SIGWINCH` to the foreground process.
+    /// Update terminal `tty_id`'s window size after a host resize. The host then
+    /// signals `SIGWINCH` to that terminal's foreground process group.
     #[wasm_bindgen]
-    pub fn tty_set_winsize(&mut self, rows: u16, cols: u16) {
-        self.inner.tty_set_winsize(Winsize { rows, cols });
+    pub fn tty_set_winsize(&mut self, tty_id: TtyId, rows: u16, cols: u16) {
+        self.inner.tty_set_winsize(tty_id, Winsize { rows, cols });
     }
 
     /// Open an IPC pipe (`otf:ipc_open`); returns its id for a stdio plan.
@@ -836,16 +857,16 @@ impl WebKernel {
         self.inner.mark_killed(pid, code, reason)
     }
 
-    /// `tcsetpgrp`: set the terminal's foreground process group (0 = the shell).
+    /// `tcsetpgrp`: set terminal `tty_id`'s foreground process group (0 = the shell).
     #[wasm_bindgen]
-    pub fn tty_set_foreground(&mut self, pgid: Pid) {
-        self.inner.tty_set_foreground(pgid)
+    pub fn tty_set_foreground(&mut self, tty_id: TtyId, pgid: Pid) {
+        self.inner.tty_set_foreground(tty_id, pgid)
     }
 
-    /// `tcgetpgrp`: the terminal's foreground process group (0 = none).
+    /// `tcgetpgrp`: terminal `tty_id`'s foreground process group (0 = none).
     #[wasm_bindgen]
-    pub fn tty_get_foreground(&self) -> Pid {
-        self.inner.tty_foreground()
+    pub fn tty_get_foreground(&self, tty_id: TtyId) -> Pid {
+        self.inner.tty_foreground(tty_id)
     }
 
     /// Live members of a process group — the delivery set for a group signal.

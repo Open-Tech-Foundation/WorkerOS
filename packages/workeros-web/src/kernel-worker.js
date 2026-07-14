@@ -170,6 +170,11 @@ const session = {
   env: { HOME: "/", PATH: "/bin:/sbin", TERM: "xterm-256color", COLORTERM: "truecolor" },
 };
 
+// The primary controlling terminal (kernel `PRIMARY_TTY`), present from boot. The
+// single interactive REPL runs on it. Multi-PTY threads a real per-session id here
+// in a follow-up; for now every terminal operation names the primary terminal.
+const PRIMARY_TTY = 1;
+
 // pid → { worker, sink, onExit, resolveExit, done }.
 const programs = new Map();
 // Parked pipe reads awaiting data/EOF: { pid, id, fd, max }.
@@ -204,7 +209,7 @@ let termWaiter = null; // { resolve } awaiting the next committed input line
 // reaches them too.
 function fgMembers() {
   if (!kernel) return [];
-  const g = kernel.tty_get_foreground();
+  const g = kernel.tty_get_foreground(PRIMARY_TTY);
   return g ? Array.from(kernel.pgrp_members(g)) : [];
 }
 const history = []; // interactive command history (for the readline prompt)
@@ -234,7 +239,7 @@ function termOut(bytes) {
 // Resolve a parked line-waiter if a full line has cleared the line discipline.
 function pumpWaiter() {
   if (!termWaiter) return;
-  const line = kernel.tty_read_line(); // Uint8Array, or null if no full line yet
+  const line = kernel.tty_read_line(PRIMARY_TTY); // Uint8Array, or null if no full line yet
   if (line != null) {
     const w = termWaiter;
     termWaiter = null;
@@ -351,7 +356,7 @@ function readCommandLine() {
       prompt: prompt(),
       history,
       write: (s) => termOut(enc.encode(s)),
-      columns: () => (kernel.tty_get_winsize() || {}).cols || 80,
+      columns: () => (kernel.tty_get_winsize(PRIMARY_TTY) || {}).cols || 80,
       complete: completeLine,
       done: (r) => { activeReadline = null; resolve(r); },
     });
@@ -490,6 +495,11 @@ function spawnKernel(argv, env, cwd, plan, opts = {}) {
     // Process-group placement (ADR-025): undefined/null inherits the parent's
     // group; 0 becomes a new group's leader; a pid joins that group.
     opts.pgid,
+    // Controlling terminal (multi-PTY): `undefined` here attaches to the primary
+    // terminal so an interactive command (whose kernel ppid has no ctty) can read
+    // terminal stdin. A per-session refactor will pass the real session id; nested
+    // `system(3)`/child spawns will then pass `null` to inherit the parent's ctty.
+    opts.ctty !== undefined ? opts.ctty : PRIMARY_TTY,
   );
 }
 
@@ -551,7 +561,7 @@ function startProcess({ argv, env, cwd, plan, sink, ppid, pgroup }) {
   const spawned = spawnKernel(argv, env, cwd, plan, { ppid, pgid });
   if (pgroup && !pgroup.leader) {
     pgroup.leader = spawned.pid;
-    kernel.tty_set_foreground(spawned.pid);
+    kernel.tty_set_foreground(PRIMARY_TTY, spawned.pid);
   }
   const exited = startWorker(spawned, { argv, env, cwd, sink, onExit: () => {} });
   return { pid: spawned.pid, exited };
@@ -570,7 +580,7 @@ function handleExit(pid, code) {
   syncPendingWrites = syncPendingWrites.filter((w) => w.pid !== pid);
   asyncWriteQueues.delete(pid);
   pumpIo();
-  const fg = kernel.tty_get_foreground();
+  const fg = kernel.tty_get_foreground(PRIMARY_TTY);
   const wasForeground = fg !== 0 && kernel.proc_pgid(pid) === fg;
   kernel.reap(pid);
   rec.worker.terminate();
@@ -580,8 +590,8 @@ function handleExit(pid, code) {
   // cooked line discipline, foreground pgrp cleared (tcsetpgrp 0). A
   // well-behaved program restores termios itself; this covers the crash/kill path.
   if (wasForeground && kernel.pgrp_members(fg).length === 0) {
-    kernel.tty_set_attr({ canonical: true, echo: true, isig: true });
-    kernel.tty_set_foreground(0);
+    kernel.tty_set_attr(PRIMARY_TTY, { canonical: true, echo: true, isig: true });
+    kernel.tty_set_foreground(PRIMARY_TTY, 0);
   }
   caughtSignals.delete(pid);
   workerContexts.delete(pid);
@@ -1184,17 +1194,17 @@ function handleSyscall(pid, msg) {
         reply(pid, id, true, kernel.isatty(pid, args.fd));
         break;
       case "winsize":
-        reply(pid, id, true, kernel.tty_get_winsize());
+        reply(pid, id, true, kernel.tty_get_winsize(kernel.proc_ctty(pid)));
         break;
       // termios (tcgetattr/tcsetattr): a full-screen program flips the line
       // discipline to raw + no-echo so it owns editing and rendering, then
       // restores the flags on exit. `setattr` merges the given keys, so a
       // program can go raw without spelling out every flag.
       case "getattr":
-        reply(pid, id, true, kernel.tty_get_attr());
+        reply(pid, id, true, kernel.tty_get_attr(kernel.proc_ctty(pid)));
         break;
       case "setattr":
-        kernel.tty_set_attr(args.attr || {});
+        kernel.tty_set_attr(kernel.proc_ctty(pid), args.attr || {});
         // Going raw makes any already-buffered bytes readable, and a program
         // returning to cooked may have a line waiting — nudge parked reads.
         pumpIo();
@@ -1613,7 +1623,7 @@ self.onmessage = async (ev) => {
         }
         // Otherwise a program (or the `read` builtin) is reading: run keystrokes
         // through the kernel cooked line discipline (echo + control-key signals).
-        const res = kernel.tty_input(msg.data);
+        const res = kernel.tty_input(PRIMARY_TTY, msg.data);
         termOut(res.echo);
         if (res.signal === "int") onInterrupt();
         else if (res.signal === "susp") onSusp();
@@ -1625,7 +1635,7 @@ self.onmessage = async (ev) => {
       }
 
       case MSG.RESIZE:
-        kernel.tty_set_winsize(msg.rows | 0, msg.cols | 0);
+        kernel.tty_set_winsize(PRIMARY_TTY, msg.rows | 0, msg.cols | 0);
         // Re-wrap the shell prompt at the new width if it's being edited.
         if (activeReadline) activeReadline.resize();
         // Notify the foreground process(es) so a TUI can re-layout. Default

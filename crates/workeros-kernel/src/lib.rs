@@ -39,7 +39,7 @@ use syscall::{
     Fd, PipeEnd, PipeId, PipeTable, ProcessCtx, ReadOutcome, RedirectMode, WriteOutcome,
     FD_STDERR, FD_STDOUT,
 };
-use tty::{Termios, Tty, TtyInput, TtyRead, Winsize};
+use tty::{Termios, Tty, TtyId, TtyInput, TtyRead, Winsize, NO_TTY};
 use vfs::{path, DirEntry, Metadata, OpenOptions, Vfs};
 
 /// The ABI version the kernel speaks: WASI Preview 1 (the floor) plus the
@@ -49,6 +49,11 @@ pub const ABI: &str = "wasi-preview-1+otf-1";
 /// The kernel's semantic version. Sourced from the crate version so the build
 /// is the single source of truth.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The primary controlling terminal, present from boot. The initial interactive
+/// shell and any process that inherits the boot session read/write through it;
+/// additional terminals are allocated with [`Kernel::open_tty`].
+pub const PRIMARY_TTY: TtyId = 1;
 
 /// The handshake the kernel returns to the main thread on `boot()`. It is the
 /// Phase 0 proof-of-life: main → kernel → main round-trip (see `PLAN.md`).
@@ -181,12 +186,15 @@ pub struct Kernel {
     /// Port-keyed loopback sockets backing `otf:net_*` — a "server" registers a
     /// port here; a connection is a pipe pair the injector/clients drive (ADR-021).
     ports: PortTable,
-    /// The single controlling terminal: line discipline, termios, and winsize.
-    /// Every process whose stdin is the terminal (`Inherit`) reads from here.
-    tty: Tty,
-    /// The terminal's foreground process group (`tcgetpgrp`; 0 = the shell) —
-    /// where control-key signals are delivered (job control, ADR-025).
-    foreground_pgid: Pid,
+    /// The controlling-terminal table (ADR-025+): several independent terminal
+    /// sessions can coexist (e.g. one per desktop window), each with its own line
+    /// discipline, termios, winsize, and foreground process group. A process reads
+    /// terminal stdin from the terminal named by its `ctty` (see [`ProcessCtx`]).
+    /// The primary terminal ([`PRIMARY_TTY`]) exists from boot.
+    ttys: BTreeMap<TtyId, Tty>,
+    /// Monotonic allocator for [`open_tty`](Kernel::open_tty). Starts past
+    /// [`PRIMARY_TTY`]; ids are never reused within a boot.
+    next_tty_id: TtyId,
     /// The resource caps this instance enforces (INV-6, ADR-020). Hardcoded to
     /// [`ResourceLimits::default`] in v1; a host-override API is post-v1.
     limits: ResourceLimits,
@@ -263,8 +271,8 @@ impl Kernel {
                 contexts: BTreeMap::new(),
                 pipes: PipeTable::new(),
                 ports: PortTable::new(),
-                tty: Tty::new(),
-                foreground_pgid: 0,
+                ttys: BTreeMap::from([(PRIMARY_TTY, Tty::new())]),
+                next_tty_id: PRIMARY_TTY + 1,
                 limits,
                 mounts: vfs::mount::MountTable::default(),
                 watches: Vec::new(),
@@ -392,6 +400,7 @@ impl Kernel {
         caps: Option<CapabilitySet>,
         ppid: Pid,
         pgid: Option<Pid>,
+        ctty: Option<TtyId>,
         plan: StdioPlan,
     ) -> Result<Spawned, SpawnError> {
         // Fork-bomb guard (INV-6/ADR-020): refuse once the live-process cap is
@@ -413,6 +422,14 @@ impl Kernel {
             None => self.processes.get(ppid).map(|p| p.pgid).unwrap_or(0),
             Some(g) => g,
         };
+        // Controlling terminal (multi-PTY): `None` inherits the parent's ctty (a
+        // child of an interactive shell shares its terminal); `Some(id)` attaches
+        // the process to terminal `id` (the host starting a shell on a new window).
+        // An unknown/host parent with no ctty yields `NO_TTY`.
+        let ctty = match ctty {
+            None => self.contexts.get(&ppid).map(|c| c.ctty).unwrap_or(NO_TTY),
+            Some(id) => id,
+        };
         let inv = resolver::resolve_invocation(&self.vfs, &cwd, &argv, &env, DEFAULT_PATH)
             .map_err(SpawnError::Resolve)?;
         let graph = resolver::resolve_graph(&self.vfs, &inv.entry).map_err(SpawnError::Resolve)?;
@@ -428,7 +445,8 @@ impl Kernel {
             start_time,
             caps: caps.clone(),
         });
-        let mut ctx = ProcessCtx::new(pid, argv.clone(), env, cwd, caps, self.limits.max_open_fds);
+        let mut ctx =
+            ProcessCtx::new(pid, argv.clone(), env, cwd, caps, ctty, self.limits.max_open_fds);
         // Apply the stdio plan (redirects / pipe ends). A binding failure (e.g. a
         // missing input file) fails the spawn cleanly.
         if let Err(e) = Self::apply_stdio(&mut ctx, &mut self.vfs, &mut self.pipes, &plan) {
@@ -524,10 +542,17 @@ impl Kernel {
                     let n = max.min(ctx.stdin.len());
                     return Ok(ReadResult::Data(ctx.stdin.drain(..n).collect()));
                 }
-                return Ok(match self.tty.read(max) {
-                    TtyRead::Data(bytes) => ReadResult::Data(bytes),
-                    TtyRead::Eof => ReadResult::Eof,
-                    TtyRead::WouldBlock => ReadResult::WouldBlock,
+                // Route to the process's controlling terminal. A process with no
+                // ctty (a closed session, or a context-only kernel process) sees a
+                // terminal stdin as an immediate EOF, like reading a hung-up tty.
+                let ctty = ctx.ctty;
+                return Ok(match self.ttys.get_mut(&ctty) {
+                    Some(tty) => match tty.read(max) {
+                        TtyRead::Data(bytes) => ReadResult::Data(bytes),
+                        TtyRead::Eof => ReadResult::Eof,
+                        TtyRead::WouldBlock => ReadResult::WouldBlock,
+                    },
+                    None => ReadResult::Eof,
                 });
             }
         }
@@ -544,13 +569,37 @@ impl Kernel {
         })
     }
 
-    /// Feed host keystrokes through the terminal's line discipline. Returns the
+    /// Allocate a fresh controlling terminal and return its id. Backs the host's
+    /// "open another terminal window" — each gets a private line discipline,
+    /// termios, winsize, and foreground process group. Free it with
+    /// [`close_tty`](Kernel::close_tty) when the window closes.
+    pub fn open_tty(&mut self) -> TtyId {
+        let id = self.next_tty_id;
+        self.next_tty_id += 1;
+        self.ttys.insert(id, Tty::new());
+        id
+    }
+
+    /// Release a terminal (its window closed). The primary terminal is permanent
+    /// and never removed. Processes still holding it as their ctty then read EOF on
+    /// terminal stdin (a hung-up tty). Returns whether a terminal was removed.
+    pub fn close_tty(&mut self, id: TtyId) -> bool {
+        if id == PRIMARY_TTY {
+            return false;
+        }
+        self.ttys.remove(&id).is_some()
+    }
+
+    /// Feed host keystrokes through terminal `id`'s line discipline. Returns the
     /// [`TtyInput`] the host acts on: bytes to echo to the display and any
     /// control-key signal (Ctrl-C/Ctrl-Z) to deliver to the foreground process.
-    /// This is the interactive input path for the controlling terminal (both the
-    /// prompt and a program's blocking `read` draw from it).
-    pub fn tty_input(&mut self, data: &[u8]) -> TtyInput {
-        self.tty.input(data)
+    /// This is the interactive input path for a controlling terminal (both the
+    /// prompt and a program's blocking `read` draw from it). Unknown id → no-op.
+    pub fn tty_input(&mut self, id: TtyId, data: &[u8]) -> TtyInput {
+        match self.ttys.get_mut(&id) {
+            Some(tty) => tty.input(data),
+            None => TtyInput::default(),
+        }
     }
 
     /// Inject bytes directly into a specific process's stdin queue (the
@@ -561,11 +610,12 @@ impl Kernel {
         Ok(())
     }
 
-    /// Take the next committed input line for the interactive shell prompt, or
-    /// `None` if no full line is buffered. The shell is the terminal's default
-    /// reader when no foreground program is consuming stdin.
-    pub fn tty_read_line(&mut self) -> Option<Vec<u8>> {
-        self.tty.read_line()
+    /// Take the next committed input line from terminal `id` for its interactive
+    /// shell prompt, or `None` if no full line is buffered (or the id is unknown).
+    /// The shell is the terminal's default reader when no foreground program is
+    /// consuming stdin.
+    pub fn tty_read_line(&mut self, id: TtyId) -> Option<Vec<u8>> {
+        self.ttys.get_mut(&id)?.read_line()
     }
 
     /// `isatty(fd)` for a process: whether the descriptor is the terminal rather
@@ -574,40 +624,54 @@ impl Kernel {
         Ok(self.contexts.get(&pid).ok_or(Errno::Badf)?.is_terminal(fd))
     }
 
-    /// Current terminal attributes (`tcgetattr`).
-    pub fn tty_get_attr(&self) -> Termios {
-        self.tty.termios
+    /// The controlling terminal a process reads/writes (`0` = none). Children
+    /// inherit it at spawn; the host uses it to route a program's tty operations
+    /// (termios/winsize) to the right terminal.
+    pub fn proc_ctty(&self, pid: Pid) -> TtyId {
+        self.contexts.get(&pid).map(|c| c.ctty).unwrap_or(NO_TTY)
     }
 
-    /// Set terminal attributes (`tcsetattr`) — e.g. a program entering raw mode.
-    pub fn tty_set_attr(&mut self, termios: Termios) {
-        self.tty.termios = termios;
+    /// Current attributes of terminal `id` (`tcgetattr`). Defaults for an unknown id.
+    pub fn tty_get_attr(&self, id: TtyId) -> Termios {
+        self.ttys.get(&id).map(|t| t.termios).unwrap_or_default()
     }
 
-    /// Current terminal window size (`TIOCGWINSZ`).
-    pub fn tty_winsize(&self) -> Winsize {
-        self.tty.winsize
+    /// Set attributes of terminal `id` (`tcsetattr`) — e.g. a program entering raw
+    /// mode. Unknown id → no-op.
+    pub fn tty_set_attr(&mut self, id: TtyId, termios: Termios) {
+        if let Some(tty) = self.ttys.get_mut(&id) {
+            tty.termios = termios;
+        }
     }
 
-    /// Update the terminal window size when the host terminal is resized. The
-    /// host follows this with a `SIGWINCH` to the foreground process group.
-    pub fn tty_set_winsize(&mut self, winsize: Winsize) {
-        self.tty.winsize = winsize;
+    /// Current window size of terminal `id` (`TIOCGWINSZ`). Defaults for unknown id.
+    pub fn tty_winsize(&self, id: TtyId) -> Winsize {
+        self.ttys.get(&id).map(|t| t.winsize).unwrap_or_default()
+    }
+
+    /// Update terminal `id`'s window size when the host terminal is resized. The
+    /// host follows this with a `SIGWINCH` to that terminal's foreground group.
+    pub fn tty_set_winsize(&mut self, id: TtyId, winsize: Winsize) {
+        if let Some(tty) = self.ttys.get_mut(&id) {
+            tty.winsize = winsize;
+        }
     }
 
     // ---- process groups & the foreground pgrp (job control, ADR-025) ---------
 
-    /// `tcsetpgrp`: make `pgid` the controlling terminal's foreground process
-    /// group — the group ^C/^Z/SIGWINCH are delivered to. `0` returns the
-    /// terminal to the shell (no foreground job).
-    pub fn tty_set_foreground(&mut self, pgid: Pid) {
-        self.foreground_pgid = pgid;
+    /// `tcsetpgrp`: make `pgid` terminal `id`'s foreground process group — the
+    /// group ^C/^Z/SIGWINCH are delivered to. `0` returns the terminal to the
+    /// shell (no foreground job). Unknown id → no-op.
+    pub fn tty_set_foreground(&mut self, id: TtyId, pgid: Pid) {
+        if let Some(tty) = self.ttys.get_mut(&id) {
+            tty.foreground_pgid = pgid;
+        }
     }
 
-    /// `tcgetpgrp`: the current foreground process group (`0` = none — the
-    /// interactive prompt owns the terminal).
-    pub fn tty_foreground(&self) -> Pid {
-        self.foreground_pgid
+    /// `tcgetpgrp`: terminal `id`'s current foreground process group (`0` = none —
+    /// the interactive prompt owns the terminal; also the answer for an unknown id).
+    pub fn tty_foreground(&self, id: TtyId) -> Pid {
+        self.ttys.get(&id).map(|t| t.foreground_pgid).unwrap_or(0)
     }
 
     /// The live members of process group `pgid` (signal-delivery set).
@@ -733,7 +797,7 @@ impl Kernel {
         });
         self.contexts.insert(
             pid,
-            ProcessCtx::new(pid, vec!["net-injector".into()], Vec::new(), "/".into(), caps, self.limits.max_open_fds),
+            ProcessCtx::new(pid, vec!["net-injector".into()], Vec::new(), "/".into(), caps, NO_TTY, self.limits.max_open_fds),
         );
         pid
     }
@@ -1018,6 +1082,7 @@ mod tests {
             None,
             0,
             None,
+            Some(crate::PRIMARY_TTY),
             StdioPlan::default(),
         )
         .unwrap()
@@ -1038,7 +1103,7 @@ mod tests {
         // module (the entry) and never walks an import graph.
         k.fs_write("/proj/main.js", b"console.log('x')").unwrap();
         let spawned = k
-            .spawn(argv(&["js", "main.js"]), vec![], "/proj".into(), 0, None, 0, None, StdioPlan::default())
+            .spawn(argv(&["js", "main.js"]), vec![], "/proj".into(), 0, None, 0, None, Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap();
         assert_eq!(spawned.graph.entry, "/proj/main.js");
         assert_eq!(spawned.graph.modules.len(), 1);
@@ -1054,6 +1119,7 @@ mod tests {
             None,
             0,
             None,
+            Some(crate::PRIMARY_TTY),
             StdioPlan::default(),
         )
     }
@@ -1082,7 +1148,7 @@ mod tests {
     fn spawn_missing_entry_errors() {
         let mut k = boot();
         let err = k
-            .spawn(argv(&["js", "nope.js"]), vec![], "/".into(), 0, None, 0, None, StdioPlan::default())
+            .spawn(argv(&["js", "nope.js"]), vec![], "/".into(), 0, None, 0, None, Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap_err();
         assert!(matches!(err, SpawnError::Resolve(ResolveError::NotFound(_))));
     }
@@ -1170,7 +1236,7 @@ mod tests {
         let mut k = boot();
         let a = spawn_main(&mut k, "");
         let b = k
-            .spawn(argv(&["js", "main.js"]), vec![], "/".into(), 0, None, 0, None, StdioPlan::default())
+            .spawn(argv(&["js", "main.js"]), vec![], "/".into(), 0, None, 0, None, Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap()
             .pid;
         assert_ne!(a, b);
@@ -1202,7 +1268,7 @@ mod tests {
 
     fn spawn_with(k: &mut Kernel, name: &str, plan: StdioPlan) -> Pid {
         k.fs_write(&format!("/{name}"), b"").unwrap();
-        k.spawn(argv(&["js", name]), vec![], "/".into(), 0, None, 0, None, plan)
+        k.spawn(argv(&["js", name]), vec![], "/".into(), 0, None, 0, None, Some(crate::PRIMARY_TTY), plan)
             .unwrap()
             .pid
     }
@@ -1240,25 +1306,25 @@ mod tests {
         }
         // Pipeline shape: the head becomes a leader (Some(0)); the rest join it.
         let head = k
-            .spawn(argv(&["js", "a.js"]), vec![], "/".into(), 0, None, 0, Some(0), StdioPlan::default())
+            .spawn(argv(&["js", "a.js"]), vec![], "/".into(), 0, None, 0, Some(0), Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap()
             .pid;
         assert_eq!(k.proc_pgid(head), head, "Some(0) makes a new group, leader = self");
         let stage2 = k
-            .spawn(argv(&["js", "b.js"]), vec![], "/".into(), 0, None, 0, Some(head), StdioPlan::default())
+            .spawn(argv(&["js", "b.js"]), vec![], "/".into(), 0, None, 0, Some(head), Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap()
             .pid;
         assert_eq!(k.proc_pgid(stage2), head, "Some(p) joins group p");
         // A child spawned with None inherits its parent's group (an exec'd
         // grandchild lands in the pipeline's group → foreground ^C reaches it).
         let grandchild = k
-            .spawn(argv(&["js", "c.js"]), vec![], "/".into(), 0, None, stage2, None, StdioPlan::default())
+            .spawn(argv(&["js", "c.js"]), vec![], "/".into(), 0, None, stage2, None, Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap()
             .pid;
         assert_eq!(k.proc_pgid(grandchild), head, "None inherits the parent's group");
         // No known parent + None → its own leader.
         let solo = k
-            .spawn(argv(&["js", "d.js"]), vec![], "/".into(), 0, None, 0, None, StdioPlan::default())
+            .spawn(argv(&["js", "d.js"]), vec![], "/".into(), 0, None, 0, None, Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap()
             .pid;
         assert_eq!(k.proc_pgid(solo), solo);
@@ -1273,11 +1339,11 @@ mod tests {
         assert_eq!(members, vec![head, grandchild]);
 
         // tcsetpgrp/tcgetpgrp round-trip; 0 = the shell owns the terminal.
-        assert_eq!(k.tty_foreground(), 0);
-        k.tty_set_foreground(head);
-        assert_eq!(k.tty_foreground(), head);
-        k.tty_set_foreground(0);
-        assert_eq!(k.tty_foreground(), 0);
+        assert_eq!(k.tty_foreground(crate::PRIMARY_TTY), 0);
+        k.tty_set_foreground(crate::PRIMARY_TTY, head);
+        assert_eq!(k.tty_foreground(crate::PRIMARY_TTY), head);
+        k.tty_set_foreground(crate::PRIMARY_TTY, 0);
+        assert_eq!(k.tty_foreground(crate::PRIMARY_TTY), 0);
     }
 
     #[test]
@@ -1288,18 +1354,18 @@ mod tests {
         // Host policy denies network to the agent at the trust boundary…
         let denied = CapabilitySet { net_egress: false, ..CapabilitySet::default() };
         let agent = k
-            .spawn(argv(&["js", "agent.js"]), vec![], "/".into(), 0, Some(denied), 0, None, StdioPlan::default())
+            .spawn(argv(&["js", "agent.js"]), vec![], "/".into(), 0, Some(denied), 0, None, Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap();
         assert!(!agent.net_egress);
         // …and the agent cannot shell out to regain it: a child spawned with no
         // explicit set inherits the parent's (ADR-024).
         let child = k
-            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, agent.pid, None, StdioPlan::default())
+            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, agent.pid, None, Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap();
         assert!(!child.net_egress, "a denied parent's child must not regain egress");
         // A child of an unknown/host ppid gets the ordinary default (allowed).
         let fresh = k
-            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, 0, None, StdioPlan::default())
+            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, 0, None, Some(crate::PRIMARY_TTY), StdioPlan::default())
             .unwrap();
         assert!(fresh.net_egress);
     }
@@ -1451,7 +1517,7 @@ mod tests {
         let pid = spawn_main(&mut k, "");
         // fd 0 is the terminal: blocks until the host feeds a committed line.
         assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::WouldBlock);
-        let echo = k.tty_input(b"hi\r");
+        let echo = k.tty_input(crate::PRIMARY_TTY, b"hi\r");
         assert_eq!(echo.echo, b"hi\r\n".to_vec());
         assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::Data(b"hi\n".to_vec()));
         assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::WouldBlock);
@@ -1479,11 +1545,77 @@ mod tests {
     fn raw_mode_stdin_delivers_bytes_without_waiting_for_a_line() {
         let mut k = boot();
         let pid = spawn_main(&mut k, "");
-        let mut t = k.tty_get_attr();
+        let mut t = k.tty_get_attr(crate::PRIMARY_TTY);
         t.canonical = false;
-        k.tty_set_attr(t);
-        k.tty_input(b"a");
+        k.tty_set_attr(crate::PRIMARY_TTY, t);
+        k.tty_input(crate::PRIMARY_TTY, b"a");
         assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::Data(b"a".to_vec()));
+    }
+
+    // Spawn `main.js` attached to a specific controlling terminal (multi-PTY).
+    fn spawn_main_on(k: &mut Kernel, ctty: TtyId) -> Pid {
+        k.fs_write("/main.js", b"").unwrap();
+        k.spawn(argv(&["js", "main.js"]), vec![], "/".into(), 0, None, 0, None, Some(ctty), StdioPlan::default())
+            .unwrap()
+            .pid
+    }
+
+    #[test]
+    fn separate_terminals_have_independent_input_queues() {
+        let mut k = boot();
+        let t2 = k.open_tty();
+        assert_ne!(t2, PRIMARY_TTY);
+        let a = spawn_main_on(&mut k, PRIMARY_TTY);
+        let b = spawn_main_on(&mut k, t2);
+        // Feed different lines to each terminal.
+        k.tty_input(PRIMARY_TTY, b"alpha\r");
+        k.tty_input(t2, b"beta\r");
+        // Each process reads only from its own controlling terminal — no cross-talk.
+        assert_eq!(k.sys_read(a, 0, 64).unwrap(), ReadResult::Data(b"alpha\n".to_vec()));
+        assert_eq!(k.sys_read(b, 0, 64).unwrap(), ReadResult::Data(b"beta\n".to_vec()));
+        assert_eq!(k.sys_read(a, 0, 64).unwrap(), ReadResult::WouldBlock);
+        assert_eq!(k.sys_read(b, 0, 64).unwrap(), ReadResult::WouldBlock);
+    }
+
+    #[test]
+    fn terminals_have_independent_foreground_groups_and_winsize() {
+        let mut k = boot();
+        let t2 = k.open_tty();
+        k.tty_set_foreground(PRIMARY_TTY, 7);
+        k.tty_set_foreground(t2, 9);
+        assert_eq!(k.tty_foreground(PRIMARY_TTY), 7);
+        assert_eq!(k.tty_foreground(t2), 9);
+        k.tty_set_winsize(t2, Winsize { rows: 50, cols: 132 });
+        assert_eq!(k.tty_winsize(t2), Winsize { rows: 50, cols: 132 });
+        assert_eq!(k.tty_winsize(PRIMARY_TTY), Winsize::default());
+    }
+
+    #[test]
+    fn children_inherit_the_parents_controlling_terminal() {
+        let mut k = boot();
+        let t2 = k.open_tty();
+        let parent = spawn_main_on(&mut k, t2);
+        assert_eq!(k.proc_ctty(parent), t2);
+        // A child spawned with ctty=None inherits the parent's terminal.
+        k.fs_write("/child.js", b"").unwrap();
+        let child = k
+            .spawn(argv(&["js", "child.js"]), vec![], "/".into(), 0, None, parent, None, None, StdioPlan::default())
+            .unwrap()
+            .pid;
+        assert_eq!(k.proc_ctty(child), t2);
+    }
+
+    #[test]
+    fn closing_a_terminal_makes_its_stdin_read_eof() {
+        let mut k = boot();
+        let t2 = k.open_tty();
+        let pid = spawn_main_on(&mut k, t2);
+        assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::WouldBlock);
+        assert!(k.close_tty(t2));
+        // A hung-up terminal reads EOF, not a block, so the reader unwinds.
+        assert_eq!(k.sys_read(pid, 0, 64).unwrap(), ReadResult::Eof);
+        // The primary terminal is permanent.
+        assert!(!k.close_tty(PRIMARY_TTY));
     }
 
     #[test]

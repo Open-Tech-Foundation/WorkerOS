@@ -17,6 +17,7 @@
 use crate::caps::CapabilitySet;
 use crate::errno::{Errno, SysResult};
 use crate::process::Pid;
+use crate::tty::TtyId;
 use crate::vfs::{path, DirEntry, FileType, Metadata, OpenOptions, Vfs};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -232,6 +233,10 @@ pub struct ProcessCtx {
     pub stderr: Vec<u8>,
     /// Bytes queued for the guest to read on a *terminal* stdin.
     pub stdin: VecDeque<u8>,
+    /// The controlling terminal this process reads/writes (multi-PTY). Set at spawn
+    /// (inherited from the parent, or attached to a specific terminal by the host);
+    /// [`NO_TTY`](crate::tty::NO_TTY) for a process with no terminal.
+    pub ctty: TtyId,
     /// Set by `proc_exit`.
     pub exit_code: Option<i32>,
 }
@@ -244,6 +249,7 @@ impl ProcessCtx {
         env: Vec<(String, String)>,
         cwd: String,
         caps: CapabilitySet,
+        ctty: TtyId,
         max_open_fds: usize,
     ) -> Self {
         let mut fds = BTreeMap::new();
@@ -262,6 +268,7 @@ impl ProcessCtx {
             stdout: Vec::new(),
             stderr: Vec::new(),
             stdin: VecDeque::new(),
+            ctty,
             exit_code: None,
         }
     }
@@ -710,6 +717,7 @@ mod tests {
             vec![("HOME".into(), "/home".into())],
             "/".into(),
             CapabilitySet::default(),
+            crate::PRIMARY_TTY,
             crate::limits::RECOMMENDED.max_open_fds,
         )
     }
@@ -742,7 +750,7 @@ mod tests {
         let mut pipes = PipeTable::new();
         // Cap = 5: the three stdio fds + two files. The third open must fail.
         let mut p =
-            ProcessCtx::new(1, vec![], vec![], "/".into(), CapabilitySet::default(), 5);
+            ProcessCtx::new(1, vec![], vec![], "/".into(), CapabilitySet::default(), crate::PRIMARY_TTY, 5);
         let open = |p: &mut ProcessCtx, vfs: &mut MemVfs, name: &str| {
             p.path_open(vfs, name, OpenOptions { create: true, ..Default::default() })
         };
@@ -806,10 +814,10 @@ mod tests {
         let id = pipes.open();
 
         let mut writer =
-            ProcessCtx::new(1, vec![], vec![], "/".into(), CapabilitySet::default(), 256);
+            ProcessCtx::new(1, vec![], vec![], "/".into(), CapabilitySet::default(), crate::PRIMARY_TTY, 256);
         writer.bind_stdio_pipe(&mut pipes, FD_STDOUT, id, PipeEnd::Write);
         let mut reader =
-            ProcessCtx::new(2, vec![], vec![], "/".into(), CapabilitySet::default(), 256);
+            ProcessCtx::new(2, vec![], vec![], "/".into(), CapabilitySet::default(), crate::PRIMARY_TTY, 256);
         reader.bind_stdio_pipe(&mut pipes, FD_STDIN, id, PipeEnd::Read);
 
         let mut buf = [0u8; 16];
@@ -936,7 +944,7 @@ mod tests {
             fs_root: "/home/user".into(),
             ..Default::default()
         };
-        let mut p = ProcessCtx::new(1, vec![], vec![], "/home/user".into(), caps, 256);
+        let mut p = ProcessCtx::new(1, vec![], vec![], "/home/user".into(), caps, crate::PRIMARY_TTY, 256);
         p.path_open(&mut vfs, "file", OpenOptions { create: true, ..Default::default() }).unwrap();
         assert_eq!(
             p.path_open(&mut vfs, "../../etc", OpenOptions::default()).unwrap_err(),

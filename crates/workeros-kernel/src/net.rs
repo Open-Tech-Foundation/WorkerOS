@@ -223,7 +223,7 @@ mod tests {
     use crate::vfs::MemVfs;
 
     fn proc(pid: Pid) -> ProcessCtx {
-        ProcessCtx::new(pid, vec![], vec![], "/".into(), CapabilitySet::default(), 256)
+        ProcessCtx::new(pid, vec![], vec![], "/".into(), CapabilitySet::default(), crate::PRIMARY_TTY, 256)
     }
 
     /// Read whatever is currently available on `fd` as bytes (Data/EOF → the
