@@ -21,6 +21,17 @@ const parsedFlags = collectSimpleFlags(sys.argv.slice(1));
 const { flags, longFlags, operands } = parsedFlags;
 const has = (f) => hasParsedFlag(parsedFlags, f);
 const basename = (p) => p.replace(/\\/+$/, "").split("/").pop();
+const commandName = basename(sys.argv[0] || "coreutil");
+const unsupportedOption = (option) => {
+  err(commandName + ": unrecognized option '" + option + "'\\n");
+  sys.exit(2);
+};
+// These programs intentionally expose a small, useful option subset. Reject
+// everything else so an unsupported flag can never appear to have succeeded.
+const acceptOptions = (short = "", long = []) => {
+  for (const flag of flags) if (!short.includes(flag)) unsupportedOption("-" + flag);
+  for (const flag of longFlags) if (!long.includes(flag)) unsupportedOption("--" + flag);
+};
 // Read a whole fd to text.
 const readFd = async (fd) => {
   const chunks = [];
@@ -95,15 +106,17 @@ sys.exit(0);
   "/sbin/true": `sys.exit(0);`,
   "/sbin/false": `sys.exit(1);`,
 
-  "/sbin/pwd": util(`out(sys.cwd + "\\n"); sys.exit(0);`),
+  "/sbin/pwd": util(`acceptOptions(); out(sys.cwd + "\\n"); sys.exit(0);`),
 
   "/sbin/env": util(`
+acceptOptions();
 const lines = Object.entries(sys.env).map(([k, v]) => k + "=" + v);
 out(lines.join("\\n") + (lines.length ? "\\n" : ""));
 sys.exit(0);
 `),
 
   "/sbin/cat": util(`
+acceptOptions();
 async function dump(fd) {
   for (;;) {
     const b = await sys.read(fd, 65536);
@@ -131,6 +144,7 @@ sys.exit(code);
 `),
 
   "/sbin/ls": util(`
+acceptOptions("alhrR");
 const showAll = has("a");
 const long = has("l");
 const human = has("h");
@@ -206,6 +220,7 @@ sys.exit(code);
 `),
 
   "/sbin/mkdir": util(`
+acceptOptions("p");
 const parents = has("p");
 async function mkone(p) {
   if (parents) {
@@ -228,6 +243,7 @@ sys.exit(code);
 `),
 
   "/sbin/rm": util(`
+acceptOptions("rRf");
 const recursive = has("r") || has("R");
 const force = has("f");
 async function rmrf(p) {
@@ -256,6 +272,7 @@ sys.exit(code);
 `),
 
   "/sbin/cp": util(`
+acceptOptions();
 if (operands.length < 2) { err("cp: missing file operand\\n"); sys.exit(1); }
 const src = operands[0];
 let dst = operands[1];
@@ -279,6 +296,7 @@ try {
 `),
 
   "/sbin/mv": util(`
+acceptOptions();
 if (operands.length < 2) { err("mv: missing file operand\\n"); sys.exit(1); }
 const src = operands[0];
 let dst = operands[1];
@@ -295,7 +313,13 @@ try {
 
   // seq [FIRST [INCR]] LAST — print a number sequence.
   "/sbin/seq": util(`
-const a = operands.map(Number);
+const seqOperands = []; let seqTerminated = false;
+for (const arg of sys.argv.slice(1)) {
+  if (!seqTerminated && arg === "--") { seqTerminated = true; continue; }
+  if (!seqTerminated && arg.startsWith("-") && !/^-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$/.test(arg)) unsupportedOption(arg);
+  seqOperands.push(arg);
+}
+const a = seqOperands.map(Number);
 let first = 1, incr = 1, last = 0;
 if (a.length === 1) { last = a[0]; }
 else if (a.length === 2) { first = a[0]; last = a[1]; }
@@ -313,9 +337,11 @@ sys.exit(0);
 let n = 10; const files = []; const av = sys.argv.slice(1);
 for (let i = 0; i < av.length; i++) {
   const a = av[i];
+  if (a === "--") { files.push(...av.slice(i + 1)); break; }
   if (a === "-n") { n = parseInt(av[++i], 10); }
   else if (/^-n/.test(a)) { n = parseInt(a.slice(2), 10); }
   else if (/^-[0-9]+$/.test(a)) { n = parseInt(a.slice(1), 10); }
+  else if (a.startsWith("-") && a !== "-") unsupportedOption(a);
   else files.push(a);
 }
 emit(toLines(await readInputs(files)).slice(0, n));
@@ -327,9 +353,11 @@ sys.exit(0);
 let n = 10; const files = []; const av = sys.argv.slice(1);
 for (let i = 0; i < av.length; i++) {
   const a = av[i];
+  if (a === "--") { files.push(...av.slice(i + 1)); break; }
   if (a === "-n") { n = parseInt(av[++i], 10); }
   else if (/^-n/.test(a)) { n = parseInt(a.slice(2), 10); }
   else if (/^-[0-9]+$/.test(a)) { n = parseInt(a.slice(1), 10); }
+  else if (a.startsWith("-") && a !== "-") unsupportedOption(a);
   else files.push(a);
 }
 const arr = toLines(await readInputs(files));
@@ -339,6 +367,7 @@ sys.exit(0);
 
   // wc [-l|-w|-c] [files] — count lines, words, characters.
   "/sbin/wc": util(`
+acceptOptions("lwc");
 const text = await readInputs(operands);
 const lines = (text.match(/\\n/g) || []).length;
 const words = text.trim() === "" ? 0 : text.trim().split(/\\s+/).length;
@@ -354,6 +383,7 @@ sys.exit(0);
 
   // sort [-r] [-n] [-u] [files] — sort lines.
   "/sbin/sort": util(`
+acceptOptions("rnu");
 let arr = toLines(await readInputs(operands));
 if (has("n")) arr.sort((a, b) => parseFloat(a) - parseFloat(b));
 else arr.sort();
@@ -365,6 +395,7 @@ sys.exit(0);
 
   // uniq [-c] [files] — collapse adjacent duplicate lines.
   "/sbin/uniq": util(`
+acceptOptions("c");
 const arr = toLines(await readInputs(operands));
 const res = []; let prev = null, count = 0;
 const push = () => { if (prev !== null) res.push(has("c") ? String(count).padStart(7) + " " + prev : prev); };
@@ -379,10 +410,12 @@ sys.exit(0);
 let delim = "\\t", spec = null; const files = []; const av = sys.argv.slice(1);
 for (let i = 0; i < av.length; i++) {
   const a = av[i];
+  if (a === "--") { files.push(...av.slice(i + 1)); break; }
   if (a === "-d") delim = av[++i];
   else if (/^-d/.test(a)) delim = a.slice(2);
   else if (a === "-f") spec = av[++i];
   else if (/^-f/.test(a)) spec = a.slice(2);
+  else if (a.startsWith("-") && a !== "-") unsupportedOption(a);
   else files.push(a);
 }
 if (!spec) { err("cut: you must specify a list of fields with -f\\n"); sys.exit(1); }
@@ -398,6 +431,7 @@ sys.exit(0);
 
   // tr SET1 [SET2] / tr -d SET1 — translate or delete characters (reads stdin).
   "/sbin/tr": util(`
+acceptOptions("d");
 const expand = (set) => {
   let r = "";
   for (let i = 0; i < set.length; i++) {

@@ -7,6 +7,15 @@ Notable changes to the coreutils — guest programs written against the native
 
 ## [Unreleased]
 
+### Fixed
+- Unsupported options now produce a clear diagnostic and exit status `2`
+  instead of being silently discarded by the shared argument tokenizer. This
+  applies to both the shared-parser utilities and the custom parsers used by
+  `head`, `tail`, and `cut`; `--` remains available for option-looking file
+  operands.
+- `seq` now recognizes negative numbers as operands while still rejecting
+  unknown options.
+
 ### Added
 - **Shared argv parsing in the coreutils prelude** (`src/index.js`). The
   builtins now use the same guest-side POSIX/GNU-style argument tokenizer as the

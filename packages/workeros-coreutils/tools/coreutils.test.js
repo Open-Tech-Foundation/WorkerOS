@@ -45,6 +45,34 @@ test("seq", async () => {
   assert.equal((await run("seq", { argv: ["3"] })).out, "1\n2\n3\n");
   assert.equal((await run("seq", { argv: ["2", "5"] })).out, "2\n3\n4\n5\n");
   assert.equal((await run("seq", { argv: ["1", "2", "5"] })).out, "1\n3\n5\n");
+  assert.equal((await run("seq", { argv: ["-2", "2"] })).out, "-2\n-1\n0\n1\n2\n");
+});
+
+test("unsupported options fail clearly", async () => {
+  for (const [name, argv, option] of [
+    ["cat", ["-z"], "-z"],
+    ["ls", ["-az"], "-z"],
+    ["pwd", ["--physical"], "--physical"],
+    ["cp", ["-r", "from", "to"], "-r"],
+    ["head", ["-q"], "-q"],
+    ["cut", ["-s", "-f1"], "-s"],
+    ["seq", ["-x"], "-x"],
+  ]) {
+    const result = await run(name, { argv });
+    assert.equal(result.code, 2, `${name} should reject ${option}`);
+    assert.equal(result.out, "");
+    assert.equal(result.err, `${name}: unrecognized option '${option}'\n`);
+  }
+});
+
+test("-- preserves option-looking file operands", async () => {
+  const files = { "-notes": "kept\n" };
+  assert.deepEqual(await run("cat", { argv: ["--", "-notes"], files }), {
+    code: 0,
+    out: "kept\n",
+    err: "",
+  });
+  assert.equal((await run("head", { argv: ["-n1", "--", "-notes"], files })).out, "kept\n");
 });
 
 test("head / tail", async () => {
