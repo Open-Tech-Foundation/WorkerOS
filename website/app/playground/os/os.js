@@ -12,34 +12,36 @@
 const RUNTIME_URL = "/workeros/packages/workeros-web/src/index.js";
 const loadRuntime = new Function("u", "return import(u)");
 
-let osPromise = null;
+// The singletons live on `globalThis`, not module scope: the OTF Web compiler emits
+// each app component as its own custom-element module, and the bundler can duplicate
+// a shared import (this file) across those chunks — a module-level `let` would then
+// give each app its OWN kernel. A global cache guarantees exactly one kernel (and one
+// xterm load) shared by every window.
 
-/** Boot (or reuse) the shared kernel. Resolves with the `WorkerOS` client. */
+/** Boot (or reuse) the one shared kernel. Resolves with the `WorkerOS` client. */
 export function getOS() {
-  if (!osPromise) {
-    osPromise = (async () => {
+  if (!globalThis.__wosOS) {
+    globalThis.__wosOS = (async () => {
       const { boot } = await loadRuntime(RUNTIME_URL);
       return boot();
     })();
   }
-  return osPromise;
+  return globalThis.__wosOS;
 }
 
 // ---- xterm.js (vendored same-origin under /vendor/xterm/) ----
 
-let xtermPromise = null;
-
 /** Load xterm.js + the fit addon + its CSS once. Resolves when `window.Terminal`
  *  is available. Only terminal windows need this, so it's separate from getOS(). */
 export function ensureXterm() {
-  if (!xtermPromise) {
-    xtermPromise = (async () => {
+  if (!globalThis.__wosXterm) {
+    globalThis.__wosXterm = (async () => {
       loadCss("/vendor/xterm/xterm.css");
       await loadScript("/vendor/xterm/xterm.js");
       await loadScript("/vendor/xterm/addon-fit.js");
     })();
   }
-  return xtermPromise;
+  return globalThis.__wosXterm;
 }
 
 function loadScript(src) {

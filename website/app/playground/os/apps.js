@@ -9,7 +9,7 @@ export const APP_META = [
   { id: "terminal", name: "Terminal", icon: "🖥️", w: 720, h: 460, pinned: true, multi: true },
   { id: "files", name: "Files", icon: "🗂️", w: 620, h: 440, pinned: true },
   { id: "browser", name: "Browser", icon: "🧭", w: 760, h: 520, pinned: true },
-  { id: "editor", name: "Editor", icon: "✏️", w: 720, h: 500, pinned: true },
+  { id: "editor", name: "Editor", icon: "✏️", w: 720, h: 500, pinned: true, multi: true },
   { id: "processes", name: "Processes", icon: "📊", w: 560, h: 420, pinned: true },
   { id: "welcome", name: "Welcome", icon: "👋", w: 520, h: 360 },
   { id: "about", name: "About", icon: "ℹ️", w: 460, h: 360 },

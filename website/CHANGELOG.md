@@ -8,6 +8,20 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Desktop environment foundations + a real file manager.** The playground is
+  becoming a proper WorkerOS DE, not a set of demo widgets. This lands the shared
+  groundwork: a **home directory** (`/root` with `Desktop`/`Documents`/`Downloads`,
+  seeded once on boot — the same tree the Terminal sees), a promise-based **modal
+  dialog service** (`os/dialogs.js` + `ui/Dialog.jsx`: themed `confirm`/`prompt`/
+  `alert`, replacing blocking `window.*`), a **VFS helper** (`os/vfs.js`: `~`-aware
+  paths, `HOME`, seeding), and the kernel client now truly **boots once** for the
+  whole desktop (`getOS()` caches on `globalThis`, so every app shares one kernel —
+  previously the bundler could hand some apps their own). The **Files** app is
+  rebuilt as a file manager: navigate (up / home / into folders), and real
+  operations — **new folder, new file, rename, delete** (recursive) — via the client
+  fs API and dialogs, with selection + an item count. Double-clicking a file opens it
+  in the Editor. Verified headlessly: home seeds, create/rename/delete round-trip,
+  navigation, and the Terminal sees the same `/root` — no console errors.
 - **Playground desktop — Phase 3 (part 3): a Files browser.** A new Files app
   (`ui/apps/FilesApp.jsx`) browses the real VFS via the new `os.fs.list(path)`:
   directories sort first, clicking a folder navigates in, an up button climbs to the

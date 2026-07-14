@@ -5,12 +5,16 @@
 
 import { onMount } from "@opentf/web";
 import { wm, openWindow, closeLauncher } from "../os/wm.js";
+import { seedHome } from "../os/vfs.js";
 import WindowHost from "./WindowHost.jsx";
 import Launcher from "./Launcher.jsx";
 import Dock from "./Dock.jsx";
+import Dialog from "./Dialog.jsx";
 
 export default function Desktop() {
   onMount(() => {
+    // Seed the home directory early so it exists before Files/Editor open (idempotent).
+    seedHome().catch(() => {});
     // Open a welcome window so the desktop isn't empty on first load. Guarded so a
     // repeated mount (SSG hydration) doesn't seed a second copy.
     if (wm.windows.length === 0) {
@@ -40,6 +44,7 @@ export default function Desktop() {
 
       <Launcher />
       <Dock />
+      <Dialog />
     </div>
   );
 }
