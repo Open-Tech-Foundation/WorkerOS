@@ -8,6 +8,21 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Playground desktop — Phase 3 (part 1): the Terminal is real, on the multi-PTY
+  kernel.** The desktop now boots the Rust→WASM kernel **once** (a shared singleton,
+  `app/playground/os/os.js`) and each Terminal window opens its **own kernel tty**
+  via `os.openTerminal()` → an xterm.js screen (`ui/apps/TerminalApp.jsx`). Terminal
+  is a **multi-instance** app: launching it from the dock/launcher spawns a fresh,
+  fully independent shell every time — open several and they don't share input, cwd,
+  or job control (the payoff of the Phase 0 multi-PTY work). Boot is DOM-gated so the
+  SSG hydration double-mount can't start two ttys for one window, a ResizeObserver
+  keeps the grid fitted through drag/resize/maximize, and closing the window releases
+  the tty and disposes xterm. Also lands a real **About** app (`ui/apps/AboutApp.jsx`)
+  showing the live kernel version/ABI. Verified end-to-end in headless (cross-origin
+  isolated) Chromium: two terminals reach independent `wsh` prompts, `cd /bin; pwd`
+  in one doesn't leak into the other, `ps` lists the real process table, About reads
+  the booted kernel version, and closing one terminal leaves the other running — no
+  console errors. Files, Browser, Editor, and Processes still render the placeholder.
 - **Playground desktop — Phase 2: dock, launcher & app registry.** The temporary
   launch bar is now a real **dock** (`app/playground/ui/Dock.jsx`): a launcher
   button, the pinned apps with a **running indicator** dot under any app that has an

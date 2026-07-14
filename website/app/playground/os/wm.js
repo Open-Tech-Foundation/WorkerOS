@@ -150,9 +150,11 @@ export function closeLauncher() { if (wm.launcherOpen) wm.launcherOpen = false; 
  * default geometry from the registry.
  */
 export function activateApp(appId) {
+  const a = appMeta(appId);
   const list = wm.windows.filter((w) => w.appId === appId);
-  if (list.length === 0) {
-    const a = appMeta(appId);
+  // Multi-instance apps (e.g. Terminal) always spawn a fresh window — that's how you
+  // get several independent shells. Single-instance apps open once, then toggle.
+  if (a.multi || list.length === 0) {
     openWindow({ appId: a.id, title: a.name, icon: a.icon, w: a.w, h: a.h });
     return;
   }

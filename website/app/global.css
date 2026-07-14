@@ -608,6 +608,36 @@ pre.code .a { color: var(--accent-soft); }
 .app-soon h2 { margin: 4px 0 0; font-size: 1.05rem; letter-spacing: -0.02em; }
 .app-soon p { margin: 0; max-width: 34ch; color: var(--text-faint); font-size: 0.88rem; line-height: 1.6; }
 
+/* ---------- terminal app ---------- */
+.app-term {
+  height: 100%;
+  overflow: hidden;
+  background: #0b0c0f;
+  padding: 6px 4px 6px 8px;
+}
+.app-term-screen { height: 100%; width: 100%; }
+/* xterm paints its own scrollbar/viewport; keep the window body from adding one. */
+.win-body:has(.app-term) { overflow: hidden; padding: 0; }
+
+/* ---------- about app ---------- */
+.app-about {
+  height: 100%; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 6px; padding: 28px; text-align: center;
+}
+.app-about-mark {
+  width: 46px; height: 46px; border-radius: 12px; margin-bottom: 8px;
+  display: grid; place-items: center;
+  background: linear-gradient(140deg, var(--accent), #ff5e3a);
+  color: #170a02; font-family: var(--mono); font-weight: 800; font-size: 22px;
+  box-shadow: 0 6px 18px -6px var(--accent);
+}
+.app-about h2 { margin: 0; font-size: 1.2rem; letter-spacing: -0.02em; }
+.app-about-tag { margin: 0 0 8px; color: var(--text-dim); font-size: 0.9rem; }
+.app-about-meta { margin: 0; display: grid; gap: 6px; width: 100%; max-width: 300px; }
+.app-about-meta > div { display: flex; justify-content: space-between; gap: 12px; padding: 6px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: color-mix(in srgb, var(--text) 4%, transparent); }
+.app-about-meta dt { margin: 0; color: var(--text-faint); font-size: 0.82rem; }
+.app-about-meta dd { margin: 0; font-family: var(--mono); font-size: 0.82rem; color: var(--text); font-variant-numeric: tabular-nums; }
+
 /* ---------- welcome app ---------- */
 .app-welcome { padding: 28px 26px; }
 .app-welcome-mark {

@@ -17,7 +17,7 @@ export default function WelcomeApp() {
         its title bar, resize from any edge, and use the controls on the right to
         minimize, maximize, or close it.
       </p>
-      <p class="app-welcome-hint">Terminal, Files, and the browser arrive next.</p>
+      <p class="app-welcome-hint">Open the Terminal from the dock — each one is its own live shell. Files and the browser arrive next.</p>
     </div>
   );
 }

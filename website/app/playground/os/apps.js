@@ -6,7 +6,7 @@
 // real component yet render a placeholder until their phase lands.
 
 export const APP_META = [
-  { id: "terminal", name: "Terminal", icon: "🖥️", w: 720, h: 460, pinned: true },
+  { id: "terminal", name: "Terminal", icon: "🖥️", w: 720, h: 460, pinned: true, multi: true },
   { id: "files", name: "Files", icon: "🗂️", w: 620, h: 440, pinned: true },
   { id: "browser", name: "Browser", icon: "🧭", w: 760, h: 520, pinned: true },
   { id: "editor", name: "Editor", icon: "✏️", w: 720, h: 500, pinned: true },
