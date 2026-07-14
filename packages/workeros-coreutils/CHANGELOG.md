@@ -8,6 +8,9 @@ Notable changes to the coreutils — guest programs written against the native
 ## [Unreleased]
 
 ### Fixed
+- `uniq` now processes adjacent groups incrementally instead of retaining the
+  complete input, preserves unterminated final lines, and rejects identical
+  input/output paths before truncation.
 - `wc` now counts files incrementally instead of retaining their complete
   contents. Word classification uses a streaming UTF-8 decoder, so multibyte
   characters split across read boundaries remain one character.

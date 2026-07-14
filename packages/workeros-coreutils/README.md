@@ -60,6 +60,10 @@ section headers. `wc` prints a row per named file and a `total` row for multiple
 files. `uniq` accepts at most one input and one output file; omitting the input
 uses standard input, and omitting the output uses standard output.
 
+`uniq` reads and emits adjacent groups incrementally, retaining only the current
+line and group count. It preserves an unterminated final line and rejects an
+identical input/output path before opening the output for truncation.
+
 `head` scans input bytes incrementally and stops reading as soon as the requested
 line count is reached. It does not manufacture a trailing newline when the
 selected input does not contain one.

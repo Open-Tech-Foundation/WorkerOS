@@ -580,22 +580,43 @@ sys.exit(0);
   "/sbin/uniq": util(`
 acceptOptions("c");
 if (operands.length > 2) invalidUsage("extra operand '" + operands[2] + "'");
+if (operands.length === 2 && operands[0] === operands[1]) invalidUsage("input and output are the same file");
 let code = 0;
+let inputFd = null, outputFd = 1, ownInput = false, ownOutput = false;
 try {
-  const arr = toLines(await readInput(operands[0] || "-"));
-  const res = []; let prev = null, count = 0;
-  const push = () => { if (prev !== null) res.push(has("c") ? String(count).padStart(7) + " " + prev : prev); };
-  for (const l of arr) { if (l === prev) count++; else { push(); prev = l; count = 1; } }
-  push();
-  const result = res.length ? res.join("\\n") + "\\n" : "";
+  if (operands[0]) { inputFd = await sys.open(operands[0], {}); ownInput = true; }
+  else inputFd = 0;
   if (operands[1]) {
-    const fd = await sys.open(operands[1], { create: true, truncate: true });
-    try { sys.write(fd, enc.encode(result)); }
-    finally { await sys.close(fd); }
-  } else out(result);
+    outputFd = await sys.open(operands[1], { create: true, truncate: true });
+    ownOutput = true;
+  }
+  const decoder = new TextDecoder();
+  let carry = "", prev = null, count = 0, prevTerminated = false;
+  const emitGroup = () => {
+    if (prev === null) return;
+    const prefix = has("c") ? String(count).padStart(7) + " " : "";
+    sys.write(outputFd, enc.encode(prefix + prev + (prevTerminated ? "\\n" : "")));
+  };
+  const acceptLine = (line, terminated) => {
+    if (line === prev) { count++; prevTerminated ||= terminated; }
+    else { emitGroup(); prev = line; count = 1; prevTerminated = terminated; }
+  };
+  for (;;) {
+    const bytes = await sys.read(inputFd, 65536);
+    if (bytes.length === 0) break;
+    const lines = (carry + decoder.decode(bytes, { stream: true })).split("\\n");
+    carry = lines.pop();
+    for (const line of lines) acceptLine(line, true);
+  }
+  carry += decoder.decode();
+  if (carry !== "") acceptLine(carry, false);
+  emitGroup();
 } catch (e) {
   err("uniq: " + e.message + "\\n");
   code = 1;
+} finally {
+  if (ownInput) await closeQuietly(inputFd);
+  if (ownOutput) await closeQuietly(outputFd);
 }
 sys.exit(code);
 `),

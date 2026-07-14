@@ -373,6 +373,25 @@ test("uniq accepts one input and one output file", async () => {
   assert.equal(result.files["/output"], "a\nb\n");
 });
 
+test("uniq streams adjacent groups and preserves the final terminator", async () => {
+  const result = await run("uniq", {
+    stdin: "same\n".repeat(20000), inspectReads: true, inspectWrites: true,
+  });
+  assert.equal(result.out, "same\n");
+  assert.ok(result.readCalls.length > 1);
+  assert.deepEqual(result.stdoutWrites, [5]);
+
+  assert.equal((await run("uniq", { stdin: "a\na\nlast" })).out, "a\nlast");
+  assert.equal((await run("uniq", { argv: ["-c"], stdin: "last" })).out, "      1 last");
+
+  const samePath = await run("uniq", {
+    argv: ["/same", "/same"], files: { "/same": "preserved\n" },
+  });
+  assert.equal(samePath.code, 1);
+  assert.equal(samePath.err, "uniq: input and output are the same file\n");
+  assert.equal(samePath.files["/same"], "preserved\n");
+});
+
 test("cut", async () => {
   assert.equal((await run("cut", { argv: ["-d", ":", "-f", "1"], stdin: "a:b:c\nx:y:z\n" })).out, "a\nx\n");
   assert.equal((await run("cut", { argv: ["-d", ",", "-f", "1,3"], stdin: "1,2,3,4\n" })).out, "1,3\n");
