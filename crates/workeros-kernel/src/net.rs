@@ -196,6 +196,25 @@ impl PortTable {
         self.by_port.contains_key(&port)
     }
 
+    /// Close one listener the process owns, freeing its port — the in-process
+    /// `server.close()` path (distinct from reap on exit). Node code that probes a
+    /// port by binding a throwaway server and closing it before the real bind (Vite's
+    /// dev server does exactly this) needs the port back immediately, else the real
+    /// `listen` hits `EADDRINUSE`. Idempotent: an unknown listener id is a no-op
+    /// success (a double close must not error); one owned by another pid is `EBADF`.
+    pub fn close(&mut self, pid: Pid, listener: ListenerId) -> SysResult<()> {
+        match self.listeners.get(&listener) {
+            None => Ok(()),
+            Some(l) if l.pid != pid => Err(Errno::Badf),
+            Some(l) => {
+                let port = l.port;
+                self.listeners.remove(&listener);
+                self.by_port.remove(&port);
+                Ok(())
+            }
+        }
+    }
+
     /// Free every port `pid` was listening on (called from the process-reap
     /// seam). Pending, never-accepted connections are dropped; their client-side
     /// fds still reference the pipes, so the client observes EOF on its next read
@@ -341,5 +360,27 @@ mod tests {
         assert!(!ports.is_listening(5173));
         // The port can be claimed again after the listener is reaped.
         assert!(ports.listen(8, 5173).is_ok());
+    }
+
+    #[test]
+    fn close_frees_the_port_for_a_rebind() {
+        // Vite's dev server probes a port by binding a throwaway server, closing it,
+        // then binding for real. Close must free the port at once so the rebind works.
+        let mut ports = PortTable::new();
+        let (lid, _) = ports.listen(7, 5173).unwrap();
+        assert_eq!(ports.listen(7, 5173).unwrap_err(), Errno::Addrinuse);
+        ports.close(7, lid).unwrap();
+        assert!(!ports.is_listening(5173));
+        assert!(ports.listen(7, 5173).is_ok(), "port frees for an immediate rebind");
+    }
+
+    #[test]
+    fn close_is_idempotent_and_ownership_checked() {
+        let mut ports = PortTable::new();
+        let (lid, _) = ports.listen(7, 5173).unwrap();
+        assert_eq!(ports.close(8, lid).unwrap_err(), Errno::Badf, "another pid can't close it");
+        ports.close(7, lid).unwrap();
+        ports.close(7, lid).unwrap(); // double close: a no-op, not an error
+        assert_eq!(ports.close(7, 9999), Ok(()), "unknown handle: no-op success");
     }
 }

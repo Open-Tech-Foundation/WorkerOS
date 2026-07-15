@@ -330,6 +330,16 @@ export function createNet(sys, EventEmitter) {
       this.listening = false;
       if (this._refd) { this._refd = false; loop()?.unref(); }
       if (cb) this.once("close", cb);
+      // Release the kernel listener so its port frees immediately — otherwise a
+      // probe-then-rebind on the same port (Vite binds a throwaway server to test
+      // availability, closes it, then binds for real) hits EADDRINUSE. The pending
+      // `netAccept` in the accept loop rejects once the listener is gone; that's
+      // caught below (listening is already false, so it's swallowed).
+      if (this._listener >= 0) {
+        const listener = this._listener;
+        this._listener = -1;
+        sys.netClose(listener).catch(() => {});
+      }
       queueMicrotask(() => this.emit("close"));
       return this;
     }

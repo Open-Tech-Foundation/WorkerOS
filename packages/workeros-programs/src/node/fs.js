@@ -18,8 +18,9 @@
 // thin `fs.promises`, and `fs.watch`/`watchFile`). Dependency-injected so the
 // whole surface is unit-testable in plain Node against a fake `syncFs`.
 //
-// Honest-surface notes (INV-5): reads return a `Uint8Array` (not a Node `Buffer`)
-// unless an encoding is given; permissions/uid/gid are plausible constants. The
+// Honest-surface notes (INV-5): `readFile`/`readFileSync` without an encoding return
+// a real `Buffer` (a Uint8Array subclass), as Node does, so `.toString()`/`JSON.parse`
+// on the result behave; permissions/uid/gid are plausible constants. The
 // VFS *does* model symlinks and mtime/ctime/btime (ADR-022), so `lstat`/`stat`
 // report real timestamps + `isSymbolicLink()`, and `symlink`/`readlink` work;
 // `atime` is reported as `mtime` (not separately tracked). Not a full Node
@@ -407,7 +408,15 @@ export function createFs(syncFs, onFsEvent) {
       let o = 0;
       for (const c of chunks) { out.set(c, o); o += c.length; }
       const encoding = pickEncoding(options);
-      return encoding ? dec.decode(out) : out;
+      if (encoding) return dec.decode(out);
+      // No encoding → a real `Buffer`, like Node (not a bare Uint8Array). A caller
+      // that does `JSON.parse(readFileSync(p))` or `readFileSync(p).toString()`
+      // relies on Buffer's utf8 `toString`; a Uint8Array stringifies as comma-joined
+      // bytes (`"123,10,..."`) and breaks them — e.g. napi-rs reading package.json
+      // while loading Vite's rolldown binding. Buffer subclasses Uint8Array, so this
+      // is strictly more compatible. Zero-copy: it views the same bytes.
+      const B = globalThis.Buffer;
+      return B ? B.from(out.buffer, out.byteOffset, out.byteLength) : out;
     } finally {
       if (ownFd) closeSync(fd);
     }

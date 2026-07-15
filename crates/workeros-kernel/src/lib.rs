@@ -760,6 +760,18 @@ impl Kernel {
         self.ports.listen(pid, port)
     }
 
+    /// `otf:net_close`: release a listener `pid` owns, freeing its port at once —
+    /// the in-process `server.close()` path, so a probe-then-rebind on the same port
+    /// (Vite's dev server) doesn't hit `EADDRINUSE`. Idempotent for an unknown
+    /// handle; `EBADF` for one another process owns. Ports are also freed on reap.
+    pub fn net_close(&mut self, pid: Pid, listener: ListenerId) -> SysResult<()> {
+        let ctx = self.contexts.get(&pid).ok_or(Errno::Badf)?;
+        if !ctx.caps.allows(caps::OtfCall::NetListen) {
+            return Err(Errno::Notsup);
+        }
+        self.ports.close(pid, listener)
+    }
+
     /// `otf:net_connect`: loopback-connect `pid` to whoever listens on `port`,
     /// binding the client-side connection fds into its table. `ECONNREFUSED` if
     /// nobody listens. This is the call the host-side injector drives on behalf of

@@ -241,6 +241,9 @@ function makeSys(start, syncCall) {
     // until then, so a guest never sees "would block"). All HTTP/WS framing is
     // guest userland — the kernel only moves bytes (INV-1).
     netListen: (port) => call("net_listen", { port }),
+    // `server.close()`: release a listener's port immediately (not just on exit),
+    // so a probe-then-rebind on the same port (Vite's dev server) doesn't EADDRINUSE.
+    netClose: (listener) => call("net_close", { listener }),
     netConnect: (port) => call("net_connect", { port }),
     netAccept: (listener) => call("net_accept", { listener }),
     // The only way out of the OS. The kernel routes and records it (a proxy hooks

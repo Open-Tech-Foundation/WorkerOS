@@ -1397,6 +1397,12 @@ function handleSyscall(pid, msg) {
         // guest asked for 0), reported back for server.address().
         reply(pid, id, true, kernel.net_listen(pid, args.port));
         break;
+      case "net_close":
+        // In-process `server.close()`: free the listener's port now (not just on
+        // reap), so a probe-then-rebind on the same port doesn't hit EADDRINUSE.
+        kernel.net_close(pid, args.listener);
+        reply(pid, id, true, {});
+        break;
       case "net_connect": {
         const conn = kernel.net_connect(pid, args.port);
         reply(pid, id, true, conn);

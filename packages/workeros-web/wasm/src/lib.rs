@@ -623,6 +623,15 @@ impl WebKernel {
         Ok(obj.into())
     }
 
+    /// `otf:net_close(listener)`: release a listener `pid` owns, freeing its port at
+    /// once (the in-process `server.close()` path, so a probe-then-rebind on the same
+    /// port — Vite's dev server — doesn't hit `EADDRINUSE`). No-op for an unknown
+    /// handle; `EBADF` if another process owns it.
+    #[wasm_bindgen]
+    pub fn net_close(&mut self, pid: Pid, listener: ListenerId) -> Result<(), JsError> {
+        self.inner.net_close(pid, listener).map_err(errno_to_js)
+    }
+
     /// `otf:net_connect(port)`: loopback-connect `pid` to the listener on `port`,
     /// binding the client connection fds. Returns `{ rfd, wfd }`; `ECONNREFUSED`
     /// if nobody listens. This is the call the host injector drives for a preview

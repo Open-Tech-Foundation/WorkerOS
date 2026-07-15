@@ -360,6 +360,13 @@ const path = builtins.get("path");
 // amount of npm expects ambient — `Buffer.from(...)` at module top level).
 globalThis.global = globalThis;
 globalThis.Buffer = builtins.get("buffer").Buffer;
+// A browser WorkerGlobalScope exposes `self` as a getter-only accessor; Node's
+// worker global lets you assign it. napi-rs's wasm threadpool worker
+// (`wasi-worker.mjs`, spun up by Vite's rolldown bundler) does
+// `Object.assign(globalThis, { self: globalThis, … })`, which throws on the
+// read-only accessor. Redefine `self` as a writable data property (=== globalThis,
+// its value anyway) so that assignment succeeds, matching Node.
+try { Object.defineProperty(globalThis, "self", { value: globalThis, writable: true, configurable: true }); } catch { /* already writable */ }
 
 // For `-e`/`-p`, the entry is synthetic (rooted at cwd so relative requires and
 // imports resolve there); otherwise read the script file from the VFS.

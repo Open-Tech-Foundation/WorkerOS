@@ -12,6 +12,7 @@ import { createPath } from "./path.js";
 import { createOs } from "./os.js";
 import { createUrl } from "./url.js";
 import { createFs } from "./fs.js";
+import { createWasi } from "./wasi.js";
 import { createModule } from "./module.js";
 import { hasEsmSyntax } from "./esm-graph.js";
 import { buffer as bufferModule } from "./buffer.js";
@@ -73,6 +74,9 @@ export function makeBuiltins(sys, extras) {
   // `child_process` runs sub-commands through the shell driver over two syscalls
   // the runtime adds (`execCapture`/`execCaptureSync`); pure over `sys`, like net.
   const childProcess = createChildProcess(sys);
+  // `node:wasi` — the WASI preview1 host over the guest VFS, so wasm-compiled native
+  // tools (napi-rs bindings like Vite's rolldown) instantiate and run in-process.
+  const wasi = { WASI: createWasi(sys) };
   const reg = new Map([
     ["fs", fs],
     ["fs/promises", fs.promises],
@@ -110,6 +114,7 @@ export function makeBuiltins(sys, extras) {
     ["async_hooks", asyncHooksModule],
     ["vm", vmModule],
     ["constants", constantsModule],
+    ["wasi", wasi],
   ]);
   // Seed "module" before building it so its `builtinModules` list counts itself;
   // `module.createRequire` reads back through `reg`, so it resolves every builtin.
