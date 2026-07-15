@@ -95,7 +95,7 @@ export default function Window({ win, children }) {
         </span>
         <span class="win-ctrls">
           <button class="win-btn win-min" title="Minimize" onpointerdown={stop} onclick={() => minimize(win.id)}>
-            <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="5.4" width="8" height="1.2" rx="0.6" /></svg>
+            <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="5.4" width="8" height="1.2" rx="0.6" fill="currentColor" /></svg>
           </button>
           <button class="win-btn win-max" title="Maximize" onpointerdown={stop} onclick={() => toggleMax(win.id)}>
             <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.2" y="2.2" width="7.6" height="7.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2" /></svg>

@@ -13,6 +13,7 @@ import { effect, snapshot } from "@opentf/web";
 import { getOS } from "./os.js";
 import { theme, setTheme } from "./theme.js";
 import { wm, openWindow } from "./wm.js";
+import { dockState } from "./dock.js";
 
 const CONFIG_DIR = "/root/.config/workeros";
 const STATE_DIR = "/root/.local/state/workeros";
@@ -60,6 +61,7 @@ export async function startState() {
 
   const settings = await readJSON(SETTINGS_PATH);
   if (settings && settings.theme) setTheme(settings.theme);
+  if (settings && Array.isArray(settings.dock)) dockState.pinned = settings.dock;
 
   let restored = 0;
   const session = await readJSON(SESSION_PATH);
@@ -81,10 +83,11 @@ export async function startState() {
 }
 
 function bindPersistence() {
-  // Settings: persist theme whenever it changes.
+  // Settings: persist theme + dock pins whenever they change.
   effect(() => {
     const t = { mode: theme.mode, accent: theme.accent, wallpaper: theme.wallpaper };
-    schedule("settings", () => writeJSON(SETTINGS_PATH, CONFIG_DIR, { theme: t }));
+    const dock = dockState.pinned.slice();
+    schedule("settings", () => writeJSON(SETTINGS_PATH, CONFIG_DIR, { theme: t, dock }));
   });
 
   // Session: persist the set of open windows + their geometry. Reading each field

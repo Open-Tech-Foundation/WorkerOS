@@ -171,21 +171,23 @@ export function toggleLauncher() { wm.launcherOpen = !wm.launcherOpen; }
 export function openLauncher() { wm.launcherOpen = true; }
 export function closeLauncher() { if (wm.launcherOpen) wm.launcherOpen = false; }
 
+/** Open a FRESH window for an app (the explicit "New …" intent — e.g. a new
+ *  Terminal from a menu). Uses the app's default geometry from the registry. */
+export function openApp(appId, props) {
+  const a = appMeta(appId);
+  return openWindow({ appId: a.id, title: a.name, icon: a.icon, w: a.w, h: a.h, props });
+}
+
 /**
  * Dock/launcher click behavior for an app (macOS-like): open it if it has no
- * window; restore it if its top-most window is minimized; minimize it if that
- * window is already focused; otherwise raise/focus it. New windows use the app's
- * default geometry from the registry.
+ * window; otherwise activate the EXISTING one — restore it if minimized, minimize
+ * it if it's already focused, else raise/focus it. Clicking the dock never spawns
+ * a second window (even for multi-instance apps); use `openApp` / a "New …" menu
+ * item for that.
  */
 export function activateApp(appId) {
-  const a = appMeta(appId);
   const list = wm.windows.filter((w) => w.appId === appId);
-  // Multi-instance apps (e.g. Terminal) always spawn a fresh window — that's how you
-  // get several independent shells. Single-instance apps open once, then toggle.
-  if (a.multi || list.length === 0) {
-    openWindow({ appId: a.id, title: a.name, icon: a.icon, w: a.w, h: a.h });
-    return;
-  }
+  if (list.length === 0) { openApp(appId); return; }
   let top = null;
   for (const w of list) if (!top || w.z > top.z) top = w;
   if (top.state === "min") { restore(top.id); return; }

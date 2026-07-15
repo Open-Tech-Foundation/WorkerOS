@@ -5,12 +5,11 @@
 
 import { onMount } from "@opentf/web";
 import { wm, toggleLauncher } from "../os/wm.js";
-import { APP_META } from "../os/apps.js";
+import { dockState } from "../os/dock.js";
 import DockApp from "./DockApp.jsx";
 import DockMin from "./DockMin.jsx";
 
 export default function Dock() {
-  const pinned = APP_META.filter((a) => a.pinned);
   let clock = $state(nowLabel());
 
   onMount(() => {
@@ -37,15 +36,15 @@ export default function Dock() {
       <span class="dock-sep" />
 
       <div class="dt-dock-apps">
-        {pinned.map((a) => (
-          <DockApp appId={a.id} />
+        {dockState.pinned.map((id) => (
+          <DockApp key={id} appId={id} />
         ))}
       </div>
 
       {/* Minimized windows (any app) — click a chip to restore. */}
       <div class="dt-dock-mins">
         {wm.windows.map((w) => (
-          <DockMin winId={w.id} />
+          <DockMin key={w.id} winId={w.id} />
         ))}
       </div>
 

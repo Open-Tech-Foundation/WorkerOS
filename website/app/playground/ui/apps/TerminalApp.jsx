@@ -11,7 +11,7 @@
 import { onMount } from "@opentf/web";
 import { getOS, ensureXterm } from "../../os/os.js";
 import { contextMenu } from "../../os/menus.js";
-import { activateApp } from "../../os/wm.js";
+import { openApp } from "../../os/wm.js";
 
 export default function TerminalApp({ win }) {
   const domId = "term-" + win.id;
@@ -30,7 +30,7 @@ export default function TerminalApp({ win }) {
       { label: "Paste", icon: "📋", action: async () => { try { const t = await navigator.clipboard.readText(); if (sessionRef && t) sessionRef.input(t); } catch {} } },
       { label: "Clear", icon: "␡", action: () => termRef && termRef.clear() },
       { separator: true },
-      { label: "New Terminal", icon: "🖥️", action: () => activateApp("terminal") },
+      { label: "New Terminal", icon: "🖥️", action: () => openApp("terminal") },
     ];
   });
 

@@ -4,12 +4,15 @@
 // window.confirm/prompt — so dialogs are themed, non-blocking, and consistent.
 
 import { reactive } from "@opentf/web";
+import { focusWindow } from "./wm.js";
 
 // `active` is never nulled — visibility is the `open` flag. (Nulling it would let a
 // reactive child text binding read `active.title` on a null during teardown and
 // throw; keeping a stable object makes every field read safe.)
+// `winId` scopes the modal to one app window (the backdrop covers only that
+// window, so the rest of the desktop stays usable); null = desktop-wide.
 export const dialogState = reactive({
-  active: { kind: "alert", title: "", message: "", value: "", placeholder: "", confirmLabel: "OK", danger: false, open: false },
+  active: { kind: "alert", title: "", message: "", value: "", placeholder: "", confirmLabel: "OK", danger: false, winId: null, open: false },
 });
 
 let resolver = null;
@@ -17,6 +20,8 @@ let resolver = null;
 function open(spec) {
   // Replace any in-flight dialog (resolve it as cancelled) so we never leak one.
   if (resolver) { const r = resolver; resolver = null; r(spec.kind === "prompt" ? null : false); }
+  // Raise the owning window so the modal sits over it (not under a sibling).
+  if (spec.winId != null) focusWindow(spec.winId);
   return new Promise((resolve) => {
     resolver = resolve;
     Object.assign(dialogState.active, {
@@ -27,6 +32,7 @@ function open(spec) {
       placeholder: spec.placeholder || "",
       confirmLabel: spec.confirmLabel || "OK",
       danger: !!spec.danger,
+      winId: spec.winId ?? null,
       open: true,
     });
   });

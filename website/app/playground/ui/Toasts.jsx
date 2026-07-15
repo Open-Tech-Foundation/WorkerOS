@@ -8,7 +8,7 @@ export default function Toasts() {
   return (
     <div class="toasts">
       {toastState.list.map((t) => (
-        <div class={"toast toast-" + t.kind} onclick={() => dismiss(t.id)}>
+        <div key={t.id} class={"toast toast-" + t.kind} onclick={() => dismiss(t.id)}>
           <span class="toast-ico">{t.kind === "success" ? "✓" : t.kind === "error" ? "!" : "·"}</span>
           <span class="toast-text">{t.text}</span>
         </div>

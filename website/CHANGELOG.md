@@ -8,6 +8,14 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **App-modal dialogs — a dialog belongs to its window, not the whole OS.** New file,
+  rename, delete, and the Editor's Save As now raise a sheet scoped to the app window
+  that asked for it: the dialog service takes a `winId`, raises that window, and the
+  backdrop covers only that window's rect, so every other window on the desktop stays
+  live. Escape now cancels from anywhere (a confirm/alert has no input to hold focus).
+- **Dock context menu — pin/unpin apps.** Right-click a dock app for Open / New Window
+  / Unpin from Dock; right-click any app in the launcher to pin or unpin it. Dock pins
+  live in the real FS alongside the theme (`~/.config/workeros/settings.json`).
 - **Context menus everywhere — every window carries its own.** Completed the
   right-click story across all apps so it's a universal DE affordance: **Terminal**
   (Copy / Paste / Clear / New Terminal, Copy disabled without a selection) and
@@ -236,7 +244,23 @@ Notable changes to the WorkerOS website + live playground, built with the
   README documents the local-build + `wrangler pages deploy dist` flow.
 
 ### Fixed
-- **Copy to the system clipboard works in the playground (OSC 52).** Full-screen
+- **Closing a window closed a different one.** The window list rendered without a
+  `key`, so the framework's list reconciler fell back to index keys: removing a middle
+  window made every later window's node shift up, and the DOM dropped the wrong one —
+  the same identity bug behind unreliable focus/minimize/restore. Every list that
+  mutates (windows, dock, tabs, files, processes, toasts, launcher) is now keyed by a
+  stable id.
+- **The desktop defaults to dark.** It followed the system preference, which read as a
+  flash of white on a light host; dark is the OS default and Settings still offers
+  System/Light/Dark.
+- **Clicking a running app in the dock opens a new window.** It now activates the
+  running one — raise it, restore it if minimized, or minimize it if already focused —
+  matching a real dock. "New Window" is still available from the dock's right-click.
+- **The window minimize button was invisible in dark mode.** Its icon had no `fill`, so
+  it painted black on the dark title bar; it uses `currentColor` like the other controls.
+- **The Editor's path bar is gone.** The typed path field and Open button were a
+  stand-in for a file chooser; the toolbar now shows the active file's location read-only,
+  and saving an untitled buffer asks for a path. A native file dialog lands later. Full-screen
   TUIs like `nano` copy by emitting `ESC ] 52 ; c ; <base64> ST`, but xterm.js
   never touches the system clipboard on its own — and `Ctrl+Shift+C` only copies
   xterm's own text selection, not a TUI's inverse-video region — so a

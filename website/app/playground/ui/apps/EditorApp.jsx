@@ -12,13 +12,13 @@ import { onMount, reactive } from "@opentf/web";
 import { getOS } from "../../os/os.js";
 import { basename } from "../../os/vfs.js";
 import { notifySuccess, notifyError } from "../../os/notify.js";
+import { promptDialog } from "../../os/dialogs.js";
 import { contextMenu } from "../../os/menus.js";
 
 const dec = new TextDecoder();
 
 export default function EditorApp({ win }) {
   const areaId = "edarea-" + win.id;
-  const pathId = "edpath-" + win.id;
   let seq = 1;
   // `rev` bumps whenever a tab's own fields (name/dirty) change: mutating a field
   // of a `.map`-arg element doesn't re-run its binding on its own, so the per-tab
@@ -28,7 +28,6 @@ export default function EditorApp({ win }) {
   const touch = () => st.rev++;
 
   const areaEl = () => document.getElementById(areaId);
-  const pathEl = () => document.getElementById(pathId);
   const activeTab = () => st.tabs.find((t) => t.id === st.activeId) || null;
 
   // Snapshot the textarea into the active tab before switching away or saving.
@@ -42,9 +41,8 @@ export default function EditorApp({ win }) {
     st.activeId = t.id;
     const ta = areaEl();
     if (ta) ta.value = t.content;
-    const pe = pathEl();
-    if (pe) pe.value = t.path || "";
     st.error = null;
+    touch();
   }
 
   function newTab(path = "", content = "", dirty = false) {
@@ -94,8 +92,18 @@ export default function EditorApp({ win }) {
   async function save() {
     const t = activeTab();
     if (!t) return;
-    const path = ((pathEl() && pathEl().value) || t.path || "").trim();
-    if (!path) { st.error = "Enter a path to save to."; return; }
+    let path = t.path;
+    if (!path) {
+      // Untitled buffer: ask where to save (a stand-in until the native file
+      // dialog lands). The dialog is scoped to this editor window.
+      path = await promptDialog({
+        title: "Save As", message: "Save this file as", winId: win.id,
+        value: "/root/Documents/" + t.name, placeholder: "/path/to/file", confirmLabel: "Save",
+      });
+      if (!path) return;
+      path = path.trim();
+      if (!path) return;
+    }
     flush();
     try {
       const os = await getOS();
@@ -124,7 +132,7 @@ export default function EditorApp({ win }) {
     <div class="app-editor">
       <div class="tabs">
         {st.tabs.map((t) => (
-          <div class={"tab" + (st.activeId === t.id ? " on" : "")} onpointerdown={() => selectTab(t)} oncontextmenu={tabMenu(t)}>
+          <div key={t.id} class={"tab" + (st.activeId === t.id ? " on" : "")} onpointerdown={() => selectTab(t)} oncontextmenu={tabMenu(t)}>
             <span class="tab-dot">{() => (st.rev, t.dirty ? "●" : "")}</span>
             <span class="tab-name">{() => (st.rev, t.name)}</span>
             <button class="tab-x" title="Close" onpointerdown={(e) => e.stopPropagation()} onclick={() => closeTab(t)}>✕</button>
@@ -133,18 +141,11 @@ export default function EditorApp({ win }) {
         <button class="tab-new" title="New tab" onclick={() => newTab()}>+</button>
       </div>
       <div class="ed-bar">
-        <input
-          id={pathId}
-          class="ed-path"
-          placeholder="/path/to/file"
-          spellcheck="false"
-          onkeydown={(e) => { if (e.key === "Enter") openPath(e.target.value); }}
-        />
-        <button class="ed-btn" onclick={() => openPath(pathEl() && pathEl().value)}>Open</button>
-        <button class="ed-btn ed-save" onclick={() => save()}>Save</button>
+        <span class="ed-loc">{() => (st.rev, (activeTab() && activeTab().path) || "untitled")}</span>
         <span class="ed-status">
           {() => (st.rev, st.error ? st.error : activeTab() && activeTab().dirty ? "● unsaved" : "")}
         </span>
+        <button class="ed-btn ed-save" onclick={() => save()}>Save</button>
       </div>
       <textarea
         id={areaId}

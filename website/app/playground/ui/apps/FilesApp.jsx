@@ -12,8 +12,11 @@ import { openWindow } from "../../os/wm.js";
 import { contextMenu } from "../../os/menus.js";
 import { notifySuccess } from "../../os/notify.js";
 
-export default function FilesApp() {
+export default function FilesApp({ win }) {
   const st = reactive({ cwd: HOME, entries: [], selected: null, error: null });
+  // Every dialog this app raises is scoped to its own window, so a modal in one
+  // Files window never blocks the rest of the desktop.
+  const owner = () => win.id;
 
   async function load(path) {
     try {
@@ -39,26 +42,26 @@ export default function FilesApp() {
   }
 
   async function newFolder() {
-    const name = await promptDialog({ title: "New folder", message: "Folder name", placeholder: "untitled folder", confirmLabel: "Create" });
+    const name = await promptDialog({ title: "New folder", message: "Folder name", placeholder: "untitled folder", confirmLabel: "Create", winId: owner() });
     if (!name) return;
     try { const os = await getOS(); await os.fs.mkdir(join(st.cwd, name)); await refresh(); }
-    catch (e) { await alertDialog({ title: "Couldn't create folder", message: String(e?.message || e) }); }
+    catch (e) { await alertDialog({ title: "Couldn't create folder", message: String(e?.message || e), winId: owner() }); }
   }
 
   async function newFile() {
-    const name = await promptDialog({ title: "New file", message: "File name", placeholder: "untitled.txt", confirmLabel: "Create" });
+    const name = await promptDialog({ title: "New file", message: "File name", placeholder: "untitled.txt", confirmLabel: "Create", winId: owner() });
     if (!name) return;
     try { const os = await getOS(); await os.fs.write(join(st.cwd, name), ""); await refresh(); }
-    catch (e) { await alertDialog({ title: "Couldn't create file", message: String(e?.message || e) }); }
+    catch (e) { await alertDialog({ title: "Couldn't create file", message: String(e?.message || e), winId: owner() }); }
   }
 
   async function rename() {
     const entry = selectedEntry();
     if (!entry) return;
-    const name = await promptDialog({ title: "Rename", message: "New name", value: entry.name, confirmLabel: "Rename" });
+    const name = await promptDialog({ title: "Rename", message: "New name", value: entry.name, confirmLabel: "Rename", winId: owner() });
     if (!name || name === entry.name) return;
     try { const os = await getOS(); await os.fs.rename(join(st.cwd, entry.name), join(st.cwd, name)); await refresh(); }
-    catch (e) { await alertDialog({ title: "Couldn't rename", message: String(e?.message || e) }); }
+    catch (e) { await alertDialog({ title: "Couldn't rename", message: String(e?.message || e), winId: owner() }); }
   }
 
   async function remove() {
@@ -69,10 +72,11 @@ export default function FilesApp() {
       message: entry.is_dir ? "The folder and everything inside it will be deleted." : "This file will be deleted.",
       confirmLabel: "Delete",
       danger: true,
+      winId: owner(),
     });
     if (!ok) return;
     try { const os = await getOS(); await os.fs.remove(join(st.cwd, entry.name)); await refresh(); notifySuccess("Deleted " + entry.name); }
-    catch (e) { await alertDialog({ title: "Couldn't delete", message: String(e?.message || e) }); }
+    catch (e) { await alertDialog({ title: "Couldn't delete", message: String(e?.message || e), winId: owner() }); }
   }
 
   onMount(() => {
@@ -107,6 +111,7 @@ export default function FilesApp() {
       <div class="fm-list" onpointerdown={() => (st.selected = null)} oncontextmenu={bgMenu}>
         {st.entries.map((e) => (
           <button
+            key={e.name}
             class={"fm-row" + (e.is_dir ? " is-dir" : "") + (st.selected === e.name ? " sel" : "")}
             onpointerdown={(ev) => { ev.stopPropagation(); st.selected = e.name; }}
             ondblclick={() => open(e)}

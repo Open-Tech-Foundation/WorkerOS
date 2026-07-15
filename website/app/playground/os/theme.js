@@ -15,7 +15,7 @@ import { reactive } from "@opentf/web";
 /** @typedef {"system"|"light"|"dark"} ThemeMode */
 
 const DEFAULTS = {
-  /** @type {ThemeMode} */ mode: "system",
+  /** @type {ThemeMode} */ mode: "dark",
   accent: "", // "" = the theme's built-in OTF orange; else a CSS color
   wallpaper: "", // "" = the default desktop gradient; else a CSS <image>/color
 };

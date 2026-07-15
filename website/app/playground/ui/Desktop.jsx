@@ -4,7 +4,7 @@
 // body comes from the app registry.
 
 import { onMount } from "@opentf/web";
-import { wm, openWindow, closeLauncher, activateApp, openLauncher } from "../os/wm.js";
+import { wm, openWindow, closeLauncher, activateApp, openApp, openLauncher } from "../os/wm.js";
 import { seedHome } from "../os/vfs.js";
 import { attachTheme, theme, setTheme } from "../os/theme.js";
 import { startState } from "../os/state.js";
@@ -50,7 +50,7 @@ export default function Desktop() {
   // The desktop (wall) menu — right-clicking empty space. Built at click time so
   // the Appearance checks reflect the current theme mode.
   const deskMenu = contextMenu(() => [
-    { label: "New Terminal", icon: "🖥️", action: () => activateApp("terminal") },
+    { label: "New Terminal", icon: "🖥️", action: () => openApp("terminal") },
     { label: "Open Files", icon: "🗂️", action: () => activateApp("files") },
     { label: "All Apps…", icon: "▦", action: () => openLauncher() },
     { separator: true },
@@ -75,7 +75,7 @@ export default function Desktop() {
           stays reactive. */}
       <div class="dt-layer">
         {wm.windows.map((w) => (
-          <WindowHost winId={w.id} />
+          <WindowHost key={w.id} winId={w.id} />
         ))}
       </div>
 

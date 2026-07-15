@@ -31,7 +31,7 @@ export default function ProcessesApp() {
         </div>
         <div class="proc-body">
           {procs.list.map((p) => (
-            <ProcRow proc={p} />
+            <ProcRow key={p.pid} proc={p} />
           ))}
         </div>
       </div>
