@@ -282,23 +282,53 @@ function styleText(format, text) {
 }
 
 const types = {
+  isArgumentsObject: (v) => Object.prototype.toString.call(v) === "[object Arguments]",
   isDate: (v) => v instanceof Date,
   isRegExp: (v) => v instanceof RegExp,
   isNativeError: (v) => v instanceof Error,
-  isPromise: (v) => v instanceof Promise,
+  isPromise: (v) => v instanceof Promise || Object.prototype.toString.call(v) === "[object Promise]",
   isMap: (v) => v instanceof Map,
   isSet: (v) => v instanceof Set,
   isWeakMap: (v) => v instanceof WeakMap,
   isWeakSet: (v) => v instanceof WeakSet,
+  isMapIterator: (v) => Object.prototype.toString.call(v) === "[object Map Iterator]",
+  isSetIterator: (v) => Object.prototype.toString.call(v) === "[object Set Iterator]",
   isArrayBuffer: (v) => v instanceof ArrayBuffer,
   isSharedArrayBuffer: (v) => typeof SharedArrayBuffer !== "undefined" && v instanceof SharedArrayBuffer,
   isAnyArrayBuffer: (v) => v instanceof ArrayBuffer || (typeof SharedArrayBuffer !== "undefined" && v instanceof SharedArrayBuffer),
+  isArrayBufferView: (v) => ArrayBuffer.isView(v),
   isDataView: (v) => v instanceof DataView,
   isTypedArray: (v) => ArrayBuffer.isView(v) && !(v instanceof DataView),
+  isUint8ClampedArray: (v) => v instanceof Uint8ClampedArray,
   isUint8Array: (v) => v instanceof Uint8Array,
-  isBoxedPrimitive: (v) => v instanceof Number || v instanceof String || v instanceof Boolean,
+  isUint16Array: (v) => v instanceof Uint16Array,
+  isUint32Array: (v) => v instanceof Uint32Array,
+  isInt8Array: (v) => v instanceof Int8Array,
+  isInt16Array: (v) => v instanceof Int16Array,
+  isInt32Array: (v) => v instanceof Int32Array,
+  isFloat16Array: (v) => typeof Float16Array !== "undefined" && v instanceof Float16Array,
+  isFloat32Array: (v) => v instanceof Float32Array,
+  isFloat64Array: (v) => v instanceof Float64Array,
+  isBigInt64Array: (v) => typeof BigInt64Array !== "undefined" && v instanceof BigInt64Array,
+  isBigUint64Array: (v) => typeof BigUint64Array !== "undefined" && v instanceof BigUint64Array,
+  isNumberObject: (v) => v instanceof Number,
+  isStringObject: (v) => v instanceof String,
+  isBooleanObject: (v) => v instanceof Boolean,
+  isBigIntObject: (v) => Object.prototype.toString.call(v) === "[object BigInt]",
+  isSymbolObject: (v) => Object.prototype.toString.call(v) === "[object Symbol]",
+  isBoxedPrimitive: (v) =>
+    v instanceof Number || v instanceof String || v instanceof Boolean ||
+    Object.prototype.toString.call(v) === "[object BigInt]" ||
+    Object.prototype.toString.call(v) === "[object Symbol]",
   isAsyncFunction: (v) => typeof v === "function" && v.constructor && v.constructor.name === "AsyncFunction",
   isGeneratorFunction: (v) => typeof v === "function" && v.constructor && v.constructor.name === "GeneratorFunction",
+  isGeneratorObject: (v) => Object.prototype.toString.call(v) === "[object Generator]",
+  isModuleNamespaceObject: (v) => Object.prototype.toString.call(v) === "[object Module]",
+  isCryptoKey: (v) => typeof CryptoKey !== "undefined" && v instanceof CryptoKey,
+  // V8 embedder concepts have no observable equivalent in a browser worker.
+  isExternal: () => false,
+  isKeyObject: () => false,
+  isProxy: () => false,
 };
 
 // Legacy `util.is*` predicates (deprecated in Node but still used).
@@ -352,10 +382,62 @@ const getCallSites = (frameCount = 10, options) => {
   });
 };
 
+// `util.parseEnv(content)` — parse a `.env`-format string into an object, matching
+// Node's built-in dotenv parser (added in Node 20.12). Vite imports it
+// (`import { parseEnv } from "node:util"`), so the export must exist or Vite's
+// bundle fails to link. Char-scanned (not line-split) because a double/single/
+// backtick-quoted value may span newlines. Rules mirrored from Node: skip blank
+// and `#` lines; strip a leading `export ` on the key; quoted values drop their
+// quotes (double quotes process `\n`/`\r`/`\t` escapes, single/backtick are
+// literal); an unquoted value ends at `#` (inline comment) and is trimmed.
+function parseEnv(content) {
+  const s = String(content);
+  const n = s.length;
+  const out = {};
+  const isSpace = (c) => c === " " || c === "\t" || c === "\r" || c === "\n";
+  let i = 0;
+  while (i < n) {
+    while (i < n && isSpace(s[i])) i++;
+    if (i >= n) break;
+    if (s[i] === "#") { while (i < n && s[i] !== "\n") i++; continue; }
+    const keyStart = i;
+    while (i < n && s[i] !== "=" && s[i] !== "\n") i++;
+    if (i >= n || s[i] === "\n") continue; // no '=' on this line — skip it
+    let key = s.slice(keyStart, i).trim().replace(/^export\s+/, "");
+    i++; // consume '='
+    while (i < n && (s[i] === " " || s[i] === "\t")) i++;
+    let value = "";
+    const q = s[i];
+    if (q === '"' || q === "'" || q === "`") {
+      i++;
+      let v = "";
+      while (i < n && s[i] !== q) {
+        if (q === '"' && s[i] === "\\" && i + 1 < n) {
+          const nx = s[i + 1];
+          if (nx === "n") { v += "\n"; i += 2; continue; }
+          if (nx === "r") { v += "\r"; i += 2; continue; }
+          if (nx === "t") { v += "\t"; i += 2; continue; }
+        }
+        v += s[i++];
+      }
+      i++; // consume closing quote
+      value = v;
+      while (i < n && s[i] !== "\n") i++; // ignore the rest of the line
+    } else {
+      const vStart = i;
+      while (i < n && s[i] !== "\n" && s[i] !== "#") i++;
+      value = s.slice(vStart, i).trim();
+      while (i < n && s[i] !== "\n") i++;
+    }
+    if (key) out[key] = value;
+  }
+  return out;
+}
+
 export {
   inspect, nodeFormat as format, formatWithOptions,
   promisify, callbackify, inherits, deprecate, debuglog,
-  isDeepStrictEqual, types, stripVTControlCharacters, styleText, getCallSites,
+  isDeepStrictEqual, types, stripVTControlCharacters, styleText, getCallSites, parseEnv,
 };
 export const TextEncoder = globalThis.TextEncoder;
 export const TextDecoder = globalThis.TextDecoder;
@@ -375,6 +457,7 @@ export const util = {
   stripVTControlCharacters,
   styleText,
   getCallSites,
+  parseEnv,
   TextEncoder: globalThis.TextEncoder,
   TextDecoder: globalThis.TextDecoder,
   ...legacy,

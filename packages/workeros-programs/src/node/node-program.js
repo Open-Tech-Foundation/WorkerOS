@@ -216,7 +216,15 @@ const process = emitter({
   // `versions.node` is what packages feature-detect on; a recent value makes them
   // take modern code paths (which our builtins target) rather than throw
   // "unsupported Node".
-  versions: { node: "22.23.1", workeros: "0.0.0", v8: "0.0" },
+  //
+  // `versions.webcontainer` is the seam napi-rs/rolldown (Vite's bundler) use to
+  // choose their **wasm** binding over a native `.node` addon — a browser OS can't
+  // load native machine code, but a wasm binding it can. WorkerOS is a webcontainer-
+  // class environment (in-browser, wasm-backed), so we truthfully advertise the
+  // capability here; it's what makes `@rolldown/binding-wasm32-wasi` load instead of
+  // rolldown throwing "Cannot find native binding". (npm already installs that wasm
+  // binding for us, since we report `arch: "wasm32"`.)
+  versions: { node: "22.23.1", workeros: "0.0.0", v8: "0.0", webcontainer: "1.6.0" },
   // Truthful runtime identity (INV-5): a real Node reports `release.name === "node"`.
   release: { name: "workeros", lts: false, sourceUrl: "", headersUrl: "" },
   cwd: () => cwd,

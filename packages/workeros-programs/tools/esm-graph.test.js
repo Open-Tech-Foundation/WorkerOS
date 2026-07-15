@@ -74,6 +74,30 @@ test("transformModule: dynamic import() becomes the fs-backed runtime hook", () 
   assert.match(out, /globalThis\.__workerosImport\("\/proj\/deep\/m\.js", '\.\/x\.js'\)/);
 });
 
+test("transformModule: `import` as a method/property name is NOT a dynamic import", () => {
+  // Vite's ModuleRunner defines `async import(url) {}` and calls `this.import(x)` /
+  // `runner.import(x)`. `import` here is a plain identifier, not the keyword —
+  // rewriting it produced `async globalThis.__workerosImport(` (a SyntaxError) and
+  // `this.globalThis.__workerosImport(` (wrong target), so Vite's bundle wouldn't
+  // even parse. These must pass through untouched.
+  const src = [
+    "class Runner {",
+    "  async import(url) { return url; }",
+    "  run() { return this.import('./a.js'); }",
+    "}",
+    "const r = new Runner();",
+    "r.import('./b.js');",
+    "const real = await import('./c.js');", // a genuine dynamic import still rewrites
+  ].join("\n");
+  const out = transformModule(src, "/proj/m.js", { staticUrl: tag });
+  assert.match(out, /async import\(url\)/, "method name left intact");
+  assert.match(out, /this\.import\('\.\/a\.js'\)/, "this.import call left intact");
+  assert.match(out, /r\.import\('\.\/b\.js'\)/, "property call left intact");
+  assert.doesNotMatch(out, /globalThis\.__workerosImport\([^"]*['"]\.\/[ab]\.js/, "no rewrite of method/property import");
+  // the real dynamic import is still rewritten
+  assert.match(out, /globalThis\.__workerosImport\("\/proj\/m\.js", '\.\/c\.js'\)/);
+});
+
 test("transformModule: import.meta is bound to a real meta object", () => {
   const src = "console.log(import.meta.url, import.meta.resolve('./x'));";
   const out = transformModule(src, "/proj/m.js", { staticUrl: tag });

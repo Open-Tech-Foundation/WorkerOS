@@ -224,7 +224,18 @@ export function transformModule(src, absPath, { staticUrl }) {
   let usesMeta = false;
   for (let k = 0; k < toks.length; k++) {
     const tk = toks[k];
-    if (tk.t === "id" && tk.v === "import") {
+    // The `import` KEYWORD (dynamic `import(...)` / `import.meta`) only when it sits
+    // in expression position. As a property (`obj.import`) or a method/accessor name
+    // (`async import(){}`, `get import(){}`, `static import(){}`) it is a plain
+    // identifier — rewriting it there yields broken syntax (`async globalThis.__…(`)
+    // or wrong semantics (`this.globalThis.__…()`). Vite's ModuleRunner has both an
+    // `async import(url) {}` method and `this.import(...)` calls, so this guard is
+    // what lets Vite's bundle parse at all.
+    const prev = toks[k - 1];
+    const importAsIdentifier =
+      (prev?.t === "punct" && prev.v === ".") ||
+      (prev?.t === "id" && (prev.v === "async" || prev.v === "get" || prev.v === "set" || prev.v === "static"));
+    if (tk.t === "id" && tk.v === "import" && !importAsIdentifier) {
       const a = toks[k + 1];
       // `import.meta`
       if (a?.t === "punct" && a.v === "." && toks[k + 2]?.t === "id" && toks[k + 2].v === "meta") {

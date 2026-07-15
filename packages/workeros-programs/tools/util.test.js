@@ -6,8 +6,31 @@ import assert from "node:assert/strict";
 import * as nodeUtil from "node:util";
 import util, {
   inspect, format, promisify, callbackify, inherits, deprecate,
-  isDeepStrictEqual, types, styleText,
+  isDeepStrictEqual, types, styleText, parseEnv,
 } from "../src/node/util.js";
+
+test("parseEnv matches Node's dotenv semantics (Vite imports it)", () => {
+  // Values must match node:util.parseEnv byte-for-byte; key order is not part of
+  // the contract (Node's C++ uses a sorted map — an implementation detail).
+  const eq = (input) => {
+    const got = parseEnv(input);
+    const want = nodeUtil.parseEnv(input);
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(got).sort()),
+      Object.fromEntries(Object.entries(want).sort()),
+      JSON.stringify(input),
+    );
+  };
+  eq("# comment\nFOO=bar\nexport BAZ=qux");   // comments + `export ` prefix
+  eq('Q="a b"\nS=\'x#y\'\nB=`hi`');            // quote stripping (all three)
+  eq("H=val # trailing\nE=\nA=b#c");           // inline comments + empty
+  eq('M="line1\nline2"');                        // multiline double-quote
+  eq("SP = spaced value \nNOEQ\nexportFOO=1");   // trim + skip no-`=` + partial word
+  eq('D="x\\ny"\nSNG=\'x\\ny\'');                // \n escape in "" but literal in ''
+  eq("A=1\nA=2");                                 // later wins
+  // export must exist as a named import (the actual Vite failure).
+  assert.equal(typeof util.parseEnv, "function");
+});
 
 test("format handles the standard specifiers like Node", () => {
   const cases = [
