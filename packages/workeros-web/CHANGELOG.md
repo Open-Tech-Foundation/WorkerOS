@@ -7,6 +7,27 @@ main-thread client API). Format:
 
 ## [Unreleased]
 
+### Added
+- **The kernel owns the network: egress is a syscall, not a habit.** A guest program
+  used to reach the internet by calling the worker's `fetch` — the host browser's
+  network — so anything a program did was unrouted, unaudited, unproxyable, and (as
+  `curl http://localhost:3000` proved) able to hit the *developer's own machine* while
+  believing it addressed this OS. A real OS owns its network namespace.
+  New syscall **`net_fetch`** (`sys.netFetch`): the guest hands the kernel a request,
+  the kernel routes it (`netRoute` — today: loopback names are refused as egress since
+  they have a real path via `net_connect`, everything else is allowed out), records it,
+  and performs it. `installGlobals` now **removes `fetch`/`XMLHttpRequest`/`WebSocket`/
+  `EventSource`/`sendBeacon` from guest scope**, so this is structural rather than a
+  convention — the worker itself never used them (programs arrive from the kernel as
+  blobs), so nothing is lost. They're left *undefined* rather than throwing on access:
+  `typeof fetch` is how portable code asks "is there a browser network here?", and the
+  honest answer is no — which sends those libraries down `node:http`, i.e. through the
+  kernel.
+- **`os.netLog()`** — the egress audit log: every outbound request the kernel routed,
+  as `{ t, pid, method, url, action, status?, bytes?, error? }`. Since guests have no
+  network of their own, this is the whole picture of what left the OS. `NET_LOG` /
+  `NET_LOG_RESULT` on the protocol; a 500-entry ring.
+
 ### Fixed
 - **The preview transport served one tab's request from another tab's kernel.**
   Every page that boots gets its own kernel, so "port 8080" is meaningless without

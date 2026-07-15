@@ -730,6 +730,88 @@ function retryPendingAccepts() {
   return progressed;
 }
 
+// ============================ net egress =====================================
+// The ONE way out of this OS. A guest never touches the host's network: it has no
+// `fetch` (the program worker deletes it), so anything leaving must come through
+// `net_fetch` here, where the kernel decides. That makes egress a kernel policy
+// question rather than a per-program habit — every request is routed, recorded,
+// and (once a proxy lands) rewritable in one place, the way a real OS owns its
+// network namespace.
+//
+// The boundary is HTTP, not TCP, and that's honest: a browser cannot open a raw
+// socket, so the kernel's only means of reaching the outside is the host's `fetch`.
+// Loopback is different — that's real byte-moving between guest processes and
+// stays in `net_connect`/`net_listen` (INV-1).
+
+/** Recent egress decisions, newest last. A ring: audit, not storage. */
+const netLog = [];
+const NET_LOG_MAX = 500;
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
+
+/**
+ * The kernel's routing table. Today: loopback names never leave (a guest asking to
+ * "fetch" one is a bug — it should `connect`), everything else is allowed out.
+ * This is the seam a proxy/allowlist hooks into; keep the decision here, not in
+ * the caller.
+ */
+function netRoute({ url }) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return { action: "deny", reason: "not a URL: " + url };
+  }
+  if (!/^https?:$/.test(u.protocol)) {
+    return { action: "deny", reason: "unsupported protocol: " + u.protocol };
+  }
+  if (LOOPBACK_HOSTS.has(u.hostname.toLowerCase())) {
+    // A loopback address is this OS. It has a real path (net_connect); egress must
+    // not quietly resolve it against the HOST's network — that's how `localhost`
+    // used to escape and hit the developer's own machine.
+    return { action: "deny", reason: "loopback is not egress — use net_connect for " + u.host };
+  }
+  return { action: "egress" };
+}
+
+/** Route one guest HTTP request out of the OS (or refuse it), and record it. */
+async function netFetch(pid, req) {
+  const { url, method = "GET", headers = [], body } = req || {};
+  const entry = { t: Date.now(), pid, method: String(method).toUpperCase(), url: String(url) };
+  netLog.push(entry);
+  if (netLog.length > NET_LOG_MAX) netLog.shift();
+
+  const decision = netRoute({ url });
+  if (decision.action !== "egress") {
+    entry.action = "deny";
+    entry.error = decision.reason;
+    throw new Error(decision.reason);
+  }
+  entry.action = "egress";
+  try {
+    const res = await fetch(url, {
+      method: entry.method,
+      headers: new Headers(headers),
+      body: body && body.length ? body : undefined,
+      redirect: "follow",
+      mode: "cors",
+    });
+    const buf = new Uint8Array(await res.arrayBuffer());
+    entry.status = res.status;
+    entry.bytes = buf.length;
+    return {
+      status: res.status,
+      statusText: res.statusText,
+      headers: [...res.headers],
+      body: buf,
+      url: res.url,
+    };
+  } catch (e) {
+    entry.error = String((e && e.message) || e);
+    throw e;
+  }
+}
+
 /**
  * The host-side network injector (ADR-021): open a loopback connection to the
  * process listening on `port`, write the raw HTTP/1.1 request bytes, and collect
@@ -1329,6 +1411,13 @@ function handleSyscall(pid, msg) {
         else reply(pid, id, true, res);
         break;
       }
+      // The only way out of the OS: the kernel routes/records it, the guest never
+      // touches the host's network itself.
+      case "net_fetch":
+        netFetch(pid, args)
+          .then((res) => reply(pid, id, true, res))
+          .catch((e) => reply(pid, id, false, String((e && e.message) || e)));
+        break; // reply happens asynchronously above
       case "exec": {
         // system(3)-style: run a command line via the shell driver and route its
         // output to the caller's process streams. Replies with the exit code when
@@ -1726,6 +1815,10 @@ self.onmessage = async (ev) => {
 
       case MSG.PS:
         post({ type: MSG.PS_RESULT, id: msg.id, procs: kernel.list_processes() });
+        break;
+
+      case MSG.NET_LOG:
+        post({ type: MSG.NET_LOG_RESULT, id: msg.id, entries: netLog.slice() });
         break;
 
       case MSG.KILL: {

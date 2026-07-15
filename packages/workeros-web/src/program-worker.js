@@ -243,6 +243,11 @@ function makeSys(start, syncCall) {
     netListen: (port) => call("net_listen", { port }),
     netConnect: (port) => call("net_connect", { port }),
     netAccept: (listener) => call("net_accept", { listener }),
+    // The only way out of the OS. The kernel routes and records it (a proxy hooks
+    // in there); a guest has no `fetch` of its own — see `sealGuestNetwork()`.
+    // `req` is { url, method, headers: [[k,v]], body?: Uint8Array }; resolves
+    // { status, statusText, headers, body, url }.
+    netFetch: (req) => call("net_fetch", req),
     exit: (code = 0) => {
       reportExit(code | 0);
       throw new ProcessExit(code | 0);
@@ -318,8 +323,50 @@ function stringify(v) {
 }
 
 /** Install the guest's ambient globals. */
+/**
+ * Take the host's network away from guest code.
+ *
+ * A guest runs in this worker's global scope, so it would otherwise inherit the
+ * browser's `fetch`/`XMLHttpRequest`/`WebSocket`/`EventSource` and could reach the
+ * network behind the kernel's back — unrouted, unaudited, unproxyable, and (as
+ * `curl http://localhost:3000` proved) able to hit the *host machine* while
+ * believing it addressed this OS. A real OS owns its network namespace; a process
+ * gets out through the kernel or not at all.
+ *
+ * So the only egress is `sys.netFetch` (→ `net_fetch`, routed and recorded in the
+ * kernel) and the only local path is `sys.netConnect`. The worker itself never uses
+ * `fetch` — program bytes arrive from the kernel and are imported as blobs — so
+ * removing these costs the runtime nothing. Anything reaching for them is asking to
+ * leave the OS unnoticed, and gets a clear error instead of the host's network.
+ */
+function sealGuestNetwork() {
+  // Leave them UNDEFINED rather than throwing on access: `typeof fetch` is how
+  // portable code asks "am I somewhere with a browser network?", and the honest
+  // answer for a WorkerOS process is no. A throwing getter turns that question into
+  // a crash and breaks libraries that would otherwise fall back to `node:http` —
+  // which is exactly the path we want them on, since it routes through the kernel.
+  for (const name of ["fetch", "XMLHttpRequest", "WebSocket", "EventSource"]) {
+    try {
+      // An own property shadows the one on WorkerGlobalScope's prototype, which
+      // `delete` alone would not remove.
+      Object.defineProperty(globalThis, name, {
+        value: undefined,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
+    } catch { /* a locked-down global we can't shadow — nothing more we can do */ }
+  }
+  try {
+    if (globalThis.navigator && "sendBeacon" in globalThis.navigator) {
+      globalThis.navigator.sendBeacon = undefined;
+    }
+  } catch { /* read-only navigator */ }
+}
+
 function installGlobals(start, sys) {
   globalThis.sys = sys;
+  sealGuestNetwork();
 
   const enc = new TextEncoder();
   const line = (fd, args) => sys.write(fd, enc.encode(args.map(stringify).join(" ") + "\n"));

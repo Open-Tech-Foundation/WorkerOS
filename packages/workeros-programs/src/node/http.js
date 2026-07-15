@@ -8,18 +8,19 @@
 // Server: real HTTP/1.1 request parsing, keep-alive, chunked responses, and the
 // `upgrade` event (so `ws` — hence Vite HMR — works over the raw socket).
 //
-// Client (`request`/`get`): the transport depends on where the URL points.
-// `localhost`/`127.0.0.1` is THIS OS, so it goes over the kernel loopback to the
-// process listening on that port — a real socket, every header sent, no CORS. Any
-// other host rides the worker's `fetch` (CORS-bound, ADR-008), because the browser
-// cannot open raw TCP to the outside world. Routing a local URL through `fetch`
-// would leave the OS and hit whatever the *host machine* serves on that port.
+// Client (`request`/`get`): every request goes through the kernel (`kernelFetch`),
+// which routes it. `localhost`/`127.0.0.1` is THIS OS, so it becomes a loopback
+// socket to the process listening on that port — every header sent, no CORS. Any
+// other host is an egress decision the kernel records before performing it with the
+// host's fetch (CORS-bound, ADR-008 — the browser cannot open raw TCP outward). This
+// is the path npm's registry traffic takes, so it is routed and auditable like
+// everything else.
 //
 // Honest limits (INV-5): no HTTP/2, no trailers, no continue/expect handling; the
 // loopback client does not follow redirects (Node's client doesn't either) while the
 // fetch path does.
 
-import { fetchLoopback, isLoopbackHost } from "/lib/workeros-net/http.js";
+import { kernelFetch, isLoopbackHost } from "/lib/workeros-net/http.js";
 
 const CRLF = "\r\n";
 const enc = new TextEncoder();
@@ -402,8 +403,7 @@ export function createHttp(sys, EventEmitter, net) {
         // caller set (nothing is CORS-checked on a socket). Only the outbound fetch
         // path needs the safelist.
         const local = isLocalUrl(o.url);
-        const send = local ? fetchLoopback : fetch;
-        send(o.url, {
+        kernelFetch(o.url, {
           method: o.method,
           headers: local ? { ...o.headers } : corsSafeHeaders(o.headers),
           body,

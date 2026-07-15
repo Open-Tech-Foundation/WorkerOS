@@ -1,15 +1,20 @@
 // `npm` — the WorkerOS package manager, a guest program (INV-1: npm is just a
 // program, like on Linux; the kernel knows nothing about registries or tarballs).
 //
-// It runs as a real process against the `sys` ABI plus the worker's `fetch` /
-// `DecompressionStream`. It fetches packuments and tarballs from the npm registry
-// (ADR-008 — outbound fetch to a CORS-enabled host), resolves semver, unpacks the
-// gzip+tar into `/node_modules`, and runs `scripts` via a sub-shell (`sys.exec`).
+// It runs as a real process against the `sys` ABI plus `DecompressionStream`. It
+// fetches packuments and tarballs from the npm registry, resolves semver, unpacks
+// the gzip+tar into `/node_modules`, and runs `scripts` via a sub-shell (`sys.exec`).
+//
+// Registry traffic goes through the KERNEL like every other guest request
+// (`/lib/workeros-net/http.js` → `sys.netFetch` → ADR-008 outbound fetch), not
+// through a `fetch` of its own — npm has none. So installing a package is routed and
+// recorded with everything else, and a future proxy governs it without npm knowing.
 //
 // Authored as a top-level-await ESM program so it can share the guest argv helper.
 // The host installs its text into the VFS at `/bin/npm` on boot.
 
 import { tokenizeArgv } from "/lib/workeros-cli/args.js";
+import { kernelFetch } from "/lib/workeros-net/http.js";
 
 const REGISTRY = "https://registry.npmjs.org/";
 const enc = new TextEncoder();
@@ -105,7 +110,7 @@ function concat(chunks) {
 
 // ---- registry / semver -----------------------------------------------------
 async function fetchJson(url) {
-  const res = await fetch(url, { mode: "cors" });
+  const res = await kernelFetch(url, { mode: "cors" });
   if (!res.ok) throw new Error(url + " -> HTTP " + res.status);
   return res.json();
 }
@@ -230,7 +235,7 @@ async function installOne(name, range, installed, depth, ctx) {
   if (target === null) return;
 
   out("  ".repeat(depth) + "+ " + name + "@" + version + "\n");
-  const tgz = new Uint8Array(await (await fetch(meta.dist.tarball, { mode: "cors" })).arrayBuffer());
+  const tgz = new Uint8Array(await (await kernelFetch(meta.dist.tarball, { mode: "cors" })).arrayBuffer());
   const files = untar(await gunzip(tgz));
   for (const f of files) {
     const rel = f.name.replace(/^package\//, "");

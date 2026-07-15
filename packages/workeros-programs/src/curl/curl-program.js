@@ -13,20 +13,22 @@
 //     loopback (`/lib/workeros-net/http.js` → `sys.netConnect`) to whichever process
 //     is listening on that port. A real socket: every header is sent, nothing is
 //     CORS-checked, and `ECONNREFUSED` means nothing is listening.
-//   * **anything else** — the worker's `fetch` (ADR-008), so fetch's limits are
-//     curl's limits (INV-5): cross-origin URLs must send CORS headers; forbidden
-//     request headers (Host, Cookie, User-Agent, Referer, …) are dropped by the
-//     browser; Set-Cookie and unexposed response headers are invisible; no raw
-//     sockets, no non-HTTP protocols, no TLS/redirect-chain introspection.
+//   * **anything else** — the kernel's egress (`sys.netFetch`), which routes and
+//     records the request before performing it with the host's fetch (ADR-008). So
+//     fetch's limits are still curl's limits out there (INV-5): cross-origin URLs
+//     must send CORS headers; forbidden request headers (Host, Cookie, User-Agent,
+//     Referer, …) are dropped by the browser; Set-Cookie and unexposed response
+//     headers are invisible; no raw sockets, no non-HTTP protocols, no TLS/
+//     redirect-chain introspection.
 //
-// The split matters: `localhost` inside WorkerOS must mean WorkerOS. Handing a local
-// URL to `fetch` would leave the OS and hit whatever the *host machine* happens to
-// serve on that port.
+// curl never calls a host API itself — a guest has no `fetch` (the program worker
+// takes it away), so every request is the kernel's to route. That's what makes
+// `localhost` mean WorkerOS and an outbound request auditable.
 //
 // Authored as a top-level-await ESM program so it can share the guest argv helper.
 
 import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
-import { fetchLoopback, isLoopbackHost } from "/lib/workeros-net/http.js";
+import { kernelFetch, isLoopbackHost } from "/lib/workeros-net/http.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -343,12 +345,10 @@ async function run(rawUrl) {
   const t0 = Date.now();
   let res;
   try {
-    // `localhost` means THIS OS. A local URL goes over the kernel's loopback to the
-    // process listening on that port; anything else rides the worker's `fetch` out
-    // to the real network (ADR-008). Without this split, curl would leave the OS and
-    // hit whatever the *host machine* serves on that port — which is not what
-    // `curl localhost:3000` means when you're inside WorkerOS.
-    res = isLocalUrl(url) ? await fetchLoopback(url, init) : await fetch(url, init);
+    // One door: the kernel routes it. `localhost` reaches the process listening in
+    // THIS OS over the loopback; anything else is an egress decision the kernel
+    // makes (and records). curl has no host `fetch` to reach for.
+    res = await kernelFetch(url, init);
   } finally {
     if (timer) clearTimeout(timer);
   }

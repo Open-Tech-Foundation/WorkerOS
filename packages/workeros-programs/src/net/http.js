@@ -1,3 +1,17 @@
+// The OS's own network, client side. Every request a guest makes goes through the
+// kernel — `kernelFetch` is the one door, and it routes:
+//
+//   localhost / 127.0.0.1 / 0.0.0.0 / ::1  → the kernel's LOOPBACK (`sys.netConnect`):
+//       a real socket to a process in this OS, HTTP framed here in userland.
+//   anything else                          → the kernel's EGRESS (`sys.netFetch`):
+//       the kernel applies its routing rules, records the request, and (today)
+//       performs it with the host's fetch. A proxy hooks in there, not here.
+//
+// A guest has no `fetch` of its own — the program worker takes it away — so this is
+// not a convention, it's the only way out. That's the point: a request that leaves
+// WorkerOS should be a kernel decision, auditable in one place, exactly like a real
+// OS owning its network namespace.
+//
 // HTTP/1.1 over a real kernel socket — the client half of the OS's own network.
 //
 // `localhost` inside WorkerOS means WorkerOS. A process that listens on port 3000
@@ -127,16 +141,7 @@ function toBytes(body) {
 export async function fetchLoopback(url, init = {}) {
   const u = new URL(url);
   const port = u.port ? parseInt(u.port, 10) : u.protocol === "https:" ? 443 : 80;
-  const headers = [];
-  if (init.headers) {
-    if (typeof init.headers.forEach === "function" && !Array.isArray(init.headers)) {
-      init.headers.forEach((v, k) => headers.push([k, v])); // Headers
-    } else {
-      for (const [k, v] of Array.isArray(init.headers) ? init.headers : Object.entries(init.headers)) {
-        headers.push([k, v]);
-      }
-    }
-  }
+  const headers = headerPairs(init.headers);
   const method = (init.method || "GET").toUpperCase();
   const r = await requestLoopback({
     port,
@@ -157,6 +162,51 @@ export async function fetchLoopback(url, init = {}) {
     statusText: r.statusText,
     headers: h,
   });
+}
+
+/** Normalize fetch's several header shapes to `[[name, value], …]`. */
+function headerPairs(h) {
+  if (!h) return [];
+  if (typeof h.forEach === "function" && !Array.isArray(h)) {
+    const out = [];
+    h.forEach((v, k) => out.push([k, v])); // Headers
+    return out;
+  }
+  return Array.isArray(h) ? h.slice() : Object.entries(h);
+}
+
+/**
+ * `fetch` for the world outside this OS, routed through the kernel (`sys.netFetch`)
+ * rather than the host's network. The kernel decides whether the request may leave,
+ * records it, and performs it; we just shape the answer back into a `Response`.
+ */
+export async function fetchEgress(url, init = {}) {
+  const method = (init.method || "GET").toUpperCase();
+  const r = await sys.netFetch({
+    url: String(url),
+    method,
+    headers: headerPairs(init.headers),
+    body: toBytes(init.body),
+  });
+  const bodyless = method === "HEAD" || r.status === 204 || r.status === 304 || r.status < 200;
+  const h = new Headers();
+  for (const [k, v] of r.headers) {
+    try { h.append(k, v); } catch { /* skip a header name the browser won't model */ }
+  }
+  const body = r.body && r.body.length ? r.body : null;
+  return new Response(bodyless ? null : body, { status: r.status, statusText: r.statusText, headers: h });
+}
+
+/**
+ * The one door out of a guest process. Same shape as `fetch`, always a real
+ * `Response`, and the kernel routes it: loopback stays inside the OS, anything else
+ * is an egress decision. Guest HTTP clients (curl, node:http) should call THIS and
+ * never reach for a host API.
+ */
+export function kernelFetch(url, init = {}) {
+  let local = false;
+  try { local = isLoopbackHost(new URL(String(url)).hostname); } catch { /* not a URL: let egress refuse it */ }
+  return local ? fetchLoopback(url, init) : fetchEgress(url, init);
 }
 
 /**

@@ -142,6 +142,7 @@ export class WorkerOS {
       case MSG.FS_REMOVE:
       case MSG.FS_RENAME:
       case MSG.TRACE_RESULT:
+      case MSG.NET_LOG_RESULT:
       case MSG.PS_RESULT: {
         const p = this._pending.get(msg.id);
         if (p) {
@@ -150,6 +151,7 @@ export class WorkerOS {
           else if (msg.type === MSG.FS_READ) p.resolve(msg.data);
           else if (msg.type === MSG.FS_READDIR) p.resolve(msg.entries);
           else if (msg.type === MSG.PS_RESULT) p.resolve(msg.procs);
+          else if (msg.type === MSG.NET_LOG_RESULT) p.resolve(msg.entries);
           else if (msg.type === MSG.TRACE_RESULT) p.resolve({ on: msg.on, events: msg.events, procs: msg.procs });
           else p.resolve();
         }
@@ -261,6 +263,16 @@ export class WorkerOS {
   /** `ps` — a snapshot of the live process table. */
   ps() {
     return this._request(MSG.PS, {});
+  }
+
+  /**
+   * The egress audit log: every outbound request the kernel has routed for a guest,
+   * newest last, as `{ t, pid, method, url, action, status?, bytes?, error? }`.
+   * Guests have no network of their own — the kernel is the only way out — so this
+   * is the whole picture of what left this OS.
+   */
+  netLog() {
+    return this._request(MSG.NET_LOG, {});
   }
 
   /**

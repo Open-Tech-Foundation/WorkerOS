@@ -7,6 +7,18 @@ guest runtime. Format:
 
 ## [Unreleased]
 
+### Changed
+- **Every guest HTTP client goes through the kernel — including npm.** `curl`,
+  `node:http`/`node:https`, and `npm` no longer call `fetch` themselves (they have
+  none: the program worker removes it). They call **`kernelFetch(url, init)`**
+  (`/lib/workeros-net/http.js`), which routes: a loopback address becomes a real
+  socket to a process in this OS; anything else becomes `sys.netFetch`, where the
+  kernel decides whether it may leave, records it (`os.netLog()`), and performs it.
+  Same call shape as `fetch`, a real `Response` back, so nothing downstream changed.
+  This is what makes a future network proxy a kernel-side change nobody else notices —
+  and it's why installing a package is now as auditable as any other syscall
+  (verified: npm's packument *and* tarball requests appear in the kernel's log).
+
 ### Fixed
 - **`localhost` inside WorkerOS now means WorkerOS.** Start a server on port 3000 and
   `curl http://localhost:3000` returned the page the *developer's own machine* served

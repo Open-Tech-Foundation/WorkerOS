@@ -37,6 +37,9 @@ export const MSG = Object.freeze({
   // (ADR-021). Carries { id, port, bytes } (raw HTTP/1.1 request); the reply is
   // PREVIEW_RESPONSE with the raw HTTP/1.1 response bytes.
   PREVIEW_REQUEST: "preview_request",
+  // main → kernel: read the egress audit log — every outbound request the kernel
+  // has routed for a guest, newest last. Reply: NET_LOG_RESULT { entries }.
+  NET_LOG: "net_log",
   // kernel → main
   TERM_OUTPUT: "term_output", // bytes for a terminal display (tagged with `session`)
   TERM_OPENED: "term_opened", // reply to TERM_OPEN: { id, session } (the new tty id)
@@ -49,6 +52,7 @@ export const MSG = Object.freeze({
   EXEC_STDERR: "exec_stderr",
   EXEC_DONE: "exec_done",
   PS_RESULT: "ps_result",
+  NET_LOG_RESULT: "net_log_result",
   // kernel → main: the raw HTTP/1.1 response bytes for a PREVIEW_REQUEST (ADR-021),
   // as { id, ok, bytes?, error? }.
   PREVIEW_RESPONSE: "preview_response",

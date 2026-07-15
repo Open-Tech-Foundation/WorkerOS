@@ -14,6 +14,8 @@ import {
   parseResponse,
   dechunk,
   fetchLoopback,
+  fetchEgress,
+  kernelFetch,
 } from "../src/net/http.js";
 
 const enc = new TextEncoder();
@@ -201,5 +203,58 @@ test("fetchLoopback: reassembles a body split across many reads", async () => {
   const restore = installFakeSys({ ports: { 3000: () => httpResponse(big) } });
   try {
     assert.equal((await (await fetchLoopback("http://localhost:3000/")).text()).length, big.length);
+  } finally { restore(); }
+});
+
+// ---- egress: out of the OS, but only through the kernel ---------------------
+
+/** A fake `sys.netFetch` standing in for the kernel's egress syscall. */
+function installFakeEgress(handler) {
+  globalThis.sys = { calls: [], netFetch(req) { this.calls.push(req); return handler(req); } };
+  return () => { delete globalThis.sys; };
+}
+const egressReply = (body, { status = 200, headers = [["content-type", "text/plain"]] } = {}) => ({
+  status, statusText: "OK", headers, body: enc.encode(body), url: "http://example.com/",
+});
+
+test("fetchEgress: goes through the kernel syscall, not a host fetch", async () => {
+  const restore = installFakeEgress(async () => egressReply("from the outside"));
+  try {
+    const res = await fetchEgress("https://example.com/thing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: '{"a":1}',
+    });
+    assert.equal(await res.text(), "from the outside");
+    assert.equal(res.status, 200);
+    const [call] = globalThis.sys.calls;
+    assert.equal(call.url, "https://example.com/thing");
+    assert.equal(call.method, "POST");
+    assert.deepEqual(call.headers, [["Content-Type", "application/json"]]);
+    assert.equal(dec.decode(call.body), '{"a":1}');
+  } finally { restore(); }
+});
+
+test("fetchEgress: a kernel refusal surfaces to the caller", async () => {
+  const restore = installFakeEgress(async () => { throw new Error("blocked by policy"); });
+  try {
+    await assert.rejects(() => fetchEgress("https://blocked.example/"), /blocked by policy/);
+  } finally { restore(); }
+});
+
+test("kernelFetch: a remote URL takes the egress door", async () => {
+  const restore = installFakeEgress(async () => egressReply("remote"));
+  try {
+    assert.equal(await (await kernelFetch("https://registry.npmjs.org/left-pad")).text(), "remote");
+    assert.equal(globalThis.sys.calls.length, 1, "must have gone through net_fetch");
+  } finally { restore(); }
+});
+
+test("kernelFetch: a loopback URL never reaches egress — it stays in the OS", async () => {
+  const restore = installFakeSys({ ports: { 3000: () => httpResponse("in-os") } });
+  // netFetch must never be called for localhost; blow up loudly if it is.
+  globalThis.sys.netFetch = () => { throw new Error("localhost must not leave the OS"); };
+  try {
+    assert.equal(await (await kernelFetch("http://localhost:3000/")).text(), "in-os");
   } finally { restore(); }
 });
