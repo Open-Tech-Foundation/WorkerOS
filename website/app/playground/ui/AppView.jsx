@@ -6,10 +6,10 @@
 
 import WelcomeApp from "./apps/WelcomeApp.jsx";
 import TerminalApp from "./apps/TerminalApp.jsx";
-import ProcessesApp from "./apps/ProcessesApp.jsx";
 import MonitorApp from "./apps/MonitorApp.jsx";
 import FilesApp from "./apps/FilesApp.jsx";
 import EditorApp from "./apps/EditorApp.jsx";
+import BrowserApp from "./apps/BrowserApp.jsx";
 import SettingsApp from "./apps/SettingsApp.jsx";
 import PlaceholderApp from "./apps/PlaceholderApp.jsx";
 
@@ -17,10 +17,10 @@ export default function AppView({ win }) {
   // appId is fixed for a window, so a plain chain (not a reactive block) is fine.
   const id = win.appId;
   return id === "terminal" ? <TerminalApp win={win} />
-    : id === "processes" ? <ProcessesApp win={win} />
     : id === "monitor" ? <MonitorApp win={win} />
     : id === "files" ? <FilesApp win={win} />
     : id === "editor" ? <EditorApp win={win} />
+    : id === "browser" ? <BrowserApp win={win} />
     : id === "settings" ? <SettingsApp win={win} />
     : id === "welcome" ? <WelcomeApp win={win} />
     : <PlaceholderApp win={win} />;

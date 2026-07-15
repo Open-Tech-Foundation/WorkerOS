@@ -22,8 +22,14 @@ const loadRuntime = new Function("u", "return import(u)");
 export function getOS() {
   if (!globalThis.__wosOS) {
     globalThis.__wosOS = (async () => {
-      const { boot } = await loadRuntime(RUNTIME_URL);
-      return boot();
+      const { boot, installPreviewBridge } = await loadRuntime(RUNTIME_URL);
+      const os = await boot();
+      // Let the OS answer its own HTTP. The service worker (public/preview-sw.js)
+      // intercepts /__preview__/<port>/… and needs a page-side relay into the kernel
+      // injector to serve it (ADR-021) — without this the Browser app's requests
+      // 502 ("no app page to route through"). No-op without a service worker.
+      installPreviewBridge(os);
+      return os;
     })();
   }
   return globalThis.__wosOS;

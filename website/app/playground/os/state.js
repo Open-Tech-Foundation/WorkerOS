@@ -14,6 +14,12 @@ import { getOS } from "./os.js";
 import { theme, setTheme } from "./theme.js";
 import { wm, openWindow } from "./wm.js";
 import { dockState } from "./dock.js";
+import { APP_META } from "./apps.js";
+
+/** Saved state can name an app that no longer exists (one removed since it was
+ *  written, e.g. the old About/Processes apps). Drop those rather than restore a
+ *  dead dock icon or a placeholder window. */
+const isKnownApp = (id) => APP_META.some((a) => a.id === id);
 
 const CONFIG_DIR = "/root/.config/workeros";
 const STATE_DIR = "/root/.local/state/workeros";
@@ -61,12 +67,13 @@ export async function startState() {
 
   const settings = await readJSON(SETTINGS_PATH);
   if (settings && settings.theme) setTheme(settings.theme);
-  if (settings && Array.isArray(settings.dock)) dockState.pinned = settings.dock;
+  if (settings && Array.isArray(settings.dock)) dockState.pinned = settings.dock.filter(isKnownApp);
 
   let restored = 0;
   const session = await readJSON(SESSION_PATH);
   if (session && Array.isArray(session.windows) && wm.windows.length === 0) {
     for (const w of session.windows) {
+      if (!isKnownApp(w.appId)) continue;
       openWindow({
         appId: w.appId,
         title: w.title,

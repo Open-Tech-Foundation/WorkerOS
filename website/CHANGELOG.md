@@ -8,6 +8,17 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Browser — a tabbed browser for servers running inside the OS.** An address like
+  `localhost:3000` is a real process in WorkerOS listening on a port; there is no
+  network. The service worker turns a fetch into raw HTTP/1.1 bytes, the page-side
+  bridge relays them to the kernel injector, and the tab renders what the in-OS
+  server wrote to the socket (ADR-021). Tabs each keep their own live frame (a
+  background tab isn't reloaded or lost), plus back / forward / reload, an address
+  bar that accepts `3000`, `localhost:3000/path` or `http://localhost:3000`, page
+  titles picked up from the loaded document, and right-click menus on both tabs and
+  the page. Unserved ports and non-OS addresses get a themed explanation instead of
+  raw 502 text. Verified headlessly against two real in-OS Node servers (17 checks)
+  — no console errors.
 - **System Monitor — everything the OS is running, in one window.** The desktop's
   apps (window count + live state: focused / running / minimized, with Focus / New
   Window / Close All on right-click) above the kernel's real process table (PID /
@@ -267,7 +278,22 @@ Notable changes to the WorkerOS website + live playground, built with the
   edge; `public/_redirects` is the SPA fallback. Both are emitted to `dist/` root.
   README documents the local-build + `wrangler pages deploy dist` flow.
 
+### Removed
+- **The Processes app** — the System Monitor covers the same kernel process table
+  (plus the app list) with the same per-row SIGTERM/SIGKILL, so keeping a second dock
+  icon for a subset of it was just clutter. Its shared pieces (`ProcRow`,
+  `os/processes.js`, the `.proc-*` table styles) stay where the monitor uses them.
+
 ### Fixed
+- **The preview bridge was never installed on the desktop.** The service worker has
+  been intercepting `/__preview__/<port>/…` all along, but nothing on the rebuilt
+  playground relayed those requests into the kernel injector, so every one 502'd with
+  "no app page to route through". `getOS()` now installs the bridge on boot — which is
+  what makes the Browser app able to load anything.
+- **Saved state could resurrect a removed app.** The dock pins and session windows are
+  restored from the real FS, so an app deleted since (the old About/Processes) came back
+  as a dead icon or a placeholder window. Hydration now drops app ids the registry
+  doesn't know.
 - **Closing a window closed a different one.** The window list rendered without a
   `key`, so the framework's list reconciler fell back to index keys: removing a middle
   window made every later window's node shift up, and the DOM dropped the wrong one —

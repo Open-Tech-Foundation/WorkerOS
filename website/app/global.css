@@ -1051,13 +1051,53 @@ pre.code .a { color: var(--accent-soft); }
   font-family: var(--mono); font-size: 12.5px; line-height: 1.6; tab-size: 2;
 }
 
-/* ---------- processes app ---------- */
-.app-proc { height: 100%; display: flex; flex-direction: column; background: var(--bg-elev); }
-.proc-bar {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 8px 12px; border-bottom: 1px solid var(--line-soft); flex: 0 0 auto;
+/* ---------- browser app ---------- */
+.app-browser { height: 100%; display: flex; flex-direction: column; background: var(--bg-elev); }
+.bw-bar {
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  padding: 7px 10px; border-bottom: 1px solid var(--line-soft);
 }
-.proc-count { font-size: 12px; font-weight: 600; color: var(--text-dim); }
+.bw-nav {
+  display: grid; place-items: center; width: 26px; height: 26px; flex: none; padding: 0;
+  border: 1px solid var(--line-soft); border-radius: 7px;
+  background: transparent; color: var(--text-dim); cursor: pointer; font-size: 13px;
+}
+.bw-nav:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
+.bw-addr {
+  flex: 1; min-width: 0; padding: 5px 10px;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--mono); font-size: 12px; outline: none;
+}
+.bw-addr:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.bw-go {
+  flex: none; padding: 5px 12px; border: 1px solid var(--line); border-radius: 7px;
+  background: transparent; color: var(--text-dim);
+  font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.bw-go:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+
+.bw-view { position: relative; flex: 1; min-height: 0; background: #fff; }
+.bw-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: none; }
+.bw-frame.on { display: block; }
+/* Non-page states (start / loading / error) paint over the frame layer. */
+.bw-page {
+  position: absolute; inset: 0; z-index: 1;
+  display: grid; place-items: center; padding: 28px;
+  background: var(--bg-elev);
+}
+.bw-msg { max-width: 380px; text-align: center; }
+.bw-msg-h { font-size: 1rem; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
+.bw-msg-p { margin-top: 8px; font-size: 0.85rem; line-height: 1.6; color: var(--text-dim); }
+.bw-msg-err .bw-msg-h { color: #e5484d; }
+.bw-msg-code {
+  margin: 14px 0 0; padding: 8px 12px; overflow-x: auto;
+  border: 1px solid var(--line-soft); border-radius: 8px;
+  background: var(--bg); color: var(--accent-soft);
+  font-family: var(--mono); font-size: 11.5px; text-align: left;
+}
+
+/* ---------- process table (shared widget: the System Monitor's lower half) ---------- */
 .proc-refresh {
   display: grid; place-items: center; width: 24px; height: 24px; padding: 0;
   border: 1px solid var(--line-soft); border-radius: 6px;
