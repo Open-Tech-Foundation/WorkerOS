@@ -1,39 +1,35 @@
+<div align="center">
+
 # WorkerOS
 
-An operating system that boots inside a Web Worker and runs JavaScript or
-WebAssembly programs as real processes — killable and visible in `ps`.
+</div>
 
-> The executable format is a JS or WASM module, not a native binary; the "CPU" is
-> the host's own JS/WASM engine.
+> An operating system that boots in a Web Worker
 
-The kernel is written in **Rust** (compiled to WASM) and owns the VFS, the process
-table, module resolution, and capability granting.
+![Project Screenshot](Screenshot.png)
 
-It is **Node-agnostic** — Node compatibility is a swappable guest-side layer, never
-baked into the kernel.
+A real kernel running real processes — where JS and WASM are the native executable format. POSIX-style coreutils and bash-like scripting.
+The executable format is a JS or WASM module, not a native binary; the "CPU" is
+the host's own JS/WASM engine.
 
-On top run a `wsh` shell with bash-subset scripting, POSIX-style coreutils, a real
-`npm` + `node`, and unmodified `wasm32-wasip1` binaries — all as ordinary processes.
+## Usage
 
-## Layout
+```js
+import { boot } from "@opentf/workeros-web";
 
-```
-crates/workeros-kernel/    Rust core: VFS, process table, syscall dispatch, resolver, wsh parser/glob (native-testable)
-packages/workeros-web/     wasm-bindgen bindings + host runtime (kernel/program workers, shell driver, client API)
-packages/workeros-coreutils/  system binaries: POSIX coreutils as guest programs over the `sys` ABI
-packages/workeros-programs/ OS programs (npm, …) as installable /bin programs + the Node-compatible guest runtime (process shim + CommonJS require)
-website/                   marketing site + live playground, built with the OTF Web framework
-examples/                  runnable demos (run-js, shell)
-```
+// Boot the Rust→WASM kernel inside a Web Worker.
+const os = await boot();
 
-Run a package inside the OS (all through the normal shell):
+// The VFS is real: write a file, then run a program.
+await os.fs.write("/hello.txt", "from the WorkerOS VFS\\n");
 
-```sh
-npm init -y
-npm install is-even        # registry fetch → gunzip/untar → node_modules (+ deps)
-echo 'console.log(require("is-even")(42))' > app.js
-node app.js                # CommonJS require resolves node_modules → true
-npm run start
+// wsh: pipes, &&, redirects, glob — executed by the kernel.
+await os.exec("cat /hello.txt | cat && ls /sbin", {
+  onStdout: (b) => screen.write(b),
+});
+
+// Processes are real — inspect the live table.
+const procs = await os.ps();
 ```
 
 ## Develop
