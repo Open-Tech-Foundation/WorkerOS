@@ -420,8 +420,25 @@ pre.code .a { color: var(--accent-soft); }
   overflow: hidden;
   font-family: var(--sans);
   color: var(--text);
+  /* Chrome (title bars, dock, menus, tabs) shouldn't select on a drag — but the
+     content inside a window is text a person needs to read and copy, so `.win-body`
+     turns selection back on below. */
   user-select: none;
 }
+
+/* App content is selectable/copyable, like any real window. Widgets INSIDE the body
+   that are chrome rather than content (a tab strip, a toolbar, a row of buttons) opt
+   back out, so dragging them doesn't smear a selection across the app. */
+.win-body { user-select: text; }
+.win-body .tabs,
+.win-body .bw-bar,
+.win-body .fm-bar,
+.win-body .ed-bar,
+.win-body .mon-bar,
+.win-body .proc-head,
+.win-body .mon-head,
+.win-body .set-side,
+.win-body .fm-status { user-select: none; }
 
 /* Wallpaper: a deep terminal-flavored gradient with a faint accent glow and a
    subtle grid, so windows read as floating over an OS surface. */

@@ -7,6 +7,21 @@ main-thread client API). Format:
 
 ## [Unreleased]
 
+### Fixed
+- **The preview transport served one tab's request from another tab's kernel.**
+  Every page that boots gets its own kernel, so "port 8080" is meaningless without
+  saying whose. The service worker is shared by the whole origin and can't tell which
+  tab an iframe belongs to (`event.clientId` for a subresource is the preview iframe,
+  which has no bridge), so it picked the first window client it found and hoped. With
+  two tabs open that routinely guessed wrong: your request hit a kernel with nothing
+  on that port and came back `ECONNREFUSED` while your server was running fine — or,
+  worse, quietly returned the *other* OS instance's page.
+  `installPreviewBridge(os)` now tags `os.previewId` and answers only requests
+  addressed to it, and the URL carries the instance: `previewPath(osId, port, path)`
+  → `/__preview__/<osId>/<port>/<path>`. Relative subresources inherit the prefix, so
+  they route back to the right kernel too. **Breaking:** `previewPath` takes `osId`
+  first; the old `/__preview__/<port>/` form still works and any bridge may answer it.
+
 ### Added
 - **Multicall program installs: a registry `links` field.** A `/bin` program
   entry may list utility names; boot creates a `/bin/<name>` symlink per name to

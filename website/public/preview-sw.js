@@ -112,8 +112,10 @@ if (typeof window === "undefined") {
     }
   });
 
-  // Ask the page to drive the kernel injector for one preview connection.
-  const relayToClient = (client, port, bytes) =>
+  // Ask one page to drive its kernel injector for a preview connection. A bridge
+  // whose OS isn't the addressed `osId` rejects, so the caller can take the answer
+  // from whichever page owns it.
+  const relayToClient = (client, osId, port, bytes) =>
     new Promise((resolve, reject) => {
       const ch = new MessageChannel();
       const timer = setTimeout(() => reject(new Error("preview timeout")), 30000);
@@ -122,10 +124,10 @@ if (typeof window === "undefined") {
         if (e.data && e.data.ok) resolve(e.data.bytes);
         else reject(new Error((e.data && e.data.error) || "preview failed"));
       };
-      client.postMessage({ type: "workeros-preview", port, bytes }, [ch.port2]);
+      client.postMessage({ type: "workeros-preview", osId, port, bytes }, [ch.port2]);
     });
 
-  const handlePreview = (event, port, path) => {
+  const handlePreview = (event, osId, port, path) => {
     event.respondWith(
       (async () => {
         const req = event.request;
@@ -140,22 +142,33 @@ if (typeof window === "undefined") {
           headers: [...req.headers],
           body,
         });
-        // Relay to the *app* page that installed the bridge — never the preview
+        // Relay to the *app* pages that installed a bridge — never the preview
         // iframe itself. A subresource (e.g. style.css) has event.clientId set to
-        // the iframe, which has no bridge; only the top page under a non-preview
-        // URL can drive the kernel injector. (This is why the iframe navigation
-        // worked but its subresources 502'd.)
+        // the iframe, which has no bridge; only a top page under a non-preview URL
+        // can drive a kernel injector. (This is why the iframe navigation worked but
+        // its subresources 502'd.)
+        //
+        // Every tab boots its OWN kernel, so we cannot just take the first page we
+        // find: that served one tab's request from another tab's OS. Ask them all
+        // and let the bridge whose `previewId` matches the URL answer — the others
+        // decline. `osId` is null only for the legacy /__preview__/<port>/ form,
+        // where any bridge may answer.
         const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-        const client = wins.find((c) => {
+        const pages = wins.filter((c) => {
           try { return !new URL(c.url).pathname.startsWith("/__preview__/"); }
           catch { return false; }
         });
-        if (!client) return new Response("preview: no app page to route through", { status: 502 });
+        if (!pages.length) return new Response("preview: no app page to route through", { status: 502 });
         let respBytes;
         try {
-          respBytes = await relayToClient(client, port, reqBytes);
+          // First page to accept wins; rejects (incl. "not this OS instance") are skipped.
+          respBytes = await Promise.any(pages.map((c) => relayToClient(c, osId, port, reqBytes)));
         } catch (e) {
-          return new Response("preview: " + ((e && e.message) || e), { status: 502 });
+          // Promise.any → AggregateError once every bridge has declined or failed.
+          const errs = e && e.errors ? e.errors : [e];
+          const real = errs.find((x) => x && !/not this OS instance/.test(x.message || ""));
+          const msg = (real && real.message) || "no OS instance owns this address";
+          return new Response("preview: " + msg, { status: 502 });
         }
         const { status, statusText, headers, body: rbody } = parseResponse(respBytes);
         const hdrs = new Headers();
@@ -174,10 +187,18 @@ if (typeof window === "undefined") {
     const r = event.request;
     const url = new URL(r.url);
 
-    // Preview scope: /__preview__/<port>/<path>?<query>
+    // Preview scope: /__preview__/<osId>/<port>/<path>?<query> — the osId says which
+    // tab's kernel owns the address (ids are "wos"-prefixed, so they can't be read as
+    // a port).
+    const mo = url.pathname.match(/^\/__preview__\/(wos[a-z0-9]+)\/(\d+)(\/[^?]*)?$/i);
+    if (mo) {
+      handlePreview(event, mo[1], parseInt(mo[2], 10), (mo[3] || "/") + url.search);
+      return;
+    }
+    // Legacy scope: /__preview__/<port>/<path> — no instance named, any bridge answers.
     const m = url.pathname.match(/^\/__preview__\/(\d+)(\/[^?]*)?$/);
     if (m) {
-      handlePreview(event, parseInt(m[1], 10), (m[2] || "/") + url.search);
+      handlePreview(event, null, parseInt(m[1], 10), (m[2] || "/") + url.search);
       return;
     }
 

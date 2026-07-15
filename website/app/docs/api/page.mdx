@@ -22,7 +22,7 @@ import { boot, installPreviewBridge } from "@opentf/workeros-web";
 | `WorkerOS` | class | The client instance (usually obtained from `boot()`). |
 | `Process` | class | A handle to one spawned process (from [`spawn()`](/docs/api/workeros#spawn)). |
 | `installPreviewBridge(os)` | function | Route a service worker's preview requests into the kernel (ADR-021). |
-| `previewPath(port)` | function | Build the `/__preview__/<port>/` path used by the preview bridge. |
+| `previewPath(osId, port)` | function | Build the `/__preview__/<osId>/<port>/` path used by the preview bridge. `osId` is `os.previewId` — it says which tab's kernel owns the address, since every tab boots its own. |
 | `RingBuffer`, `allocRingBuffer`, `HEADER_LEN` | — | Low-level SAB ring-buffer primitives. |
 
 ## `boot(opts?)`

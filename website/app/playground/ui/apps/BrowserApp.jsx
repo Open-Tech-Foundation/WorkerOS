@@ -1,37 +1,49 @@
-// A tabbed browser for servers running inside WorkerOS.
+// A tabbed browser.
 //
-// There is no network here: an address like `localhost:3000` is a real process in
-// this OS listening on port 3000. The service worker (public/preview-sw.js) turns a
-// fetch of /__preview__/<port>/<path> into raw HTTP/1.1 bytes, the page-side bridge
-// (installed in os/os.js) relays them to the kernel injector, and the server's
-// response comes back as a real Response (ADR-021). So the iframe below is genuinely
-// rendering bytes that an in-OS process wrote to a socket.
+// An address like `localhost:3000` is a real process in THIS OS listening on port
+// 3000. The service worker (public/preview-sw.js) turns a fetch of
+// /__preview__/<osId>/<port>/<path> into raw HTTP/1.1 bytes, the page-side bridge
+// (installed in os/os.js) relays them to our kernel injector, and the server's
+// response comes back as a real Response (ADR-021). So the frame is genuinely
+// rendering bytes an in-OS process wrote to a socket. The `osId` in the path is what
+// keeps a second tab's kernel from answering our requests — every tab boots its own.
 //
-// Each tab keeps its OWN live iframe (hidden when inactive), the way a real browser
-// keeps background tabs alive — switching tabs doesn't reload the page or lose its
-// state. The frames are driven imperatively (src / history / reload) rather than by a
-// reactive `src` binding, so navigation can't fight the iframe's own history.
+// Anything that isn't an in-OS address (say `google.com`) is left alone and handed to
+// the frame as an ordinary URL. There is no outbound network yet, so those won't load
+// until a proxy lands — but the browser doesn't refuse to try, because deciding what
+// you may visit isn't its job.
+//
+// Tabs keep their own history stack and take titles from the response we already
+// fetched, rather than reading the frame's `contentDocument`/`history`. That's on
+// purpose: it doesn't depend on the frame being same-origin, so it still works the day
+// previews move to their own origin (see the `sandbox` note on the iframe below —
+// containing a served page needs that move, not an attribute).
 
 import { onMount, reactive } from "@opentf/web";
+import { getOS } from "../../os/os.js";
 import { contextMenu } from "../../os/menus.js";
 
-/** The same-origin URL the service worker routes into the kernel. */
-const previewURL = (port, path) => `/__preview__/${port}${path.startsWith("/") ? path : "/" + path}`;
-
 /**
- * Parse what someone types into the address bar. Accepts `3000`, `3000/x`,
- * `localhost:3000/x`, `127.0.0.1:3000`, `http://localhost:3000/x`. Returns
- * `{ port, path }`, or null if it isn't an in-OS address.
+ * Parse what someone types into the address bar. An in-OS address (`3000`, `3000/x`,
+ * `localhost:3000/x`, `http://localhost:3000/x`) becomes `{ kind: "os", port, path }`;
+ * anything else is passed through as `{ kind: "web", url }` — nothing is rejected.
  */
 export function parseAddr(raw) {
-  let s = (raw || "").trim();
+  const s = (raw || "").trim();
   if (!s) return null;
-  s = s.replace(/^https?:\/\//i, "").replace(/^(localhost|127\.0\.0\.1|0\.0\.0\.0):/i, "");
-  const m = s.match(/^(\d{1,5})(\/.*)?$/);
-  if (!m) return null;
-  const port = parseInt(m[1], 10);
-  if (!(port > 0 && port < 65536)) return null;
-  return { port, path: m[2] || "/" };
+  const bare = s.replace(/^https?:\/\//i, "").replace(/^(localhost|127\.0\.0\.1|0\.0\.0\.0):/i, "");
+  const m = bare.match(/^(\d{1,5})(\/.*)?$/);
+  if (m) {
+    const port = parseInt(m[1], 10);
+    if (port > 0 && port < 65536) return { kind: "os", port, path: m[2] || "/" };
+  }
+  return { kind: "web", url: /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : "https://" + s };
+}
+
+/** Pull <title> out of a fetched HTML body — the sandboxed frame won't tell us. */
+function titleOf(html) {
+  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html || "");
+  return m ? m[1].trim().replace(/\s+/g, " ").slice(0, 80) : "";
 }
 
 export default function BrowserApp({ win }) {
@@ -44,22 +56,25 @@ export default function BrowserApp({ win }) {
   const frameId = (id) => `bw-frame-${win.id}-${id}`;
   const addrId = "bw-addr-" + win.id;
   const activeTab = () => st.tabs.find((t) => t.id === st.activeId) || null;
+  const frameEl = (t) => document.getElementById(frameId(t.id));
+  const addrEl = () => document.getElementById(addrId);
   // Read `rev` so these re-run when a tab's own fields change.
   const activeStatus = () => (st.rev, activeTab() ? activeTab().status : "blank");
   const activeError = () => (st.rev, (activeTab() && activeTab().error) || "");
-  const frameEl = (t) => document.getElementById(frameId(t.id));
-  const addrEl = () => document.getElementById(addrId);
-  const addrOf = (t) => (t.port ? `localhost:${t.port}${t.path}` : "");
+  const canBack = () => (st.rev, !!activeTab() && activeTab().hi > 0);
+  const canFwd = () => (st.rev, !!activeTab() && activeTab().hi < activeTab().hist.length - 1);
 
   function showTab(t) {
     st.activeId = t.id;
     const a = addrEl();
-    if (a) a.value = addrOf(t);
+    if (a) a.value = t.addr;
     touch();
   }
 
   function newTab(addr = "") {
-    const t = { id: seq++, port: null, path: "/", title: "New Tab", status: "blank", error: null };
+    // `hist` is our own history stack (index `hi`) — a sandboxed frame's own history
+    // is off limits, and this keeps Back/Forward honest per tab anyway.
+    const t = { id: seq++, addr: "", title: "New Tab", status: "blank", error: null, hist: [], hi: -1 };
     st.tabs.push(t);
     showTab(t);
     if (addr) navigate(t, addr);
@@ -80,78 +95,83 @@ export default function BrowserApp({ win }) {
     if (wasActive) showTab(st.tabs[i] || st.tabs[i - 1]);
   }
 
-  async function navigate(t, raw) {
+  /** Load `raw` into `t`. `push` records it in the tab's history (Back/Forward don't). */
+  async function navigate(t, raw, push = true) {
     const a = parseAddr(raw);
-    if (!a) {
-      t.status = "error";
-      t.error = "Not an address in this OS. Try a port a process is listening on, like localhost:3000.";
-      touch();
-      return;
-    }
-    t.port = a.port;
-    t.path = a.path;
-    t.title = `localhost:${a.port}`;
+    if (!a) return;
+    t.addr = raw.trim();
     t.status = "loading";
     t.error = null;
+    t.title = t.addr;
     touch();
-    if (addrEl() && st.activeId === t.id) addrEl().value = addrOf(t);
+    if (st.activeId === t.id && addrEl()) addrEl().value = t.addr;
 
-    const url = previewURL(a.port, a.path);
-    // Ask once before handing the URL to the iframe: the bridge answers an
-    // unserved port with a 502 whose body would otherwise render as raw text
-    // inside the frame. This costs the in-OS server a second GET on navigation,
-    // which is a fair price for telling "nothing is listening" apart from "the
-    // page loaded". (Reload goes through the iframe's own history, not here.)
-    let res;
+    const done = (ok) => {
+      if (ok && push) {
+        t.hist = t.hist.slice(0, t.hi + 1);
+        t.hist.push(t.addr);
+        t.hi = t.hist.length - 1;
+      }
+      touch();
+    };
+
+    if (a.kind === "web") {
+      // Not ours to route or to block: hand it straight to the frame. Without a
+      // network proxy this will fail to load, and the frame shows that itself.
+      const f = frameEl(t);
+      if (f) f.src = a.url;
+      t.status = "ok";
+      t.title = a.url.replace(/^https?:\/\//i, "").split("/")[0] || a.url;
+      done(true);
+      return;
+    }
+
+    const os = await getOS();
+    const url = `/__preview__/${os.previewId}/${a.port}${a.path}`;
+    // Ask once before handing the URL to the frame: the bridge answers an unserved
+    // port with a 502 whose body would otherwise render as raw text inside it. This
+    // costs the in-OS server a second GET per navigation, which buys telling
+    // "nothing is listening" apart from "the page loaded" — and the response body
+    // gives us the <title> the sandboxed frame can't.
+    let res, body;
     try {
       res = await fetch(url, { cache: "no-store" });
+      body = await res.text();
     } catch (e) {
       t.status = "error";
       t.error = "Couldn't reach the OS: " + String(e?.message || e);
-      touch();
+      done(false);
       return;
     }
     if (!res.ok) {
       t.status = "error";
       t.error =
         res.status === 502
-          ? `Nothing is listening on port ${a.port}. Start a server in the Terminal, then reload.`
+          ? `Nothing in this OS is listening on port ${a.port}. Start a server, then reload.`
           : `The server answered ${res.status} ${res.statusText || ""}`.trim();
-      touch();
+      done(false);
       return;
     }
     const f = frameEl(t);
     if (f) f.src = url;
     t.status = "ok";
-    touch();
-  }
-
-  // The frame is same-origin (the SW serves it under our own origin), so we can read
-  // the loaded document's title for the tab label.
-  function onFrameLoad(t) {
-    if (t.status !== "ok") return;
-    const f = frameEl(t);
-    try {
-      const title = f && f.contentDocument && f.contentDocument.title;
-      if (title) { t.title = title; touch(); }
-    } catch {
-      // Cross-origin or torn down — keep the host:port label.
-    }
+    t.title = titleOf(body) || `localhost:${a.port}`;
+    done(true);
   }
 
   const go = () => { const t = activeTab(); if (t) navigate(t, addrEl() ? addrEl().value : ""); };
   const reload = () => {
     const t = activeTab();
-    if (!t) return;
-    if (t.status !== "ok") return void navigate(t, addrOf(t) || (addrEl() && addrEl().value) || "");
-    const f = frameEl(t);
-    try { f.contentWindow.location.reload(); } catch { navigate(t, addrOf(t)); }
+    if (t && t.addr) navigate(t, t.addr, false);
   };
+  // Back/Forward walk OUR stack, not the frame's (sandboxed: its history is opaque).
   const hist = (delta) => {
     const t = activeTab();
-    if (!t || t.status !== "ok") return;
-    const f = frameEl(t);
-    try { f.contentWindow.history.go(delta); } catch { /* nothing to go to */ }
+    if (!t) return;
+    const next = t.hi + delta;
+    if (next < 0 || next >= t.hist.length) return;
+    t.hi = next;
+    navigate(t, t.hist[next], false);
   };
 
   onMount(() => {
@@ -160,16 +180,16 @@ export default function BrowserApp({ win }) {
   });
 
   const tabMenu = (t) => contextMenu(() => [
-    { label: "Reload", icon: "↻", disabled: t.status !== "ok", action: () => { showTab(t); reload(); } },
+    { label: "Reload", icon: "↻", disabled: !t.addr, action: () => { showTab(t); reload(); } },
     { separator: true },
     { label: "Close Tab", icon: "✕", action: () => closeTab(t) },
     { label: "Close Others", disabled: st.tabs.length <= 1, action: () => st.tabs.slice().forEach((x) => x.id !== t.id && closeTab(x)) },
   ]);
 
   const viewMenu = contextMenu(() => [
-    { label: "Back", icon: "←", disabled: !activeTab() || activeTab().status !== "ok", action: () => hist(-1) },
-    { label: "Forward", icon: "→", disabled: !activeTab() || activeTab().status !== "ok", action: () => hist(1) },
-    { label: "Reload", icon: "↻", disabled: !activeTab() || activeTab().status !== "ok", action: () => reload() },
+    { label: "Back", icon: "←", disabled: !canBack(), action: () => hist(-1) },
+    { label: "Forward", icon: "→", disabled: !canFwd(), action: () => hist(1) },
+    { label: "Reload", icon: "↻", disabled: !activeTab() || !activeTab().addr, action: () => reload() },
     { separator: true },
     { label: "New Tab", icon: "＋", action: () => newTab() },
   ]);
@@ -187,8 +207,8 @@ export default function BrowserApp({ win }) {
       </div>
 
       <div class="bw-bar">
-        <button class="bw-nav" title="Back" onclick={() => hist(-1)}>←</button>
-        <button class="bw-nav" title="Forward" onclick={() => hist(1)}>→</button>
+        <button class="bw-nav" title="Back" disabled={!canBack()} onclick={() => hist(-1)}>←</button>
+        <button class="bw-nav" title="Forward" disabled={!canFwd()} onclick={() => hist(1)}>→</button>
         <button class="bw-nav" title="Reload" onclick={() => reload()}>↻</button>
         <input
           id={addrId}
@@ -206,14 +226,28 @@ export default function BrowserApp({ win }) {
             key={t.id}
             id={frameId(t.id)}
             class={"bw-frame" + (st.activeId === t.id ? " on" : "")}
-            title="In-OS page"
-            onload={() => onFrameLoad(t)}
+            title="Page"
+            referrerpolicy="no-referrer"
+            /* NOT sandboxed — deliberately, and this is a real gap. A sandbox without
+               `allow-same-origin` gives the frame an opaque origin, and a
+               cross-origin-isolated page refuses to embed one at all
+               (ERR_BLOCKED_BY_RESPONSE / CoepFrameResourceNeedsCoepHeader) — verified
+               against every sandbox combination: the frame renders only when
+               `allow-same-origin` is present. We can't drop the isolation either, since
+               the kernel needs SharedArrayBuffer. And `sandbox` WITH `allow-same-origin`
+               would be theatre: the page keeps our origin, so it can reach parent.document
+               and strip the attribute off itself.
+               Real containment needs previews served from a SEPARATE ORIGIN, which is a
+               design change (a bootstrap client + SW on that origin, relaying to this page
+               cross-origin), not an attribute. Until then a served page is same-origin
+               with the desktop — it's your own code, but it is not contained. */
           />
         ))}
         {/* One overlay for the active tab's non-page states, a SIBLING of the frame
             list (nesting it inside would break the list reconciler). A children block
             must be a single EXPRESSION — a block-bodied arrow gets stringified into
-            the DOM instead of bound — hence the ternary chain. */}
+            the DOM instead of bound — hence the ternary chain. A new tab is blank on
+            purpose. */}
         {() =>
           activeStatus() === "ok" ? null
           : activeStatus() === "loading" ? (
@@ -226,16 +260,7 @@ export default function BrowserApp({ win }) {
               </div>
             </div>
           ) : (
-            <div class="bw-page">
-              <div class="bw-msg">
-                <div class="bw-msg-h">Browse this OS</div>
-                <div class="bw-msg-p">
-                  Every address here is a process in WorkerOS listening on a port — there's no
-                  network. Start a server in the Terminal, then enter its port above.
-                </div>
-                <pre class="bw-msg-code">node /srv/server.js &amp;</pre>
-              </div>
-            </div>
+            <div class="bw-page" />
           )
         }
       </div>

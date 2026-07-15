@@ -19,6 +19,15 @@ Notable changes to the WorkerOS website + live playground, built with the
   the page. Unserved ports and non-OS addresses get a themed explanation instead of
   raw 502 text. Verified headlessly against two real in-OS Node servers (17 checks)
   — no console errors.
+  **Not sandboxed, and that's a real gap.** A `sandbox` without `allow-same-origin`
+  gives the frame an opaque origin, and a cross-origin-isolated page refuses to embed
+  one at all (`CoepFrameResourceNeedsCoepHeader`) — verified across every sandbox
+  combination: the frame renders only when `allow-same-origin` is present, which would
+  be theatre, since the page then keeps our origin and can strip the attribute off
+  itself. The isolation can't be dropped either — the kernel needs `SharedArrayBuffer`.
+  Real containment needs previews served from a **separate origin** (a bootstrap client
+  + service worker there, relaying cross-origin to the desktop). Until then a served
+  page is same-origin with the desktop.
 - **System Monitor — everything the OS is running, in one window.** The desktop's
   apps (window count + live state: focused / running / minimized, with Focus / New
   Window / Close All on right-click) above the kernel's real process table (PID /
@@ -285,6 +294,24 @@ Notable changes to the WorkerOS website + live playground, built with the
   `os/processes.js`, the `.proc-*` table styles) stay where the monitor uses them.
 
 ### Fixed
+- **"Nothing is listening on that port" while your server was running.** Each tab boots
+  its own kernel, and the service worker — shared by the whole origin — was picking an
+  arbitrary tab to route a preview request through. With a second playground tab open
+  it routinely picked the wrong one, so the request hit a kernel with nothing on that
+  port. The preview URL now names the OS instance
+  (`/__preview__/<osId>/<port>/…`, see the workeros-web changelog) and only that tab's
+  bridge answers. This also closes the leak in the other direction: a tab could
+  previously load a *different* tab's server.
+- **Window text couldn't be selected or copied.** The desktop set `user-select: none`
+  on its root so dragging chrome wouldn't smear a selection, which also killed
+  selection of the content inside every window. Window bodies are selectable again;
+  chrome (title bars, dock, tabs, toolbars, sidebars, table headers) still isn't. The
+  Terminal is unaffected — xterm draws its own selection and always had Copy.
+- **The Browser no longer refuses an address.** `google.com` and friends are handed to
+  the frame instead of being rejected as "not an address in this OS"; deciding what you
+  may visit isn't the browser's job. There's no outbound network yet, so they won't
+  load until a proxy lands — but the browser tries. A new tab is now blank rather than
+  showing a start page.
 - **The preview bridge was never installed on the desktop.** The service worker has
   been intercepting `/__preview__/<port>/…` all along, but nothing on the rebuilt
   playground relayed those requests into the kernel injector, so every one 502'd with
