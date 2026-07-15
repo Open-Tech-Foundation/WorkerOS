@@ -1096,6 +1096,47 @@ pre.code .a { color: var(--accent-soft); }
 .proc-kill9:hover { color: #fff; background: #e5484d; border-color: #e5484d; }
 .proc-error { padding: 8px 12px; color: #e5484d; font-size: 12px; font-family: var(--mono); }
 
+/* ---------- system monitor ----------
+   Apps over the kernel's process table. The process half reuses the .proc-* table
+   wholesale; only the app half needs its own grid. */
+.app-mon { height: 100%; display: flex; flex-direction: column; background: var(--bg-elev); }
+.mon-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px; border-bottom: 1px solid var(--line-soft); flex: 0 0 auto;
+}
+.mon-sum { font-size: 12px; font-weight: 600; color: var(--text-dim); }
+.mon-scroll { flex: 1; min-height: 0; overflow: auto; }
+.mon-sect { padding: 12px 0 4px; }
+.mon-h {
+  margin: 0 0 6px; padding: 0 12px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-faint);
+}
+.mon-row {
+  display: grid;
+  grid-template-columns: 20px 1fr 68px 88px auto;
+  align-items: center; gap: 10px;
+  padding: 5px 12px; font-family: var(--mono); font-size: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line-soft) 55%, transparent);
+}
+.mon-head {
+  font-family: var(--sans); font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-faint);
+  background: var(--bg-elev-2); border-bottom: 1px solid var(--line-soft);
+}
+.mon-app-ico { font-size: 13px; line-height: 1; }
+.mon-app-name { color: var(--text); font-family: var(--sans); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mon-app-wins { color: var(--text-dim); font-variant-numeric: tabular-nums; text-align: center; }
+/* Scoped to .mon-app-state: the process table owns the bare .st-* names. */
+.mon-app-state { font-size: 11px; }
+.mon-app-state.st-focused { color: #3ecf8e; }
+.mon-app-state.st-running { color: var(--text-dim); }
+.mon-app-state.st-minimized, .mon-app-state.st-stopped { color: var(--text-faint); }
+.mon-act { display: flex; gap: 5px; }
+.mon-empty { padding: 10px 12px; font-size: 12px; color: var(--text-faint); }
+/* Inside the monitor the process table scrolls with the page, not on its own. */
+.app-mon .proc-table, .app-mon .proc-body { flex: none; min-height: 0; overflow: visible; }
+
 /* ---------- welcome app ---------- */
 .app-welcome { padding: 28px 26px; }
 .app-welcome-mark {

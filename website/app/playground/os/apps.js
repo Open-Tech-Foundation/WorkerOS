@@ -11,6 +11,7 @@ export const APP_META = [
   { id: "browser", name: "Browser", icon: "🧭", w: 760, h: 520, pinned: true },
   { id: "editor", name: "Editor", icon: "✏️", w: 720, h: 500, pinned: true, multi: true },
   { id: "processes", name: "Processes", icon: "📊", w: 560, h: 420, pinned: true },
+  { id: "monitor", name: "System Monitor", icon: "📈", w: 640, h: 520, pinned: true },
   { id: "settings", name: "Settings", icon: "⚙️", w: 560, h: 520, pinned: true },
   { id: "welcome", name: "Welcome", icon: "👋", w: 520, h: 360 },
 ];

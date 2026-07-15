@@ -8,6 +8,17 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **System Monitor — everything the OS is running, in one window.** The desktop's
+  apps (window count + live state: focused / running / minimized, with Focus / New
+  Window / Close All on right-click) above the kernel's real process table (PID /
+  PPID / STATE / COMMAND, with SIGTERM / SIGKILL). Both halves update live and carry
+  the same right-click affordances as the rest of the DE. Verified headlessly
+  (11 checks) — no console errors.
+  **No CPU/RAM columns:** the kernel doesn't account for them — `ps` reports pid /
+  ppid / pgid / argv / cwd / state, and its `start_time` field is never fed a clock,
+  so there's no honest per-process CPU, memory or uptime to show yet. Those columns
+  need kernel-side accounting first; a made-up number in a system monitor is worse
+  than an absent one.
 - **Settings rebuilt as a real control panel — sidebar + content.** Two panes: a
   sidebar of sections on the left (Appearance / Storage / About), the selected
   section's content on the right, instead of one long scroll. **About this system**
