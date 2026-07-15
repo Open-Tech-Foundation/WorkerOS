@@ -127,8 +127,7 @@ if (typeof window === "undefined") {
       client.postMessage({ type: "workeros-preview", osId, port, bytes }, [ch.port2]);
     });
 
-  const handlePreview = (event, osId, port, path) => {
-    event.respondWith(
+  const previewResponse = (event, osId, port, path) =>
       (async () => {
         const req = event.request;
         const body =
@@ -179,8 +178,19 @@ if (typeof window === "undefined") {
         hdrs.set("Cross-Origin-Opener-Policy", "same-origin");
         const noBody = status === 204 || status === 304 || req.method === "HEAD";
         return new Response(noBody ? null : rbody, { status, statusText, headers: hdrs });
-      })(),
-    );
+      })();
+
+  const handlePreview = (event, osId, port, path) => event.respondWith(previewResponse(event, osId, port, path));
+
+  // A preview page emits absolute asset paths (`/src/main.js`, `/@vite/client`, its
+  // own `import()`ed chunks) that have LOST the `/__preview__/<osId>/<port>/` prefix.
+  // Recover the owning preview from the requesting client (the iframe) and route the
+  // bare path to that dev server — otherwise the request escapes to the network and
+  // returns the host's `index.html` (`text/html`), which a module script rejects for
+  // its MIME type. Returns the preview URL match `[all, osId, port]`, or null.
+  const previewClientMatch = (client) => {
+    try { return new URL(client.url).pathname.match(/^\/__preview__\/(wos[a-z0-9]+)\/(\d+)(?:\/|$)/i); }
+    catch { return null; }
   };
 
   self.addEventListener("fetch", (event) => {
@@ -202,12 +212,34 @@ if (typeof window === "undefined") {
       return;
     }
 
-    // Everything else: COI header injection (coi-serviceworker, verbatim).
+    // Chrome's only-if-cached quirk: such a request must be same-origin mode, or the
+    // SW must stay out of it entirely (no respondWith).
     if (r.cache === "only-if-cached" && r.mode !== "same-origin") return;
+
+    // A same-origin subresource whose URL lacks the preview prefix, but that was
+    // requested BY a preview iframe: route it to that iframe's dev server. This is
+    // how `/src/main.js` & friends (absolute paths Vite emits) reach the guest.
+    if (url.origin === self.location.origin && event.clientId) {
+      event.respondWith(
+        (async () => {
+          const client = await self.clients.get(event.clientId);
+          const cm = client && previewClientMatch(client);
+          if (cm) return previewResponse(event, cm[1], parseInt(cm[2], 10), url.pathname + url.search);
+          return coiFetch(r);
+        })(),
+      );
+      return;
+    }
+
+    // Everything else: COI header injection (coi-serviceworker, verbatim).
+    event.respondWith(coiFetch(r));
+  });
+
+  // COI header injection (coi-serviceworker, verbatim) for a normal network fetch.
+  const coiFetch = (r) => {
     const request =
       coepCredentialless && r.mode === "no-cors" ? new Request(r, { credentials: "omit" }) : r;
-    event.respondWith(
-      fetch(request)
+    return fetch(request)
         .then((response) => {
           if (response.status === 0) return response;
           const newHeaders = new Headers(response.headers);
@@ -223,9 +255,8 @@ if (typeof window === "undefined") {
             headers: newHeaders,
           });
         })
-        .catch((e) => console.error(e)),
-    );
-  });
+        .catch((e) => console.error(e));
+  };
 } else {
   // ============================ window: self-register ======================
   (() => {
