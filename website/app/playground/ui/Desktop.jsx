@@ -5,10 +5,10 @@
 
 import { onMount } from "@opentf/web";
 import { wm, openWindow, closeLauncher, activateApp, openApp, openLauncher } from "../os/wm.js";
-import { seedHome } from "../os/vfs.js";
 import { attachTheme, theme, setTheme } from "../os/theme.js";
-import { startState } from "../os/state.js";
+import { bootDesktop } from "../os/boot.js";
 import { contextMenu } from "../os/menus.js";
+import BootSplash from "./BootSplash.jsx";
 import WindowHost from "./WindowHost.jsx";
 import Launcher from "./Launcher.jsx";
 import Dock from "./Dock.jsx";
@@ -22,20 +22,17 @@ export default function Desktop() {
     // palette/accent/wallpaper (and follows the 'system' preference), independent
     // of the site's light/dark toggle.
     const detachTheme = attachTheme(document.querySelector(".dt"));
-    // Seed the home directory early so it exists before Files/Editor open (idempotent).
-    seedHome().catch(() => {});
-    // Hydrate settings + restore the saved session from the real FS. Only fall back
-    // to a fresh Welcome window if nothing was restored; a timeout guards against a
-    // slow kernel so the desktop is never left empty. `welcomed` + the length check
-    // keep it idempotent under the SSG hydration double-mount.
+    // Boot the OS: kernel → filesystem → saved session, with BootSplash reporting each
+    // stage. Only fall back to a fresh Welcome window if the session restored nothing.
+    // `welcomed` + the length check keep it idempotent under the SSG hydration
+    // double-mount (bootDesktop itself is a shared promise, so it runs once).
     let welcomed = false;
     const ensureWelcome = () => {
       if (welcomed || wm.windows.length > 0) return;
       welcomed = true;
       openWindow({ appId: "welcome", title: "Welcome", icon: "👋", w: 520, h: 360 });
     };
-    startState().then((n) => { if (n === 0) ensureWelcome(); }).catch(ensureWelcome);
-    setTimeout(ensureWelcome, 1800);
+    bootDesktop().then((n) => { if (n === 0) ensureWelcome(); }).catch(ensureWelcome);
     // Escape dismisses the launcher.
     const onKey = (e) => {
       if (e.key === "Escape") closeLauncher();
@@ -79,6 +76,7 @@ export default function Desktop() {
         ))}
       </div>
 
+      <BootSplash />
       <Launcher />
       <Dock />
       <Dialog />

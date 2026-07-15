@@ -8,6 +8,13 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **A boot splash — the OS shows you it's starting.** Booting the kernel (worker +
+  wasm) and reading the session back off the FS takes a moment, and the playground
+  spent it as a blank white page. Startup is now an explicit staged pipeline
+  (`os/boot.js`: kernel → filesystem → session) that publishes progress, and the
+  splash paints on the first frame with the real stage it's on, then fades out to
+  reveal a desktop that's already live. A stage that fails is reported but doesn't
+  block boot. Verified headlessly (8 checks) — no console errors.
 - **App-modal dialogs — a dialog belongs to its window, not the whole OS.** New file,
   rename, delete, and the Editor's Save As now raise a sheet scoped to the app window
   that asked for it: the dialog service takes a `winId`, raises that window, and the

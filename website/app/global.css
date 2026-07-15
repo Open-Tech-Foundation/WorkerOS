@@ -444,6 +444,77 @@ pre.code .a { color: var(--accent-soft); }
 
 .dt-layer { position: absolute; inset: 0; }
 
+/* ---------- boot splash ----------
+   Covers the desktop until the kernel + FS + session are up. It's above everything
+   (including the dock) and opaque, so the DE is only revealed once it's real. */
+.boot {
+  position: absolute;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  background: var(--wos-wall);
+  transition: opacity 0.4s ease, visibility 0.4s;
+}
+.boot.is-done { opacity: 0; visibility: hidden; pointer-events: none; }
+
+.boot-mark { position: relative; display: grid; place-items: center; width: 88px; height: 88px; }
+.boot-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  animation: boot-spin 0.9s linear infinite;
+}
+.boot-logo {
+  font-family: var(--mono);
+  font-size: 34px;
+  font-weight: 700;
+  color: var(--accent);
+  text-shadow: 0 0 24px var(--accent-glow);
+}
+@keyframes boot-spin { to { transform: rotate(360deg); } }
+
+.boot-name {
+  margin-top: 18px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.boot-bar {
+  margin-top: 22px;
+  width: 200px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+.boot-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.35s ease;
+}
+.boot-step {
+  margin-top: 12px;
+  height: 16px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-ring { animation: none; }
+  .boot, .boot-fill { transition: none; }
+}
+
 /* ---------- window ---------- */
 .win {
   position: absolute;
