@@ -8,6 +8,12 @@ Notable changes to the WorkerOS website + live playground, built with the
 ## [Unreleased]
 
 ### Added
+- **Settings rebuilt as a real control panel — sidebar + content.** Two panes: a
+  sidebar of sections on the left (Appearance / Storage / About), the selected
+  section's content on the right, instead of one long scroll. **About this system**
+  is now a Settings section rather than its own app — system info belongs in the
+  control panel, so the About app is gone. Verified headlessly (11 checks) — no
+  console errors.
 - **A boot splash — the OS shows you it's starting.** Booting the kernel (worker +
   wasm) and reading the session back off the FS takes a moment, and the playground
   spent it as a blank white page. Startup is now an explicit staged pipeline

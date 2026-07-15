@@ -10,7 +10,6 @@ import ProcessesApp from "./apps/ProcessesApp.jsx";
 import FilesApp from "./apps/FilesApp.jsx";
 import EditorApp from "./apps/EditorApp.jsx";
 import SettingsApp from "./apps/SettingsApp.jsx";
-import AboutApp from "./apps/AboutApp.jsx";
 import PlaceholderApp from "./apps/PlaceholderApp.jsx";
 
 export default function AppView({ win }) {
@@ -22,6 +21,5 @@ export default function AppView({ win }) {
     : id === "editor" ? <EditorApp win={win} />
     : id === "settings" ? <SettingsApp win={win} />
     : id === "welcome" ? <WelcomeApp win={win} />
-    : id === "about" ? <AboutApp win={win} />
     : <PlaceholderApp win={win} />;
 }

@@ -895,8 +895,31 @@ pre.code .a { color: var(--accent-soft); }
 .toast-error { border-left-color: #e5484d; }
 .toast-error .toast-ico { background: #e5484d; }
 
-/* ---------- settings app ---------- */
-.app-settings { height: 100%; overflow: auto; background: var(--bg-elev); padding: 18px 20px; }
+/* ---------- settings app ----------
+   Two panes, like a real control panel: a fixed sidebar of sections, and the
+   selected section's content scrolling on the right. */
+.app-settings { height: 100%; display: flex; min-height: 0; background: var(--bg-elev); }
+.set-side {
+  flex: 0 0 168px;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 8px;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  overflow: auto;
+}
+.set-nav {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--text-dim);
+  font: inherit; font-size: 13px; font-weight: 600; text-align: left; cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.set-nav:hover { background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text); }
+.set-nav.on { background: var(--accent); color: #170a02; }
+.set-nav-ico { font-size: 13px; line-height: 1; }
+.set-nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.set-pane { flex: 1; min-width: 0; overflow: auto; padding: 18px 20px; }
 .set-section { margin-bottom: 22px; }
 .set-h {
   margin: 0 0 12px; font-size: 12px; font-weight: 700; letter-spacing: 0.06em;
@@ -949,6 +972,18 @@ pre.code .a { color: var(--accent-soft); }
 }
 .set-btn:hover:not(:disabled) { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 .set-btn:disabled { opacity: 0.5; cursor: default; }
+/* About section: system identity, then the live kernel facts. */
+.set-about-hero { display: flex; align-items: center; gap: 14px; padding: 4px 0 18px; }
+.set-about-mark {
+  flex: none; width: 46px; height: 46px; border-radius: 12px;
+  display: grid; place-items: center;
+  background: linear-gradient(140deg, var(--accent), #ff5e3a);
+  color: #170a02; font-family: var(--mono); font-weight: 800; font-size: 22px;
+  box-shadow: 0 6px 18px -6px var(--accent);
+}
+.set-about-name { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em; color: var(--text); }
+.set-about-tag { margin-top: 3px; font-size: 0.82rem; color: var(--text-dim); line-height: 1.5; }
+
 .set-about { margin: 0; display: grid; gap: 8px; }
 .set-about > div { display: flex; justify-content: space-between; font-size: 12.5px; }
 .set-about dt { color: var(--text-faint); }
@@ -1060,25 +1095,6 @@ pre.code .a { color: var(--accent-soft); }
 .proc-kill:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 .proc-kill9:hover { color: #fff; background: #e5484d; border-color: #e5484d; }
 .proc-error { padding: 8px 12px; color: #e5484d; font-size: 12px; font-family: var(--mono); }
-
-/* ---------- about app ---------- */
-.app-about {
-  height: 100%; display: flex; flex-direction: column; align-items: center;
-  justify-content: center; gap: 6px; padding: 28px; text-align: center;
-}
-.app-about-mark {
-  width: 46px; height: 46px; border-radius: 12px; margin-bottom: 8px;
-  display: grid; place-items: center;
-  background: linear-gradient(140deg, var(--accent), #ff5e3a);
-  color: #170a02; font-family: var(--mono); font-weight: 800; font-size: 22px;
-  box-shadow: 0 6px 18px -6px var(--accent);
-}
-.app-about h2 { margin: 0; font-size: 1.2rem; letter-spacing: -0.02em; }
-.app-about-tag { margin: 0 0 8px; color: var(--text-dim); font-size: 0.9rem; }
-.app-about-meta { margin: 0; display: grid; gap: 6px; width: 100%; max-width: 300px; }
-.app-about-meta > div { display: flex; justify-content: space-between; gap: 12px; padding: 6px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: color-mix(in srgb, var(--text) 4%, transparent); }
-.app-about-meta dt { margin: 0; color: var(--text-faint); font-size: 0.82rem; }
-.app-about-meta dd { margin: 0; font-family: var(--mono); font-size: 0.82rem; color: var(--text); font-variant-numeric: tabular-nums; }
 
 /* ---------- welcome app ---------- */
 .app-welcome { padding: 28px 26px; }

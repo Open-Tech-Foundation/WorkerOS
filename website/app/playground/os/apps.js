@@ -13,7 +13,6 @@ export const APP_META = [
   { id: "processes", name: "Processes", icon: "📊", w: 560, h: 420, pinned: true },
   { id: "settings", name: "Settings", icon: "⚙️", w: 560, h: 520, pinned: true },
   { id: "welcome", name: "Welcome", icon: "👋", w: 520, h: 360 },
-  { id: "about", name: "About", icon: "ℹ️", w: 460, h: 360 },
 ];
 
 /** Metadata for an id, or a safe fallback. */
