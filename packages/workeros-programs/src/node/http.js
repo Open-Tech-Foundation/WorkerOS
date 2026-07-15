@@ -76,6 +76,35 @@ export function createHttp(sys, EventEmitter, net) {
       this.url = null;
       this.httpVersion = "1.1";
       this.complete = false;
+      this.statusCode = null;
+      this.statusMessage = "";
+      this._encoding = null;
+    }
+    // Node's IncomingMessage is a Readable; consumers routinely call these. We emit
+    // 'data'/'end' in flowing mode, so `setEncoding` decodes emitted chunks and
+    // `pipe` forwards them — enough for http clients (`res.setEncoding('utf8')`,
+    // `res.pipe(dest)`) without pulling the full stream machinery in.
+    setEncoding(enc) { this._encoding = enc; return this; }
+    pause() { this.socket && this.socket.pause && this.socket.pause(); return this; }
+    resume() { this.socket && this.socket.resume && this.socket.resume(); return this; }
+    isPaused() { return false; }
+    read() { return null; }
+    unpipe() { return this; }
+    destroy(err) { this.socket && this.socket.destroy && this.socket.destroy(err); return this; }
+    pipe(dest, opts) {
+      this.on("data", (c) => dest.write(c));
+      this.on("end", () => { if ((!opts || opts.end !== false) && dest.end) dest.end(); });
+      this.on("error", (e) => dest.destroy && dest.destroy(e));
+      dest.emit && dest.emit("pipe", this);
+      return dest;
+    }
+    emit(ev, data) {
+      if (ev === "data" && this._encoding && data && typeof data !== "string") {
+        data = typeof data.toString === "function" && data.length !== undefined
+          ? Buffer.from(data).toString(this._encoding)
+          : data;
+      }
+      return super.emit(ev, data);
     }
   }
 
@@ -195,7 +224,13 @@ export function createHttp(sys, EventEmitter, net) {
     constructor(opts, requestListener) {
       super();
       if (typeof opts === "function") { requestListener = opts; opts = {}; }
-      this._net = net.createServer((socket) => this._onConnection(socket));
+      // `allowHalfOpen`: a client that half-closes after sending its request (the
+      // normal HTTP client pattern — write request, shutdown(WR), await response)
+      // must NOT tear down the server's write side. Without this, the request-side
+      // EOF auto-ends the socket before an ASYNC handler (Vite's middleware) writes
+      // the response, so the client gets an empty reply. A sync `res.end()` happened
+      // to beat the EOF; an async one didn't.
+      this._net = net.createServer({ allowHalfOpen: true }, (socket) => this._onConnection(socket));
       // Forward the listener's lifecycle events.
       this._net.on("listening", () => this.emit("listening"));
       this._net.on("close", () => this.emit("close"));
@@ -275,7 +310,11 @@ export function createHttp(sys, EventEmitter, net) {
         buf = concat(buf, chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
         pump();
       });
-      socket.on("end", () => { socket.end?.(); });
+      // The client's read-side EOF (it half-closed after sending the request) must
+      // NOT end our write side — the response still has to go out. `res.end()` closes
+      // the socket once the handler has replied; a keep-alive idle socket is closed
+      // when the peer fully goes away (the pump reaches EOF and, since we then have
+      // no writable work, the socket finishes closing).
       socket.on("error", () => {});
     }
 

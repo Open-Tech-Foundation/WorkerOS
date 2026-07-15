@@ -25,6 +25,7 @@ import { getBundler } from "/lib/workeros-node/node-bundler.js";
 import { createTty } from "/lib/workeros-node/tty.js";
 import { createEventLoop } from "/lib/workeros-node/event-loop.js";
 import { createWorkerThreads } from "/lib/workeros-node/worker-threads.js";
+import { Buffer as NodeBuffer } from "/lib/workeros-node/buffer.js";
 
 const enc = new TextEncoder();
 const err = (s) => sys.write(2, enc.encode(s));
@@ -351,15 +352,20 @@ sys.onSignal(async (sig) => {
 // `import process from 'node:process'` / `require('tty')` alike resolve to these
 // exact objects. (chalk's supports-color needs both.)
 const nodeBuiltins = { process, tty, worker_threads: createWorkerThreads(sys, workerInit) };
+
+// Node globals a browser worker doesn't provide: `global` (Node's alias for the
+// global object) and `Buffer` (which a huge amount of npm expects ambient). Set
+// these BEFORE makeBuiltins: builtins that capture `globalThis.Buffer` at
+// construction (net/http do, for socket-data chunks) would otherwise capture
+// `undefined` and later throw `Cannot read properties of undefined (reading
+// 'from')` — the bug that stopped `http.Server` (hence a Vite dev server) from
+// delivering a request to its handler.
+globalThis.global = globalThis;
+globalThis.Buffer = NodeBuffer;
+
 const builtins = makeBuiltins(sys, nodeBuiltins);
 const fs = builtins.get("fs");
 const path = builtins.get("path");
-
-// Node globals a browser worker doesn't provide, installed before the script
-// loads: `global` (Node's alias for the global object) and `Buffer` (which a huge
-// amount of npm expects ambient — `Buffer.from(...)` at module top level).
-globalThis.global = globalThis;
-globalThis.Buffer = builtins.get("buffer").Buffer;
 // A browser WorkerGlobalScope exposes `self` as a getter-only accessor; Node's
 // worker global lets you assign it. napi-rs's wasm threadpool worker
 // (`wasi-worker.mjs`, spun up by Vite's rolldown bundler) does
