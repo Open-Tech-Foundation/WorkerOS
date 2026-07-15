@@ -6,10 +6,20 @@
 // loopback connection this server accepts.
 //
 // Server: real HTTP/1.1 request parsing, keep-alive, chunked responses, and the
-// `upgrade` event (so `ws` — hence Vite HMR — works over the raw socket). Honest
-// limits (INV-5): no HTTP/2, no trailers, no continue/expect handling, and the
-// client (`request`/`get`) is mapped onto the worker's `fetch` (CORS-bound, per
-// ADR-008) rather than the loopback socket path.
+// `upgrade` event (so `ws` — hence Vite HMR — works over the raw socket).
+//
+// Client (`request`/`get`): the transport depends on where the URL points.
+// `localhost`/`127.0.0.1` is THIS OS, so it goes over the kernel loopback to the
+// process listening on that port — a real socket, every header sent, no CORS. Any
+// other host rides the worker's `fetch` (CORS-bound, ADR-008), because the browser
+// cannot open raw TCP to the outside world. Routing a local URL through `fetch`
+// would leave the OS and hit whatever the *host machine* serves on that port.
+//
+// Honest limits (INV-5): no HTTP/2, no trailers, no continue/expect handling; the
+// loopback client does not follow redirects (Node's client doesn't either) while the
+// fetch path does.
+
+import { fetchLoopback, isLoopbackHost } from "/lib/workeros-net/http.js";
 
 const CRLF = "\r\n";
 const enc = new TextEncoder();
@@ -305,6 +315,11 @@ export function createHttp(sys, EventEmitter, net) {
     return out;
   };
 
+  /** Does this URL address a server inside this OS (kernel loopback)? */
+  const isLocalUrl = (u) => {
+    try { return isLoopbackHost(new URL(u).hostname); } catch { return false; }
+  };
+
   // A pending request must hold the event loop open exactly as a live socket does
   // in Node (ADR-021) — a `fetch` is a host promise the guest loop can't see, so
   // without an explicit ref the loop drains mid-request and the process exits
@@ -383,7 +398,18 @@ export function createHttp(sys, EventEmitter, net) {
         let released = false;
         const release = () => { if (!released) { released = true; loop()?.unref(); } };
         queueMicrotask(() => this.emit("socket", this._socket));
-        fetch(o.url, { method: o.method, headers: corsSafeHeaders(o.headers), body, signal: o.signal || this._ac.signal, redirect: "follow" })
+        // A local URL is a socket to a process in this OS: send every header the
+        // caller set (nothing is CORS-checked on a socket). Only the outbound fetch
+        // path needs the safelist.
+        const local = isLocalUrl(o.url);
+        const send = local ? fetchLoopback : fetch;
+        send(o.url, {
+          method: o.method,
+          headers: local ? { ...o.headers } : corsSafeHeaders(o.headers),
+          body,
+          signal: o.signal || this._ac.signal,
+          redirect: "follow",
+        })
           .then((r) => {
             const res = new IncomingMessage(this._socket);
             res.statusCode = r.status;
@@ -393,9 +419,11 @@ export function createHttp(sys, EventEmitter, net) {
             // us the plaintext body, so DON'T forward `content-encoding` (the Node
             // layer, e.g. minipass-fetch, would try to gunzip already-plain data)
             // or `content-length` (it describes the compressed size — now wrong).
+            // Over loopback nothing decoded anything for us: the bytes ARE what the
+            // server wrote, so its own headers still describe them and must survive.
             r.headers.forEach((v, k) => {
               const lk = k.toLowerCase();
-              if (lk === "content-encoding" || lk === "content-length") return;
+              if (!local && (lk === "content-encoding" || lk === "content-length")) return;
               res.headers[k] = v;
               res.rawHeaders.push(k, v);
             });

@@ -7,6 +7,30 @@ guest runtime. Format:
 
 ## [Unreleased]
 
+### Fixed
+- **`localhost` inside WorkerOS now means WorkerOS.** Start a server on port 3000 and
+  `curl http://localhost:3000` returned the page the *developer's own machine* served
+  on 3000 — the in-OS server was listening the whole time, one process away. Guest HTTP
+  clients handed every URL to the worker's `fetch`, which is the host browser's
+  network, so a local request left the OS entirely. An OS whose loopback escapes to the
+  host isn't one.
+  The kernel had loopback all along (`net.rs` connect/listen/accept, exposed as
+  `sys.netConnect`) — nothing spoke HTTP over it. New guest lib
+  **`/lib/workeros-net/http.js`**: HTTP/1.1 wire (de)serialization incl. chunked, plus
+  `fetchLoopback(url, init)` — same shape as `fetch`, real `Response` back, but over a
+  kernel socket. `curl` and `node:http`/`node:https` clients now route by host:
+  localhost/127.0.0.1/0.0.0.0/::1 over the loopback, everything else out through
+  `fetch` (ADR-008, unchanged — npm still reaches the registry).
+  Because a loopback request is a socket and not a browser fetch, headers the browser
+  forbids (`Host`, `User-Agent`, `Cookie`, …) really are sent, nothing is CORS-checked,
+  the server's own `Content-Encoding`/`Content-Length` survive to the caller, and
+  nothing listening surfaces the kernel's `ECONNREFUSED`. Covered by
+  `tools/net-loopback-http.test.js` (14 tests over a fake kernel).
+- **`curl localhost:3000` (no scheme) works.** curl now defaults a schemeless URL to
+  `http://`, as real curl does. `new URL("localhost:3000/x")` reads `localhost:` as the
+  *protocol* and yields an empty host, so the address looked remote and went to `fetch`,
+  which failed.
+
 ### Added
 - **The uutils coreutils tier: 26 utilities as one wasm multicall binary**
   (`crates/wsh-utils` → `/bin/coreutils`, ADR-026). Each utility is one `uu_*`

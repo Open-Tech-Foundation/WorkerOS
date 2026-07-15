@@ -125,6 +125,7 @@ for (const prog of programs) {
  */
 export const libraries = [
   { path: "/lib/workeros-cli/args.js", source: () => fetchText("./cli/args.js") },
+  { path: "/lib/workeros-net/http.js", source: () => fetchText("./net/http.js") },
   { path: "/lib/workeros-node/require-runtime.js", source: () => fetchText("./node/require-runtime.js") },
   { path: "/lib/workeros-node/fs.js", source: () => fetchText("./node/fs.js") },
   { path: "/lib/workeros-node/path.js", source: () => fetchText("./node/path.js") },

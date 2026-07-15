@@ -1,23 +1,32 @@
 // `curl` — transfer a URL over HTTP(S). A guest program (INV-1), installed at
-// /bin/curl and run from wsh. It uses the worker's `fetch` (ADR-008: outbound
-// fetch to a CORS-enabled host) and streams bytes through the `sys` ABI, so you
-// can pull a wasm binary and run it, POST to a JSON API, send headers, etc.:
+// /bin/curl and run from wsh. It streams bytes through the `sys` ABI, so you can
+// pull a wasm binary and run it, POST to a JSON API, send headers, etc.:
 //
 //   curl -o /hello.wasm https://example.com/hello.wasm
 //   /hello.wasm
 //   curl -sS -H 'Accept: application/json' https://api.example.com/thing
-//   curl -X POST -d '{"a":1}' -H 'Content-Type: application/json' https://api…
+//   curl localhost:3000            # a server running in THIS OS
 //
-// The transport is browser `fetch`, so its limits are curl's limits here (INV-5):
-// cross-origin URLs must send CORS headers; forbidden request headers (Host,
-// Cookie, User-Agent, Referer, …) are dropped by the browser; Set-Cookie and
-// unexposed response headers are invisible; there are no raw sockets, no non-HTTP
-// protocols, and no TLS/redirect-chain introspection. Everything `fetch` can
-// express, curl exposes; nothing it can't.
+// Two transports, chosen by the URL's host:
+//
+//   * **localhost / 127.0.0.1** — this OS. The request goes over the kernel's
+//     loopback (`/lib/workeros-net/http.js` → `sys.netConnect`) to whichever process
+//     is listening on that port. A real socket: every header is sent, nothing is
+//     CORS-checked, and `ECONNREFUSED` means nothing is listening.
+//   * **anything else** — the worker's `fetch` (ADR-008), so fetch's limits are
+//     curl's limits (INV-5): cross-origin URLs must send CORS headers; forbidden
+//     request headers (Host, Cookie, User-Agent, Referer, …) are dropped by the
+//     browser; Set-Cookie and unexposed response headers are invisible; no raw
+//     sockets, no non-HTTP protocols, no TLS/redirect-chain introspection.
+//
+// The split matters: `localhost` inside WorkerOS must mean WorkerOS. Handing a local
+// URL to `fetch` would leave the OS and hit whatever the *host machine* happens to
+// serve on that port.
 //
 // Authored as a top-level-await ESM program so it can share the guest argv helper.
 
 import { ArgError, tokenizeArgv } from "/lib/workeros-cli/args.js";
+import { fetchLoopback, isLoopbackHost } from "/lib/workeros-net/http.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -258,8 +267,27 @@ async function buildBody() {
 // Warn once about request headers the browser silently refuses to send.
 const FORBIDDEN = /^(host|cookie|user-agent|referer|origin|connection|content-length|accept-encoding|accept-charset|proxy-|sec-|date|dnt|expect|keep-alive|te|trailer|transfer-encoding|upgrade|via)/i;
 
+/** Default a schemeless URL to http://, like curl does — `curl localhost:3000/x`.
+ *  Without this, `new URL("localhost:3000/x")` reads "localhost:" as the PROTOCOL
+ *  and the host comes back empty, so the address looks remote and gets handed to
+ *  `fetch` (which then fails). */
+function withScheme(u) {
+  const s = String(u || "").trim();
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : "http://" + s;
+}
+
+/** Does this URL address a server inside this OS (kernel loopback) rather than the
+ *  outside world? An unparseable URL is not ours. */
+function isLocalUrl(u) {
+  try {
+    return isLoopbackHost(new URL(u).hostname);
+  } catch {
+    return false;
+  }
+}
+
 async function run(rawUrl) {
-  let url = rawUrl;
+  let url = withScheme(rawUrl);
   const { body, contentType } = await buildBody();
 
   const headers = new Headers();
@@ -271,7 +299,9 @@ async function run(rawUrl) {
       if (name.endsWith(";")) headers.set(name.slice(0, -1), "");
       continue;
     }
-    if (FORBIDDEN.test(name) && !opts.silent) {
+    // Only the browser drops these. A loopback request is a socket to a process in
+    // this OS, so every header we write really goes on the wire — no warning there.
+    if (FORBIDDEN.test(name) && !opts.silent && !isLocalUrl(url)) {
       err("curl: warning: the browser will drop the forbidden header '" + name + "'\n");
     }
     headers.append(name, value);
@@ -313,7 +343,12 @@ async function run(rawUrl) {
   const t0 = Date.now();
   let res;
   try {
-    res = await fetch(url, init);
+    // `localhost` means THIS OS. A local URL goes over the kernel's loopback to the
+    // process listening on that port; anything else rides the worker's `fetch` out
+    // to the real network (ADR-008). Without this split, curl would leave the OS and
+    // hit whatever the *host machine* serves on that port — which is not what
+    // `curl localhost:3000` means when you're inside WorkerOS.
+    res = isLocalUrl(url) ? await fetchLoopback(url, init) : await fetch(url, init);
   } finally {
     if (timer) clearTimeout(timer);
   }
