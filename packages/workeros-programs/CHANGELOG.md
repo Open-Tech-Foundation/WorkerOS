@@ -20,6 +20,15 @@ guest runtime. Format:
   (verified: npm's packument *and* tarball requests appear in the kernel's log).
 
 ### Fixed
+- **`worker.postMessage()` before a Worker is online no longer needs the caller's
+  event loop.** `node:worker_threads` queued such a message and flushed it when the
+  `spawnWorker` reply arrived, which only happens on a turn of the loop — so a caller
+  that posted and then blocked synchronously never sent it. A wasm thread pool does
+  exactly that (rolldown posts its module and shared memory, then parks in
+  `Atomics.wait`), so Vite's bundler deadlocked. A `Worker` now carries a **spawn
+  token** and posts by token straight away, letting the kernel route it; Node's own
+  buffering is likewise independent of the JS loop. `Worker#postMessage` keeps its
+  fire-and-forget shape — only the addressing changed.
 - **`localhost` inside WorkerOS now means WorkerOS.** Start a server on port 3000 and
   `curl http://localhost:3000` returned the page the *developer's own machine* served
   on 3000 — the in-OS server was listening the whole time, one process away. Guest HTTP

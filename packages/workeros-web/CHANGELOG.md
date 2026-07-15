@@ -29,6 +29,31 @@ main-thread client API). Format:
   `NET_LOG_RESULT` on the protocol; a 500-entry ring.
 
 ### Fixed
+- **A guest could capture the kernel's own channel — Vite's bundler died of it.**
+  The program worker held `const kernel = self` and posted through it. But a guest
+  shares the worker's realm, and real Node programs do assign the worker globals:
+  rolldown's wasm binding (`@rolldown/binding-wasm32-wasi`, how Vite bundles when
+  `arch` is `wasm32`) runs a worker that does
+  `Object.assign(globalThis, { self: globalThis, postMessage })` to look like a web
+  worker. `kernel.postMessage` then *was* the guest's function, so every syscall the
+  kernel made re-entered guest code — for that binding, straight back into
+  `sys.workerPost` → `kernel.postMessage` → … until `Maximum call stack size
+  exceeded`. The kernel's channel is now bound at module load, before any guest code
+  runs (`kernelPost`), and inbound uses `addEventListener("message")` rather than an
+  `onmessage` property a guest can displace. A guest may assign whatever it likes to
+  the global; the kernel no longer reads it.
+- **A message posted to a Worker before it came online needed the poster's event
+  loop.** It was queued in the guest and flushed from the `spawnWorker` reply's
+  `.then()` — so a caller that posted and then *blocked* never delivered it. That is
+  precisely what a wasm thread pool does: rolldown posts its module and shared memory,
+  then parks in `Atomics.wait` for the thread to come up. The wait never woke, and the
+  watchdog reaped the dev server as `Killed (CPU time)` (a spin it could not
+  distinguish from a `for(;;)`). A guest now names each Worker with a **spawn token**
+  and posts by token immediately; the kernel registered that token while servicing the
+  earlier `spawnWorker` on the same port, so it routes the message itself. Node buffers
+  such a message on the port, independent of the JS loop — this matches it.
+  Together these two make Vite's dep optimizer work: `vite` pre-bundles React with
+  rolldown and serves a transformed module, under the default watchdog.
 - **The preview transport served one tab's request from another tab's kernel.**
   Every page that boots gets its own kernel, so "port 8080" is meaningless without
   saying whose. The service worker is shared by the whole origin and can't tell which

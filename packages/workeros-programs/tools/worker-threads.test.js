@@ -60,10 +60,16 @@ test("main→worker postMessage routes by threadId; inbound routes to the Worker
   const sys = fakeSys();
   const wt = createWorkerThreads(sys, {});
   const w = new wt.Worker("/w.js");
-  // A message posted before 'online' is buffered, then flushed on spawn.
+  // A message posted before 'online' goes out *now*, addressed by the spawn token
+  // the kernel registered while servicing spawnWorker — buffering it here until
+  // the reply lands would need this thread's event loop, which deadlocks a caller
+  // that posts and then blocks (a wasm thread pool does exactly that).
   w.postMessage({ early: true });
+  const early = sys.posts.at(-1);
+  assert.deepEqual(early.data, { early: true });
+  assert.equal(typeof early.to.token, "number");
   await new Promise((r) => w.on("online", r));
-  assert.deepEqual(sys.posts.at(-1), { to: 42, data: { early: true } });
+  // Once online, the threadId addresses it directly.
   w.postMessage({ hi: 1 });
   assert.deepEqual(sys.posts.at(-1), { to: 42, data: { hi: 1 } });
   const got = await new Promise((r) => { w.on("message", r); sys._dispatch(42, "message", { pong: 2 }); });

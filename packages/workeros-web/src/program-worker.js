@@ -18,7 +18,15 @@ import { createWasiImports } from "../../workeros-programs/src/wasi/host.js";
 import { makeSyncCaller, MAX_SYNC_PAYLOAD } from "./sync-syscall.js";
 import { unframeExecResult } from "./exec-frame.js";
 
-const kernel = self; // the kernel worker created us; postMessage talks back to it.
+// The channel back to the kernel worker that created us. Bound *here*, at module
+// load, before any guest code runs — a guest shares this realm, and real Node
+// programs do assign the worker globals: rolldown's wasm binding runs a worker
+// that does `Object.assign(globalThis, { self: globalThis, postMessage })` to
+// look like a web worker. Reading `self.postMessage` at call time would then find
+// the guest's function and route the kernel's own traffic into it (for that
+// binding, straight back into `sys.workerPost` — an infinite recursion). The
+// kernel's channel is ours; guest assignments to the global are theirs to keep.
+const kernelPost = self.postMessage.bind(self);
 
 let nextCallId = 1;
 const pendingCalls = new Map(); // id → { resolve, reject }
@@ -28,7 +36,7 @@ function call(callName, args) {
   return new Promise((resolve, reject) => {
     const id = nextCallId++;
     pendingCalls.set(id, { resolve, reject });
-    kernel.postMessage({ type: MSG.SYSCALL, id, call: callName, args });
+    kernelPost({ type: MSG.SYSCALL, id, call: callName, args });
   });
 }
 
@@ -51,7 +59,7 @@ const WRITE_CHUNK = 1 << 19; // 512 KiB
 function writeBytes(fd, bytes) {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (!syncWrite) {
-    kernel.postMessage({ type: MSG.SYSCALL, call: "write", args: { fd, data: u8 } });
+    kernelPost({ type: MSG.SYSCALL, call: "write", args: { fd, data: u8 } });
     return u8.length;
   }
   for (let off = 0; off < u8.length; off += WRITE_CHUNK) {
@@ -84,7 +92,7 @@ let exited = false;
 function reportExit(code) {
   if (exited) return;
   exited = true;
-  kernel.postMessage({ type: MSG.PROC_EXIT, code: code | 0 });
+  kernelPost({ type: MSG.PROC_EXIT, code: code | 0 });
 }
 
 /** Build the synchronous-filesystem primitives from a process's SAB sync channel.
@@ -186,7 +194,7 @@ function makeSys(start, syncCall) {
     // FS_EVENT messages are routed here as (watchId, eventType, filename).
     onFsEvent: (cb) => { fsEventDispatch = cb; },
     sighandle: (signal, on) =>
-      kernel.postMessage({ type: MSG.SIGACTION, signal, on: !!on }),
+      kernelPost({ type: MSG.SIGACTION, signal, on: !!on }),
     readdir: (path) => call("readdir", { path }),
     stat: (path) => call("stat", { path }),
     mkdir: (path) => call("mkdir", { path }),
@@ -217,7 +225,7 @@ function makeSys(start, syncCall) {
     spawnWorker: (opts) => call("spawnWorker", opts),
     workerInit: () => call("workerInit", {}),
     workerPost: (to, data) =>
-      kernel.postMessage({ type: MSG.SYSCALL, call: "workerPost", args: { to, data } }),
+      kernelPost({ type: MSG.SYSCALL, call: "workerPost", args: { to, data } }),
     onWorkerEvent: (cb) => {
       workerEventDispatch = cb;
       const queued = pendingWorkerEvents;
@@ -383,7 +391,12 @@ function installGlobals(start, sys) {
   };
 }
 
-self.onmessage = async (ev) => {
+// `addEventListener`, not `self.onmessage =`, for the same reason `kernelPost` is
+// bound above: a guest sharing this realm may assign `globalThis.onmessage` (the
+// wasm bindings that emulate a web worker do), which would *replace* an
+// `onmessage` handler and cut this process off from the kernel. A listener is
+// held independently of that property, so both can coexist.
+self.addEventListener("message", async (ev) => {
   const msg = ev.data;
   if (msg.type === MSG.SYSCALL_RESULT) {
     const p = pendingCalls.get(msg.id);
@@ -396,7 +409,7 @@ self.onmessage = async (ev) => {
   if (msg.type === MSG.PING) {
     // Watchdog liveness probe (ADR-020): answering proves this worker's event
     // loop turns. A synchronous spin never reaches here — that's the signal.
-    kernel.postMessage({ type: MSG.PONG });
+    kernelPost({ type: MSG.PONG });
     return;
   }
   if (msg.type === MSG.SIGNAL) {
@@ -467,7 +480,7 @@ self.onmessage = async (ev) => {
 
   // One synchronous-syscall channel per process (SAB + Atomics). Both the WASI
   // host and a JS guest's `sys.syncFs` block on it; only one guest runs at a time.
-  const syncCall = makeSyncCaller(msg.syncSab, () => kernel.postMessage({ type: MSG.SYNC }));
+  const syncCall = makeSyncCaller(msg.syncSab, () => kernelPost({ type: MSG.SYNC }));
   // From here on, `sys.write` is a real blocking write (backpressure + EPIPE,
   // ADR-023). A broken-pipe error only comes back if this process catches
   // SIGPIPE — the default disposition already killed it otherwise.
@@ -494,7 +507,7 @@ self.onmessage = async (ev) => {
       measuring = true;
       try {
         const m = await performance.measureUserAgentSpecificMemory();
-        kernel.postMessage({ type: MSG.MEM_SAMPLE, bytes: m.bytes });
+        kernelPost({ type: MSG.MEM_SAMPLE, bytes: m.bytes });
       } catch { /* API refused (e.g. isolation lost); sampling just stops mattering */ }
       measuring = false;
     }, 3000);
@@ -525,12 +538,12 @@ self.onmessage = async (ev) => {
     reportWorkerError(err);
     reportExit(1);
   }
-};
+});
 
 /** Report an uncaught error to the kernel worker; it relays a WORKER_ERROR to the
  *  spawner iff this process was spawned as a worker_threads Worker (else ignored). */
 function reportWorkerError(err) {
-  kernel.postMessage({
+  kernelPost({
     type: MSG.WORKER_ERROR_REPORT,
     message: err && err.message ? String(err.message) : String(err),
     stack: err && err.stack ? String(err.stack) : undefined,

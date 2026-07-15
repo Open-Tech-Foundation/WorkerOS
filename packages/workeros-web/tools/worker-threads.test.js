@@ -114,3 +114,85 @@ test("worker_threads: round-trip, workerData, isMainThread, terminate", opts, as
   // A worker that threw surfaced its real message on the parent's 'error' event.
   assert.ok(lines.includes("worker-error: boom-from-worker"), result.out);
 });
+
+// A message posted before the worker is online must not need the *poster's* event
+// loop to be delivered. Real Node buffers it on the port; a wasm thread pool
+// (rolldown's, via emnapi) posts its module/memory and then parks in Atomics.wait
+// for the thread to come up — if delivery waited for a turn of the loop that never
+// comes, that wait deadlocks and the watchdog reaps the process as "CPU time".
+test("worker_threads: a message posted before online reaches a parent that then blocks", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      await os.fs.write(
+        "/proj/w.js",
+        [
+          "const { parentPort } = require('worker_threads');",
+          "parentPort.on('message', (m) => {",
+          "  const view = new Int32Array(m.sab);",
+          "  Atomics.store(view, 0, 42);",
+          "  Atomics.notify(view, 0);",
+          "});",
+        ].join("\n"),
+      );
+      await os.fs.write(
+        "/proj/main.js",
+        [
+          "const { Worker } = require('worker_threads');",
+          "const sab = new SharedArrayBuffer(16);",
+          "const view = new Int32Array(sab);",
+          "const w = new Worker('/proj/w.js');",
+          "w.postMessage({ sab }); // before 'online' — no threadId yet",
+          "// Park this thread: from here the event loop cannot deliver anything.",
+          "const r = Atomics.wait(view, 0, 0, 10000);",
+          "console.log('wait:', r, 'value:', Atomics.load(view, 0));",
+          "process.exit(0);",
+        ].join("\n"),
+      );
+      return window.run(os, ["node", "/proj/main.js"], { cwd: "/proj" });
+    }),
+  );
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  // "ok" (not "timed-out"): the worker got the message and woke the parked parent.
+  assert.match(result.out, /wait: ok value: 42/, result.out);
+});
+
+// A guest shares the program worker's realm, and real Node programs assign the
+// worker globals: rolldown's wasi worker does `Object.assign(globalThis, { self:
+// globalThis, postMessage })` to look like a web worker. That must not capture the
+// kernel's own channel — when it did, the kernel's traffic re-entered the guest's
+// postMessage (→ sys.workerPost → kernel.postMessage → …) and the process died of
+// "Maximum call stack size exceeded".
+test("worker_threads: a guest assigning globalThis.postMessage cannot capture the kernel channel", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      await os.fs.write(
+        "/proj/clobber.js",
+        [
+          "let stolen = 0;",
+          "Object.assign(globalThis, {",
+          "  self: globalThis,",
+          "  postMessage: function () { stolen++; },",
+          "});",
+          "// Each of these is a syscall over the kernel channel: they must still work,",
+          "// and must not land in the guest's function above.",
+          "console.log('stdout-still-works');",
+          "const fs = require('fs');",
+          "fs.writeFileSync('/proj/probe.txt', 'written');",
+          "console.log('fs:', fs.readFileSync('/proj/probe.txt', 'utf8'));",
+          "console.log('stolen:', stolen);",
+          "process.exit(0);",
+        ].join("\n"),
+      );
+      return window.run(os, ["node", "/proj/clobber.js"], { cwd: "/proj" });
+    }),
+  );
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  assert.match(result.out, /stdout-still-works/, result.out);
+  assert.match(result.out, /fs: written/, result.out);
+  // The kernel's traffic never went through the guest's postMessage.
+  assert.match(result.out, /stolen: 0/, result.out);
+});

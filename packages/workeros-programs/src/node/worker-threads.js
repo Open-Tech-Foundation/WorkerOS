@@ -4,8 +4,9 @@
 // spawns (like `child_process`), plus a structured-clone message channel relayed
 // through the kernel worker. It's reached over syscalls the runtime adds:
 //
-//   • `sys.spawnWorker({ file, eval, workerData, argv, env, cwd })` → { threadId }
+//   • `sys.spawnWorker({ file, eval, workerData, argv, env, cwd, token })` → { threadId }
 //   • `sys.workerPost(target, data)`   target = threadId (main→worker) | "parent"
+//                                               | { token } (a worker not yet online)
 //   • `sys.onWorkerEvent(cb)`          cb(fromThreadId, "message"|"exit", payload)
 //   • `sys.childKill(threadId, sig)`   (shared with child_process) — terminate()
 //   • `sys.workerInit()`               resolved once at /bin/node startup → `init`
@@ -34,6 +35,9 @@ const loop = () => globalThis.__workerosLoop;
 
 // Signal name → number, for terminate() (a delivered signal hard-exits the worker).
 const SIGTERM = 15;
+
+// Per-process counter naming a Worker before the kernel has assigned its threadId.
+let nextSpawnToken = 1;
 
 // Join a possibly-relative worker file against the guest cwd, so `new Worker(
 // './w.js')` resolves the same way the calling script's relative paths do — even
@@ -150,7 +154,9 @@ export function createWorkerThreads(sys, init = {}) {
       super();
       this.threadId = -1;
       this._exited = false;
-      this._pending = []; // messages posted before the worker came online
+      // Names this worker until `spawnWorker` answers with its threadId, so a
+      // message posted before then can still be addressed (see `postMessage`).
+      this._token = nextSpawnToken++;
       this._refd = true;
       loop()?.ref(); // hold the process alive while the worker runs (as in Node)
 
@@ -161,6 +167,7 @@ export function createWorkerThreads(sys, init = {}) {
         argv: (options.argv || []).map(String),
         env: options.env || globalThis.process?.env || undefined,
         cwd: globalThis.process?.cwd?.() ?? sys.cwd,
+        token: this._token,
       };
       sys
         .spawnWorker(opts)
@@ -168,14 +175,18 @@ export function createWorkerThreads(sys, init = {}) {
           this.threadId = id;
           workers.set(id, this);
           this.emit("online");
-          for (const m of this._pending) sys.workerPost(id, m);
-          this._pending = null;
         })
         .catch((e) => this._fail(e instanceof Error ? e : new Error(String(e))));
     }
     postMessage(data) {
-      if (this.threadId >= 0) sys.workerPost(this.threadId, data);
-      else if (this._pending) this._pending.push(data);
+      // Before the worker is online we address it by spawn token rather than
+      // queueing here: the kernel worker registered the token while servicing the
+      // (earlier, same-port, therefore already-processed) spawnWorker syscall, so
+      // it can route the message on its own. Queueing would need *this* thread's
+      // event loop to turn, which deadlocks a caller that posts and then blocks —
+      // a wasm thread pool (rolldown) posts its module/memory and immediately
+      // parks in Atomics.wait on the worker coming up.
+      sys.workerPost(this.threadId >= 0 ? this.threadId : { token: this._token }, data);
     }
     // No live stdio streams (INV-5) — a worker's output goes to the parent's stdout.
     get stdout() { return null; }

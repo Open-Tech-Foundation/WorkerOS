@@ -210,6 +210,12 @@ const caughtSignals = new Map(); // pid → Set<signal> the guest installed a ha
 // spawned as a Worker. Lets a worker answer `workerInit` (am I a worker? my data)
 // and lets `workerPost` route a child→parent message to the right spawner.
 const workerContexts = new Map();
+// node:worker_threads: `${parentPid}:${token}` → worker pid. A guest names a
+// Worker with a spawn token it picks *synchronously*, so it can post to a worker
+// whose threadId hasn't reached it yet; we register the token while servicing
+// spawnWorker, and a later workerPost on the same port resolves it (see the
+// `workerPost` syscall). Dropped when the worker exits.
+const workerTokens = new Map();
 
 // Deliver a cooperative signal to a live JS program (posted to its worker).
 function deliverSignal(pid, signal) {
@@ -1538,6 +1544,12 @@ function handleSyscall(pid, msg) {
         }
         const workerPid = spawned.pid;
         workerContexts.set(workerPid, { parentPid: pid, workerData: args.workerData ?? null, threadId: workerPid });
+        // Register the spawn token *now*, before this syscall returns: the parent
+        // may post to the worker before our reply reaches it (it may never reach
+        // it — a parent that blocks after posting), and those messages arrive
+        // addressed by token.
+        const tokenKey = args.token === undefined ? null : `${pid}:${args.token}`;
+        if (tokenKey) workerTokens.set(tokenKey, workerPid);
         const parentWorker = parentRec && parentRec.worker;
         startWorker(spawned, {
           argv,
@@ -1545,6 +1557,7 @@ function handleSyscall(pid, msg) {
           cwd,
           sink: (parentRec && parentRec.sink) || { stdout: () => {}, stderr: () => {} },
           onExit: (code) => {
+            if (tokenKey) workerTokens.delete(tokenKey);
             if (parentWorker) parentWorker.postMessage({ type: MSG.WORKER_EXIT, threadId: workerPid, code: code | 0 });
           },
         });
@@ -1562,13 +1575,17 @@ function handleSyscall(pid, msg) {
       case "workerPost": {
         // Relay a structured-clone message. From a worker (`to === "parent"`) →
         // route to its spawner as coming from thread 0; from the main side (`to` is a
-        // worker's threadId) → route to that worker as coming from the parent (0).
+        // worker's threadId, or `{ token }` for one whose threadId the parent hasn't
+        // learned yet) → route to that worker as coming from the parent (0).
         if (args.to === "parent") {
           const ctx = workerContexts.get(pid);
           const pw = ctx && programs.get(ctx.parentPid);
           if (pw && !pw.done) pw.worker.postMessage({ type: MSG.WORKER_MESSAGE, threadId: pid, data: args.data });
         } else {
-          const cw = programs.get(args.to | 0);
+          const target = args.to && typeof args.to === "object"
+            ? workerTokens.get(`${pid}:${args.to.token}`)
+            : args.to | 0;
+          const cw = target !== undefined && programs.get(target);
           if (cw && !cw.done) cw.worker.postMessage({ type: MSG.WORKER_MESSAGE, threadId: 0, data: args.data });
         }
         break; // fire-and-forget: no reply
