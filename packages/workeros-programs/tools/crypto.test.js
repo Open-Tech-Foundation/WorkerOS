@@ -68,6 +68,17 @@ test("digest() default returns a Buffer; other encodings are strings", () => {
   assert.match(crypto.createHash("sha256").update("abc").digest("base64"), /=$/);
 });
 
+test("hash() one-shot matches createHash; defaults to hex; 'buffer' returns a Buffer", () => {
+  // Vite 8 calls crypto.hash to fingerprint modules; missing it stopped `npm run dev`.
+  assert.equal(crypto.hash("sha256", "abc"), hex("sha256", "abc")); // default 'hex'
+  assert.equal(crypto.hash("sha256", "abc", "hex"), hex("sha256", "abc"));
+  assert.match(crypto.hash("sha256", "abc", "base64"), /=$/);
+  const buf = crypto.hash("sha256", "abc", "buffer");
+  assert.ok(Buffer.isBuffer(buf));
+  assert.equal(buf.toString("hex"), hex("sha256", "abc"));
+  assert.equal(crypto.hash("SHA-1", Buffer.from("abc")), hex("sha1", "abc")); // Buffer input, loose name
+});
+
 test("digest twice throws", () => {
   const h = crypto.createHash("sha256").update("x");
   h.digest();

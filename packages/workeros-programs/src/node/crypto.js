@@ -73,6 +73,14 @@ class Hash {
   }
 }
 
+// `crypto.hash(algorithm, data[, outputEncoding])` — the one-shot digest helper
+// (Node 20.12+), i.e. `createHash(algorithm).update(data).digest(outputEncoding)`
+// without the object churn. `outputEncoding` defaults to `'hex'`; `'buffer'` yields
+// a Buffer. Vite 8 calls this to fingerprint modules, so its absence stopped the
+// dev server from even starting.
+const hash = (algorithm, data, outputEncoding = "hex") =>
+  encodeOut(digestWith(lookup(algorithm), toBytes(data)), outputEncoding === "buffer" ? undefined : outputEncoding);
+
 // ---- createHmac (generic HMAC, FIPS 198-1) --------------------------------
 class Hmac {
   constructor(algo, key) {
@@ -200,6 +208,7 @@ const constants = {
 export const crypto = {
   createHash: (algo) => new Hash(algo),
   createHmac: (algo, key) => new Hmac(algo, key),
+  hash,
   Hash,
   Hmac,
   randomBytes,
