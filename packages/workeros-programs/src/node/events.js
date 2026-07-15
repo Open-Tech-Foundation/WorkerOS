@@ -96,13 +96,23 @@ Object.assign(EventEmitter.prototype, {
   addListener(type, listener) { return addListener(this, type, listener, false); },
   on(type, listener) { return addListener(this, type, listener, false); },
   prependListener(type, listener) { return addListener(this, type, listener, true); },
+  // `once`/`prependOnceListener` register the wrapped one-shot through the PUBLIC
+  // `on`/`prependListener` (not the private `addListener` helper), so a subclass
+  // that overrides `on` sees the registration — exactly as Node does. This is load-
+  // bearing: Minipass routes flow control through its `on` override, and ssri's
+  // integrity stream overrides `on` to *replay* an already-emitted `size`/`integrity`
+  // to a late listener. `events.once(stream, 'size')` (used by cacache when writing a
+  // tarball with a known integrity) relies on that replay; calling the private helper
+  // here bypassed it, so the cacache write never settled and `npm install` hung.
   once(type, listener) {
     if (typeof listener !== "function") throw new TypeError('The "listener" argument must be a function');
-    return addListener(this, type, onceWrap(this, type, listener), false);
+    this.on(type, onceWrap(this, type, listener));
+    return this;
   },
   prependOnceListener(type, listener) {
     if (typeof listener !== "function") throw new TypeError('The "listener" argument must be a function');
-    return addListener(this, type, onceWrap(this, type, listener), true);
+    this.prependListener(type, onceWrap(this, type, listener));
+    return this;
   },
 
   removeListener(type, listener) {

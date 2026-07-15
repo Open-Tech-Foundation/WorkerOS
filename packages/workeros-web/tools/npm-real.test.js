@@ -77,6 +77,39 @@ test("real npm: vendored CLI boots and runs `--version` + `config get`", opts, a
   assert.equal(res.registry.out.trim(), "https://registry.npmjs.org/");
 });
 
+test("real npm: `init -y` scaffolds and `install <pkg>` unpacks a real tarball", opts, async () => {
+  const res = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      const flags = ["--no-update-notifier", "--no-audit", "--no-fund", "--cache", "/tmp/npmc", "--loglevel", "warn"];
+      const CLI = "/usr/lib/npm/bin/npm-cli.js";
+      await window.run(os, ["npm", "--version", ...flags], { cwd: "/" }); // drive the launcher unpack
+      await window.run(os, ["node", "-e", "require('fs').mkdirSync('/app',{recursive:true})"], { cwd: "/" });
+      // `init -y` writes a package.json (regression: promzard needs a constructable
+      // `require('module').Module`).
+      const init = await window.run(os, ["node", CLI, "init", "-y", ...flags], { cwd: "/app" });
+      // `install <pkg>` fetches + extracts a real tarball, whose integrity write goes
+      // through cacache's `events.once(stream, 'size')` — the deadlock this guards.
+      const install = await window.run(os, ["node", CLI, "install", "is-number@7.0.0", ...flags], { cwd: "/app" });
+      // Verify the on-disk result from inside the guest (real fs).
+      const check = await window.run(os, ["node", "-e",
+        "const fs=require('fs');" +
+        "const pj=JSON.parse(fs.readFileSync('/app/package.json','utf8'));" +
+        "const v=JSON.parse(fs.readFileSync('/app/node_modules/is-number/package.json','utf8')).version;" +
+        "process.stdout.write(JSON.stringify({dep:pj.dependencies&&pj.dependencies['is-number'],version:v}));",
+      ], { cwd: "/app" });
+      return { init, install, check };
+    }),
+  );
+
+  assert.equal(res.init.code, 0, res.init.err);
+  assert.equal(res.install.code, 0, res.install.err);
+  assert.equal(res.check.code, 0, res.check.err);
+  const parsed = JSON.parse(res.check.out.trim());
+  assert.equal(parsed.version, "7.0.0", "is-number@7.0.0 should be unpacked into node_modules");
+  assert.match(parsed.dep, /7\.0\.0/, "package.json dependencies should record the install");
+});
+
 test("real npx: /bin/npx launcher execs the npx CLI bundled in npm's tarball", opts, async () => {
   const res = await withPage((page) =>
     page.evaluate(async () => {

@@ -101,6 +101,30 @@ test("subclassing via extends works", () => {
   assert.equal(hit, true);
 });
 
+test("once() delegates to a subclass on() override (ssri replay pattern)", async () => {
+  // `once`/`prependOnceListener` must register through the public `on`/`prependListener`,
+  // so a subclass that overrides `on` sees the registration. ssri's integrity stream
+  // relies on this to REPLAY an already-emitted 'size'/'integrity' to a late listener;
+  // cacache attaches that listener with `events.once`. When `once` bypassed `on`, the
+  // replay never fired and every `npm install` of a tarball hung. Guard it here.
+  class Replayer extends EventEmitter {
+    #done;
+    complete(v) { this.#done = v; }
+    on(ev, handler) {
+      if (ev === "size" && this.#done !== undefined) { handler(this.#done); return this; }
+      return super.on(ev, handler);
+    }
+  }
+  const r = new Replayer();
+  r.complete(2774); // value already emitted before anyone listens
+  // Instance .once() must see the replay…
+  let viaInstance;
+  r.once("size", (v) => { viaInstance = v; });
+  assert.equal(viaInstance, 2774);
+  // …and so must the static events.once() helper (what cacache uses).
+  assert.equal(await once(r, "size").then((a) => a[0]), 2774);
+});
+
 test("static once() resolves with the event args", async () => {
   const ee = new EventEmitter();
   queueMicrotask(() => ee.emit("ready", 42, "ok"));

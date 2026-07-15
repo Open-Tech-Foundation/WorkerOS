@@ -97,11 +97,28 @@ test("createRequire accepts a file: URL (import.meta.url shape)", () => {
   assert.equal(require("./b"), 42);
 });
 
-test("builtinModules includes module itself; isBuiltin and Module self-ref", () => {
+test("builtinModules includes module itself; isBuiltin and Module class", () => {
   const { mod } = makeModule({ "/x.js": "" });
   assert.ok(mod.builtinModules.includes("module"));
   assert.equal(mod.isBuiltin("node:fs"), true);
   assert.equal(mod.isBuiltin("leftpad"), false);
-  assert.equal(mod.Module, mod);
+  // `Module` is a constructable class (Node's shape: Module.Module === Module),
+  // carrying the static helpers used in the wild.
+  assert.equal(typeof mod.Module, "function");
+  assert.equal(mod.Module.Module, mod.Module);
   assert.equal(typeof mod.Module.createRequire, "function");
+  assert.equal(typeof mod.Module._nodeModulePaths, "function");
+});
+
+test("new Module(file, parent) is constructable with require + paths (promzard)", () => {
+  const { mod } = makeModule({
+    "/proj/tpl.js": "",
+    "/proj/node_modules/dep/index.js": "module.exports = 42;",
+    "/proj/node_modules/dep/package.json": '{"name":"dep","version":"1.0.0","main":"index.js"}',
+  });
+  const m = new mod.Module("/proj/tpl.js", null);
+  assert.equal(m.exports && typeof m.exports, "object");
+  assert.deepEqual(m.paths, ["/proj/node_modules", "/node_modules"]);
+  assert.equal(m.require("dep"), 42);
+  assert.equal(mod.Module._resolveFilename("dep", m), "/proj/node_modules/dep/index.js");
 });

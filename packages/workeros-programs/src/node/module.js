@@ -164,6 +164,55 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
 
   const isBuiltin = (name) => builtins.has(builtinKey(name));
 
+  // Node's `Module._nodeModulePaths(from)`: the `node_modules` search chain walking
+  // up from `from` to the root (skipping any `node_modules` segments themselves).
+  const nodeModulePaths = (from) => {
+    const parts = path.resolve(from || "/").split("/").filter(Boolean);
+    const paths = [];
+    for (let i = parts.length; i >= 0; i--) {
+      if (parts[i - 1] === "node_modules") continue;
+      const base = parts.slice(0, i).join("/");
+      paths.push((base ? "/" + base : "") + "/node_modules");
+    }
+    return paths;
+  };
+
+  const _resolveFilename = (spec, parent) => {
+    if (isBuiltin(spec)) return spec;
+    const dir = parent && parent.path ? parent.path : "/";
+    const abs = resolver.resolveFrom(dir, spec);
+    if (!abs) throw moduleNotFound(spec, dir);
+    return abs;
+  };
+
+  // A constructable `Module` (Node's `require('module').Module`). Some tools do
+  // `new Module(file, parent)` and then drive it themselves — notably `promzard`
+  // (used by `npm init`), which builds a Module, reads `Module._nodeModulePaths`,
+  // and calls `mod.require(...)` to evaluate an init template. A bare object won't
+  // do: `new` needs a function. Instances resolve their own requires against the
+  // module's directory, like Node's CJS `module.require`.
+  function Module(id = "", parent) {
+    this.id = id;
+    this.path = id ? path.dirname(id) : ".";
+    this.exports = {};
+    this.filename = id || null;
+    this.loaded = false;
+    this.children = [];
+    this.parent = parent || null;
+    this.paths = id ? nodeModulePaths(this.path) : [];
+  }
+  Module.prototype.require = function (spec) {
+    return makeRequire(this.filename ? path.dirname(this.filename) : this.path)(spec);
+  };
+  Module._nodeModulePaths = nodeModulePaths;
+  Module._resolveFilename = _resolveFilename;
+  Module._load = (spec, parent) => load(_resolveFilename(spec, parent));
+  Module.createRequire = createRequire;
+  Module.builtinModules = [...builtins.keys()];
+  Module.isBuiltin = isBuiltin;
+  Module.wrap = (src) =>
+    "(function (exports, require, module, __filename, __dirname) { " + src + "\n});";
+
   const mod = {
     createRequire,
     // Computed after the registry is fully populated (see makeBuiltins): the
@@ -179,17 +228,15 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
     wrap: (src) =>
       "(function (exports, require, module, __filename, __dirname) { " + src + "\n});",
     _cache: cacheProxy,
-    _resolveFilename: (spec, parent) => {
-      if (isBuiltin(spec)) return spec;
-      const dir = parent && parent.path ? parent.path : "/";
-      const abs = resolver.resolveFrom(dir, spec);
-      if (!abs) throw moduleNotFound(spec, dir);
-      return abs;
-    },
+    _resolveFilename,
+    _nodeModulePaths: nodeModulePaths,
   };
-  // Both `require('module').createRequire` and `require('module').Module.createRequire`
-  // are used in the wild; `default` covers ESM-interop importers.
-  mod.Module = mod;
+  // `require('module').Module` is the constructable class (Node's own shape:
+  // `Module.Module === Module`), while `require('module').createRequire` etc. work
+  // straight off the namespace too. `default` covers ESM-interop importers.
+  mod.Module = Module;
+  Module.Module = Module;
+  Module.createRequire = createRequire;
   mod.default = mod;
   return mod;
 }
