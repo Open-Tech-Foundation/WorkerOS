@@ -43,14 +43,16 @@ let lastAutoSnap = 0;
 // the kill reason — mark_killed — so ps/wait/the shell report an honest why).
 //
 // "CPU time" is measured as *continuous unresponsiveness*, not lifetime — a dev
-// server must be allowed to run forever. A process counts as alive if it (a)
-// makes any syscall, (b) answers the periodic PING with a PONG (its event loop
-// turns), or (c) sits parked in a blocking `Atomics.wait` (its SAB STATE slot is
-// non-idle — the kernel worker reads it directly). Case (c) covers both a
-// kernel-serviced syscall (STATE = S_REQ) and a guest-level wait the program
-// worker stamps as S_GUEST_WAIT (rolldown's idle thread pool parks on a condvar
-// this way); either is waiting, not spinning. Only a worker showing none of these
-// for `wallTimeMs` — a synchronous `for(;;)` that never parks — is escalated:
+// server must be allowed to run forever. Only *tree-root* processes are watched:
+// a worker_threads child is governed by its parent (see the loop below), because a
+// wasm thread pool parks its idle workers in a wasm-level wait we cannot observe.
+// A watched process counts as alive if it (a) makes any syscall, (b) answers the
+// periodic PING with a PONG (its event loop turns), or (c) sits parked in a blocking
+// `Atomics.wait` (its SAB STATE slot is non-idle — the kernel worker reads it
+// directly). Case (c) covers both a kernel-serviced syscall (STATE = S_REQ) and a
+// guest-level JS `Atomics.wait` the program worker stamps as S_GUEST_WAIT; either is
+// waiting, not spinning. Only a watched process showing none of these for
+// `wallTimeMs` — a synchronous `for(;;)` that never parks — is escalated:
 // cooperative SIGTERM, a grace period, then terminate() with exit 152
 // (128+SIGXCPU) and reason "CPU time".
 //
@@ -91,6 +93,16 @@ function watchdogTick() {
   const now = Date.now();
   for (const [pid, rec] of programs) {
     if (rec.done) continue;
+    // A worker_threads child is governed by its parent, not the CPU-time watchdog.
+    // A wasm thread pool (rolldown, under Vite) parks its idle workers in a
+    // *wasm-level* `memory.atomic.wait` — the worker's agent blocks with no syscall,
+    // no PONG, and no JS callback we could mark (unlike a JS `Atomics.wait`, which
+    // the program worker stamps S_GUEST_WAIT). That is indistinguishable from a spin,
+    // and reaping healthy pool workers tore the dev server down. Liveness is enforced
+    // at the tree root instead: if the parent hangs, *it* is reaped and its workers
+    // are torn down with it; a worker that genuinely spins is a bounded resource cost,
+    // not an OS-wide hang (INV-5). Memory limits still apply to workers (separately).
+    if (workerContexts.has(pid)) continue;
     // Parked in a blocking `Atomics.wait` (STATE non-idle): either a kernel
     // syscall the kernel owes a response to, or a guest-level wait the program
     // worker stamped as S_GUEST_WAIT. That is waiting, not spinning.

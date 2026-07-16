@@ -117,6 +117,33 @@ test("a process parked in a guest Atomics.wait outlives the budget, then wakes",
   assert.match(result.out, /WOKE:timed-out/);
 });
 
+test("a worker_threads child is exempt from the CPU-time watchdog (governed by its parent)", opts, async () => {
+  const { result, pageErrors } = await withOs(async (wd) => {
+    const os = await window.__wos.boot({ watchdog: wd });
+    const dec = new TextDecoder();
+    // A rolldown pool worker parks in a wasm-level wait we can't observe; the model
+    // is a worker that is unresponsive to the watchdog. Use the strongest form — a
+    // real synchronous spin — inside a Worker. The parent stays responsive and exits
+    // after 3× the budget. The worker must NOT be reaped as "CPU time" (that would
+    // print to the parent's stdout and/or crash it); only tree roots are watched.
+    await os.fs.write("/main.js",
+      "const { Worker } = require('worker_threads');\n" +
+      "new Worker('for(;;){}', { eval: true });\n" +
+      "setTimeout(() => process.exit(0), 3600);\n");
+    let out = "", err = "";
+    const code = await Promise.race([
+      new Promise((resolve) =>
+        os.exec("node /main.js", { onStdout: (b) => (out += dec.decode(b)), onStderr: (b) => (err += dec.decode(b)) })
+          .then((r) => resolve(r.code))),
+      new Promise((r) => setTimeout(() => r("TIMEOUT"), 15000)),
+    ]);
+    return { code, out, err };
+  }, FAST);
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, `parent must outlive its spinning worker: ${JSON.stringify(result)}`);
+  assert.doesNotMatch(result.out + result.err, /CPU time/, "the worker child must not be watchdog-reaped");
+});
+
 test("a memory hog is reaped with 137 and reason 'out of memory' (where measurable)", opts, async () => {
   const { result, pageErrors } = await withOs(async (wd) => {
     // Feature gate: the self-sampler needs measureUserAgentSpecificMemory in a

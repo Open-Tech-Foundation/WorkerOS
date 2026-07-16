@@ -29,17 +29,21 @@ main-thread client API). Format:
   `NET_LOG_RESULT` on the protocol; a 500-entry ring.
 
 ### Fixed
-- **A thread parked in a guest `Atomics.wait` is no longer reaped as "CPU time".** The
-  watchdog (ADR-020) reads unresponsiveness — no syscall, no PONG, an idle sync slot —
-  as a synchronous `for(;;)` spin and kills after `wallTimeMs`. A thread blocked in its
-  *own* `Atomics.wait` (on shared memory that isn't the kernel channel) shows that same
-  signature yet is genuinely waiting, not burning CPU. rolldown's wasm thread pool
-  parks idle workers this way, so a Vite dev server that had served fine for 30s was
-  killed out from under the browser. The program worker now wraps guest `Atomics.wait`
-  to stamp the sync slot `S_GUEST_WAIT` for the duration, so the watchdog counts it as
-  a blocking wait (as it already does for a kernel syscall's own wait) — a real spin,
-  which never parks, is still reaped. A wait on the process's own sync buffer (the
-  syscall channel) passes through untouched. Covered by `tools/watchdog.test.js`.
+- **A Vite dev server is no longer reaped as "CPU time" while idle.** The watchdog
+  (ADR-020) reads unresponsiveness — no syscall, no PONG, an idle sync slot — as a
+  synchronous `for(;;)` spin and kills after `wallTimeMs`. rolldown's wasm thread pool
+  parks its idle workers, which looks identical yet is genuinely waiting, so a dev
+  server that had served fine got killed out from under the browser. Two fixes, since
+  a thread can park two ways. (1) A guest JS `Atomics.wait` (on shared memory that
+  isn't the kernel channel) is now wrapped to stamp the sync slot `S_GUEST_WAIT` for
+  the duration, so the watchdog counts it as a blocking wait — a real spin, which never
+  parks, is still reaped; a wait on the process's own sync buffer passes through
+  untouched. (2) A *wasm-level* `memory.atomic.wait` (how rolldown's pool actually
+  parks) blocks the worker's agent with no JS callback we could mark, and is
+  indistinguishable from a spin — so the CPU-time watchdog now watches only
+  **tree-root processes** and exempts `worker_threads` children, whose liveness is
+  their parent's responsibility (if the parent hangs, it is reaped and its workers with
+  it). Memory limits still apply to workers. Covered by `tools/watchdog.test.js`.
 - **A guest could capture the kernel's own channel — Vite's bundler died of it.**
   The program worker held `const kernel = self` and posted through it. But a guest
   shares the worker's realm, and real Node programs do assign the worker globals:
