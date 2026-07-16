@@ -20,6 +20,21 @@ guest runtime. Format:
   (verified: npm's packument *and* tarball requests appear in the kernel's log).
 
 ### Fixed
+- **napi async work keeps `/bin/node` alive until it finishes.** emnapi — the runtime
+  under rolldown's wasm binding — tracks outstanding native work by holding a global
+  `new MessageChannel().port1` and `ref()`ing it while any is in flight: its stand-in
+  for a libuv request handle, since JS exposes no other way to say "a request is
+  pending". Two gaps defeated it. The guest's global `MessageChannel`/`MessagePort`
+  were the browser worker's DOM ones, whose ports have no `.ref` — so emnapi's own
+  `if (port.ref)` guard silently skipped — and our `MessagePort.ref()`/`unref()` were
+  no-ops regardless. The event loop therefore drained while rolldown was still
+  bundling, and `/bin/node` exited 0 with empty output: Vite's dev server "started"
+  and vanished. `MessageChannel`/`MessagePort` are now published as guest globals that
+  are the *same* constructors as `require('worker_threads')`'s (as Node does), and
+  `MessagePort` carries real loop keep-alive matching Node (a `message` listener or
+  `ref()` holds the loop, `unref()`/`close()` releases — last write wins). Covered by a
+  unit test over the ref state machine and a browser e2e that reproduces emnapi's
+  pattern (an unref'd worker, a ref'd port carrying liveness across the round-trip).
 - **ESM `import` of a `file://` URL specifier resolves to the path it names.** The ESM
   resolver treated an absolute `file://` specifier as a bare package name and threw
   `Cannot find module 'file:///…'` (CJS `require` already handled `file://`). Vite

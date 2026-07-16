@@ -91,19 +91,37 @@ export function createWorkerThreads(sys, init = {}) {
       super();
       this._other = null;
       this._closed = false;
+      this._held = false; // whether we currently hold a loop keep-alive ref
     }
     postMessage(data) {
       const other = this._other;
       if (other && !other._closed) other._receive(data);
     }
     start() { this._scheduleFlush(); }
+    // Loop keep-alive, matching a real MessagePort (verified against Node): a fresh
+    // port holds nothing, adding a `message` listener or `ref()` holds the loop, and
+    // `unref()`/`close()` releases it — *last operation wins*, so an explicit
+    // `unref()` releases even while a listener is still attached (unlike a
+    // listener-count model). This backs emnapi's async-work counter, which holds
+    // `new MessageChannel().port1` and ref()s it while napi work is outstanding —
+    // the reason MessageChannel/MessagePort are published as globals (see
+    // node-program.js). Without a live ref here /bin/node exits mid-bundle.
+    _setHeld(want) {
+      want = want && !this._closed;
+      if (want === this._held) return;
+      this._held = want;
+      if (want) loop()?.ref(); else loop()?.unref();
+    }
     close() {
       if (this._closed) return;
       this._closed = true;
+      this._setHeld(false);
       this.emit("close");
     }
-    ref() { return this; }
-    unref() { return this; }
+    ref() { this._setHeld(true); return this; }
+    unref() { this._setHeld(false); return this; }
+    on(ev, fn) { super.on(ev, fn); if (ev === "message") this._setHeld(true); return this; }
+    once(ev, fn) { super.once(ev, fn); if (ev === "message") this._setHeld(true); return this; }
   }
 
   class MessageChannel {

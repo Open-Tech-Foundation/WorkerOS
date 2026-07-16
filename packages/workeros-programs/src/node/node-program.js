@@ -374,6 +374,19 @@ const path = builtins.get("path");
 // its value anyway) so that assignment succeeds, matching Node.
 try { Object.defineProperty(globalThis, "self", { value: globalThis, writable: true, configurable: true }); } catch { /* already writable */ }
 
+// Node publishes `MessageChannel`/`MessagePort` as globals that are the *same*
+// constructors as `require('worker_threads')`'s — so we shadow the browser
+// worker's DOM ones with ours. emnapi's async-work keep-alive depends on this: it
+// counts outstanding napi work by holding `new MessageChannel().port1` and
+// `ref()`ing it while any is in flight (its NodejsWaitingRequestCounter — the
+// userland spelling of a libuv request handle, since Node exposes no other way to
+// say "a request is pending"). It prefers the *global* MessageChannel and guards
+// with `if (port.ref)`; the DOM port has no `ref`, so the guard silently skips and
+// the loop drains mid-flight — /bin/node exits 0 while rolldown is still bundling.
+// Ours carry the real ref/unref, so the outstanding work holds the loop as in Node.
+globalThis.MessageChannel = nodeBuiltins.worker_threads.MessageChannel;
+globalThis.MessagePort = nodeBuiltins.worker_threads.MessagePort;
+
 // For `-e`/`-p`, the entry is synthetic (rooted at cwd so relative requires and
 // imports resolve there); otherwise read the script file from the VFS.
 let entryAbs =

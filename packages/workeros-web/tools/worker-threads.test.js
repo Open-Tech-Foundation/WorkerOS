@@ -196,3 +196,42 @@ test("worker_threads: a guest assigning globalThis.postMessage cannot capture th
   // The kernel's traffic never went through the guest's postMessage.
   assert.match(result.out, /stolen: 0/, result.out);
 });
+
+// napi async work (rolldown, via emnapi) holds the loop through a ref'd global
+// `MessageChannel().port1` — its NodejsWaitingRequestCounter, the userland stand-in
+// for a libuv request handle — while deliberately `unref()`ing the pool worker. If
+// that global port isn't ours (the DOM one has no `ref`) or our port's ref is a
+// no-op, /bin/node drains and exits 0 *mid-work*: Vite's dev server was exiting
+// silently before its bundle finished. Here the worker replies only after a
+// macrotask delay, and nothing but the port ref can keep the parent alive to hear
+// it (the worker was unref'd, and a pending spawn/message doesn't hold the loop).
+test("worker_threads: a ref'd global MessageChannel port holds the loop while an unref'd worker finishes", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      await os.fs.write(
+        "/proj/main.js",
+        [
+          "const { Worker } = require('worker_threads');",
+          // The global MessageChannel must be Node's, not the DOM one.
+          "console.log('global-ok:', MessageChannel === require('worker_threads').MessageChannel);",
+          "const w = new Worker(`",
+          "  const { parentPort } = require('worker_threads');",
+          "  parentPort.on('message', () => setTimeout(() => parentPort.postMessage('done'), 150));",
+          "`, { eval: true });",
+          "w.unref(); // like emnapi: the worker itself does not hold the loop",
+          "const { port1 } = new MessageChannel();",
+          "port1.ref(); // the async-work counter holds it instead",
+          "w.on('online', () => w.postMessage('go'));",
+          "w.on('message', (m) => { console.log('reply:', m); port1.unref(); w.terminate(); });",
+        ].join("\n"),
+      );
+      return window.run(os, ["node", "/proj/main.js"], { cwd: "/proj" });
+    }),
+  );
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.err);
+  assert.match(result.out, /global-ok: true/, result.out);
+  // The parent stayed alive on the port ref alone and received the delayed reply.
+  assert.match(result.out, /reply: done/, result.out);
+});

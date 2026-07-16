@@ -150,3 +150,38 @@ test("receiveMessageOnPort drains a queued message, else undefined", async () =>
   assert.deepEqual(wt.receiveMessageOnPort(port2), { message: "b" });
   assert.equal(wt.receiveMessageOnPort(port2), undefined);
 });
+
+test("MessagePort keep-alive matches Node: last write (ref/unref/listener) wins", () => {
+  // emnapi's async-work counter holds `new MessageChannel().port1` and ref()s it
+  // while napi work is outstanding, so a live ref must bump the guest event loop
+  // exactly as a real MessagePort does. Drive it with a fake __workerosLoop and
+  // assert net keep-alive (held?) against Node's observed semantics.
+  let held = 0;
+  const realLoop = globalThis.__workerosLoop;
+  globalThis.__workerosLoop = { ref: () => { held++; }, unref: () => { held--; } };
+  try {
+    const wt = createWorkerThreads(fakeSys(), {});
+    const port = () => new wt.MessagePort();
+    const isHeld = (p) => held > 0;
+
+    // A) untouched → no hold.
+    let p = port(); assert.equal(isHeld(p), false);
+    // B) a `message` listener holds.
+    p = port(); p.on("message", () => {}); assert.equal(isHeld(p), true); p.close();
+    // C) ref() with no listener holds.
+    p = port(); p.ref(); assert.equal(isHeld(p), true); p.close();
+    // D) ref() then unref() releases.
+    p = port(); p.ref(); p.unref(); assert.equal(isHeld(p), false);
+    // F) listener then unref() releases — last write wins, not listener-count.
+    p = port(); p.on("message", () => {}); p.unref(); assert.equal(isHeld(p), false);
+    // G) unref() then listener holds.
+    p = port(); p.unref(); p.on("message", () => {}); assert.equal(isHeld(p), true); p.close();
+    // close() releases whatever a port was holding, and it can't re-hold after.
+    p = port(); p.ref(); assert.equal(held, 1); p.close(); assert.equal(held, 0);
+    p.ref(); assert.equal(held, 0);
+    // Every port balanced out.
+    assert.equal(held, 0);
+  } finally {
+    globalThis.__workerosLoop = realLoop;
+  }
+});
