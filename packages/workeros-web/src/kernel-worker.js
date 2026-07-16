@@ -45,11 +45,14 @@ let lastAutoSnap = 0;
 // "CPU time" is measured as *continuous unresponsiveness*, not lifetime — a dev
 // server must be allowed to run forever. A process counts as alive if it (a)
 // makes any syscall, (b) answers the periodic PING with a PONG (its event loop
-// turns), or (c) sits parked in a kernel-serviced blocking call (its SAB slot
-// is non-idle — the kernel worker reads it directly; that wait is the kernel's,
-// not a spin). Only a worker showing none of these for `wallTimeMs` — a
-// synchronous `for(;;)` — is escalated: cooperative SIGTERM, a grace period,
-// then terminate() with exit 152 (128+SIGXCPU) and reason "CPU time".
+// turns), or (c) sits parked in a blocking `Atomics.wait` (its SAB STATE slot is
+// non-idle — the kernel worker reads it directly). Case (c) covers both a
+// kernel-serviced syscall (STATE = S_REQ) and a guest-level wait the program
+// worker stamps as S_GUEST_WAIT (rolldown's idle thread pool parks on a condvar
+// this way); either is waiting, not spinning. Only a worker showing none of these
+// for `wallTimeMs` — a synchronous `for(;;)` that never parks — is escalated:
+// cooperative SIGTERM, a grace period, then terminate() with exit 152
+// (128+SIGXCPU) and reason "CPU time".
 //
 // Memory is a *soft, sampled* high-water mark (INV-5): each program worker
 // self-reports performance.measureUserAgentSpecificMemory() where the API
@@ -88,8 +91,9 @@ function watchdogTick() {
   const now = Date.now();
   for (const [pid, rec] of programs) {
     if (rec.done) continue;
-    // Parked in a blocking syscall (Atomics.wait on its SAB): the kernel owes
-    // it a response — that is waiting, not spinning.
+    // Parked in a blocking `Atomics.wait` (STATE non-idle): either a kernel
+    // syscall the kernel owes a response to, or a guest-level wait the program
+    // worker stamped as S_GUEST_WAIT. That is waiting, not spinning.
     if (Atomics.load(views(rec.syncSab).i32, STATE) !== S_IDLE) {
       rec.lastActivity = now;
       rec.warnedAt = 0;

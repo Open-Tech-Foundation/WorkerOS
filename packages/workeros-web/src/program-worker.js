@@ -15,7 +15,7 @@
 import { MSG } from "./protocol.js";
 import { ProcessExit } from "../../workeros-programs/src/node/process-shim.js";
 import { createWasiImports } from "../../workeros-programs/src/wasi/host.js";
-import { makeSyncCaller, MAX_SYNC_PAYLOAD } from "./sync-syscall.js";
+import { makeSyncCaller, MAX_SYNC_PAYLOAD, views, STATE, S_GUEST_WAIT } from "./sync-syscall.js";
 import { unframeExecResult } from "./exec-frame.js";
 
 // The channel back to the kernel worker that created us. Bound *here*, at module
@@ -481,6 +481,32 @@ self.addEventListener("message", async (ev) => {
   // One synchronous-syscall channel per process (SAB + Atomics). Both the WASI
   // host and a JS guest's `sys.syncFs` block on it; only one guest runs at a time.
   const syncCall = makeSyncCaller(msg.syncSab, () => kernelPost({ type: MSG.SYNC }));
+
+  // Make a guest-level `Atomics.wait` visible to the watchdog. The watchdog reaps a
+  // process that for `wallTimeMs` makes no syscall, sends no PONG, and shows an idle
+  // sync slot — the signature of a synchronous `for(;;)` spin. A thread blocked in
+  // its own `Atomics.wait` shows that exact signature (its JS thread is parked, so it
+  // can't PONG) yet is genuinely waiting, not burning CPU. rolldown's wasm thread
+  // pool does this: idle workers park on a condvar, and after 30s the watchdog killed
+  // them as "CPU time", taking Vite's dev server down with them. Stamp the sync slot
+  // non-idle while parked so the watchdog counts it as a blocking wait (as it already
+  // does for a kernel syscall's own `Atomics.wait`), then restore it. A wait on our
+  // own sync buffer *is* the syscall channel — already visible via S_REQ — so pass it
+  // straight through untouched.
+  {
+    const i32 = views(msg.syncSab).i32;
+    const realWait = Atomics.wait.bind(Atomics);
+    Atomics.wait = (ta, index, value, timeout) => {
+      if (ta.buffer === msg.syncSab) return realWait(ta, index, value, timeout);
+      const prev = Atomics.load(i32, STATE);
+      Atomics.store(i32, STATE, S_GUEST_WAIT);
+      try {
+        return timeout === undefined ? realWait(ta, index, value) : realWait(ta, index, value, timeout);
+      } finally {
+        Atomics.store(i32, STATE, prev);
+      }
+    };
+  }
   // From here on, `sys.write` is a real blocking write (backpressure + EPIPE,
   // ADR-023). A broken-pipe error only comes back if this process catches
   // SIGPIPE — the default disposition already killed it otherwise.

@@ -26,6 +26,13 @@ export const HEADER_BYTES = 16;
 export const S_IDLE = 0;
 export const S_REQ = 1;
 export const S_RESP = 2;
+// A guest thread parked in its *own* `Atomics.wait` (not a kernel syscall) — e.g.
+// rolldown's idle thread pool blocking on a condvar. The program worker stamps this
+// into the STATE slot for the duration so the watchdog reads the process as parked
+// (waiting, not spinning) rather than reaping it as "CPU time". The kernel's syscall
+// path never sets or reads it — request servicing is driven by the SYNC message, not
+// by polling STATE — so it can't collide with S_REQ/S_RESP. See program-worker.js.
+export const S_GUEST_WAIT = 3;
 
 const DATA_BYTES = 1 << 20; // 1 MiB payload region (max single read)
 // The most a single sync read can carry back. A caller asking for more must chunk

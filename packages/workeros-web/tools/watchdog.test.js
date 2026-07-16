@@ -3,8 +3,9 @@
 // worker.terminate() — reaps a synchronous spin (`for(;;)`) after a continuous-
 // unresponsiveness budget, with exit 152 (128+SIGXCPU) and the kernel-recorded
 // reason "CPU time". Liveness = syscalls, PONGs to the periodic PING, or being
-// parked in a kernel-serviced blocking call (SAB non-idle) — so long-lived but
-// healthy processes (servers, blocked readers) are never touched.
+// parked in a blocking `Atomics.wait` (SAB non-idle) — a kernel-serviced syscall or
+// a guest-level wait (rolldown's idle thread pool) — so long-lived but healthy
+// processes (servers, blocked readers, parked worker pools) are never touched.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -90,6 +91,30 @@ test("a process parked in a blocking read outlives the budget, then completes", 
   assert.deepEqual(pageErrors, []);
   assert.equal(result.code, 0, `blocked-on-stdin is waiting, not spinning: ${JSON.stringify(result)}`);
   assert.match(result.out, /GOT:late/);
+});
+
+test("a process parked in a guest Atomics.wait outlives the budget, then wakes", opts, async () => {
+  const { result, pageErrors } = await withOs(async (wd) => {
+    const os = await window.__wos.boot({ watchdog: wd });
+    const dec = new TextDecoder();
+    // A guest thread blocked in its *own* Atomics.wait (not a kernel syscall) — the
+    // shape of rolldown's idle thread pool. The wait times out at 3× the budget; the
+    // process must survive to wake ('timed-out'), not be reaped as a spin.
+    await os.fs.write("/wait.js",
+      "const v = new Int32Array(new SharedArrayBuffer(16));\n" +
+      "console.log('WOKE:' + Atomics.wait(v, 0, 0, 3600));\n");
+    let out = "", err = "";
+    const code = await Promise.race([
+      new Promise((resolve) =>
+        os.exec("node /wait.js", { onStdout: (b) => (out += dec.decode(b)), onStderr: (b) => (err += dec.decode(b)) })
+          .then((r) => resolve(r.code))),
+      new Promise((r) => setTimeout(() => r("TIMEOUT"), 15000)),
+    ]);
+    return { code, out, err };
+  }, FAST);
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, `a guest Atomics.wait is waiting, not spinning: ${JSON.stringify(result)}`);
+  assert.match(result.out, /WOKE:timed-out/);
 });
 
 test("a memory hog is reaped with 137 and reason 'out of memory' (where measurable)", opts, async () => {

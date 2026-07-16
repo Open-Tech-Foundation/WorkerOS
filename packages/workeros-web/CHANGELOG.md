@@ -29,6 +29,17 @@ main-thread client API). Format:
   `NET_LOG_RESULT` on the protocol; a 500-entry ring.
 
 ### Fixed
+- **A thread parked in a guest `Atomics.wait` is no longer reaped as "CPU time".** The
+  watchdog (ADR-020) reads unresponsiveness — no syscall, no PONG, an idle sync slot —
+  as a synchronous `for(;;)` spin and kills after `wallTimeMs`. A thread blocked in its
+  *own* `Atomics.wait` (on shared memory that isn't the kernel channel) shows that same
+  signature yet is genuinely waiting, not burning CPU. rolldown's wasm thread pool
+  parks idle workers this way, so a Vite dev server that had served fine for 30s was
+  killed out from under the browser. The program worker now wraps guest `Atomics.wait`
+  to stamp the sync slot `S_GUEST_WAIT` for the duration, so the watchdog counts it as
+  a blocking wait (as it already does for a kernel syscall's own wait) — a real spin,
+  which never parks, is still reaped. A wait on the process's own sync buffer (the
+  syscall channel) passes through untouched. Covered by `tools/watchdog.test.js`.
 - **A guest could capture the kernel's own channel — Vite's bundler died of it.**
   The program worker held `const kernel = self` and posted through it. But a guest
   shares the worker's realm, and real Node programs do assign the worker globals:
