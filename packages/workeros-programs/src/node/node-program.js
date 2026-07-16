@@ -135,6 +135,12 @@ const tty = createTty({
 // writer on a broken pipe unless it registers a handler here (ADR-023) — then
 // the write raises EPIPE instead and the handler is delivered cooperatively.
 const SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGWINCH", "SIGTSTP", "SIGHUP", "SIGPIPE", "SIGUSR1", "SIGUSR2"]);
+// Signal name ↔ number, for `process.kill`. A caller may pass either form.
+const SIGNUM = {
+  SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGPIPE: 13, SIGTERM: 15,
+  SIGUSR1: 10, SIGUSR2: 12, SIGCONT: 18, SIGSTOP: 19, SIGTSTP: 20, SIGWINCH: 28,
+};
+const SIGNAME = Object.fromEntries(Object.entries(SIGNUM).map(([k, v]) => [v, k]));
 
 // `process.cwd()`/`chdir()`. The kernel owns the real cwd (set at spawn); we have
 // no chdir syscall yet, so this is a process-local view: it moves what the script
@@ -253,6 +259,30 @@ const emitExit = (code) => { if (exitEmitted) return; exitEmitted = true; proces
 // delivered cooperatively (via sys.onSignal) instead of hard-killing the process.
 process._onadd = (ev) => { if (SIGNALS.has(ev) && process.listenerCount(ev) === 1) sys.sighandle(ev, true); };
 process._onremove = (ev) => { if (SIGNALS.has(ev) && process.listenerCount(ev) === 0) sys.sighandle(ev, false); };
+
+// `process.pid` / `process.kill(pid, sig)`. The kernel assigns the real pid at
+// spawn. Killing another pid routes to the kernel (same path child_process uses).
+// Killing *self* (own pid, or the conventional 0, or an omitted pid) applies Node's
+// disposition: signal 0 is a liveness probe (a no-op that reports the process
+// exists); a signal the guest handles fires that listener; an unhandled terminating
+// signal exits 128+signum. npm's signal-exit re-raises `process.kill(process.pid,
+// sig)` after running its cleanup, so this must actually terminate rather than throw
+// "process.kill is not a function" (the error seen on Ctrl-C during `npm run dev`).
+process.pid = sys.pid;
+process.ppid = sys.ppid ?? 0;
+process.kill = (pid, sig = "SIGTERM") => {
+  const signum = typeof sig === "number" ? sig : (SIGNUM[sig] ?? SIGNUM.SIGTERM);
+  if (pid == null || pid === 0 || pid === process.pid) {
+    if (signum === 0) return true; // probe only: we're alive
+    const name = typeof sig === "string" ? sig : SIGNAME[signum];
+    if (name && SIGNALS.has(name) && process.listenerCount(name) > 0) { process.emit(name); return true; }
+    emitExit(128 + signum);
+    sys.exit(128 + signum);
+    return true;
+  }
+  sys.childKill(pid, signum);
+  return true;
+};
 globalThis.process = process;
 
 // Node's fatal-error semantics for the guest. An exception that escapes an async

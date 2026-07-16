@@ -138,3 +138,37 @@ test("^C reaches an exec'd grandchild (it inherited the foreground group)", opts
   assert.deepEqual(pageErrors, []);
   assert.match(result.out, /GRAND-CAUGHT/);
 });
+
+// process.pid / process.kill(pid, sig). npm's signal-exit re-raises
+// process.kill(process.pid, sig) after its cleanup on ^C, so a missing kill threw
+// "process.kill is not a function". Self-signalling applies Node's disposition: an
+// unhandled terminating signal exits 128+signum; a handled one fires the listener;
+// signal 0 is a liveness probe.
+test("process.kill self-signals with Node's disposition; process.pid is the real pid", opts, async () => {
+  const { result, pageErrors } = await withTerminal(async () => {
+    const os = await window.__wos.boot();
+    const dec = new TextDecoder();
+    const run = async (src) => {
+      const p = await os.spawn(["node", "-e", src], { cwd: "/" });
+      let out = ""; p.onStdout((b) => (out += dec.decode(b)));
+      return { code: await p.exited, out };
+    };
+    return {
+      // Unhandled SIGTERM to self → terminate 128+15.
+      unhandled: (await run("process.kill(process.pid, 'SIGTERM')")).code,
+      // A handler catches it and chooses the exit code.
+      handled: (await run(
+        "process.on('SIGTERM', () => process.exit(7)); process.kill(process.pid, 'SIGTERM')")).code,
+      // Signal 0 is a probe: no termination, script runs to its own exit.
+      probe: (await run("process.kill(process.pid, 0); process.exit(3)")).code,
+      // process.pid is a real positive integer.
+      pidOk: (await run(
+        "process.exit(Number.isInteger(process.pid) && process.pid > 0 ? 0 : 1)")).code,
+    };
+  });
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.unhandled, 143, "unhandled self-SIGTERM exits 128+15");
+  assert.equal(result.handled, 7, "a SIGTERM handler fires and sets the exit code");
+  assert.equal(result.probe, 3, "signal 0 is a no-op probe, not a kill");
+  assert.equal(result.pidOk, 0, "process.pid is a positive integer");
+});

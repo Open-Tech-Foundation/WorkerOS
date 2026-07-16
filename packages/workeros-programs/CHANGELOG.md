@@ -76,6 +76,13 @@ guest runtime. Format:
   which failed.
 
 ### Added
+- **`process.pid` / `process.kill(pid, signal)`.** The kernel assigns the real pid at
+  spawn; `kill` delivers a signal by pid (routing to the kernel, the path
+  `child_process` already uses). Self-signalling — own pid, the conventional `0`, or an
+  omitted pid — applies Node's disposition: signal `0` is a liveness probe, a handled
+  signal fires the process listener, an unhandled terminating signal exits `128+signum`.
+  npm's signal-exit re-raises `process.kill(process.pid, sig)` after its cleanup on
+  Ctrl-C, so without this `npm run dev` threw `process.kill is not a function` on exit.
 - **The uutils coreutils tier: 26 utilities as one wasm multicall binary**
   (`crates/wsh-utils` → `/bin/coreutils`, ADR-026). Each utility is one `uu_*`
   dependency line plus one dispatch arm; the registry entry's `links` list gets a
