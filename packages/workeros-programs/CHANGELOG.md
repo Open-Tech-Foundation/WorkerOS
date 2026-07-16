@@ -20,6 +20,14 @@ guest runtime. Format:
   (verified: npm's packument *and* tarball requests appear in the kernel's log).
 
 ### Fixed
+- **ESM `import` of a `file://` URL specifier resolves to the path it names.** The ESM
+  resolver treated an absolute `file://` specifier as a bare package name and threw
+  `Cannot find module 'file:///…'` (CJS `require` already handled `file://`). Vite
+  bundles `vite.config.js` into `node_modules/.vite-temp/` whose output imports Vite
+  back by an absolute `file://` URL, so a project *with* a config file couldn't start.
+  `resolveFrom` now decodes a `file:`/`file://localhost` URL — percent-escapes honored,
+  `?query`/`#frag` stripped — to its path and resolves that; a non-`localhost`
+  authority or a missing file resolves to null, as before.
 - **`worker.postMessage()` before a Worker is online no longer needs the caller's
   event loop.** `node:worker_threads` queued such a message and flushed it when the
   `spawnWorker` reply arrived, which only happens on a turn of the loop — so a caller

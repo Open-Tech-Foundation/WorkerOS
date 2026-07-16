@@ -72,6 +72,30 @@ export const builtinKey = (spec) =>
 // dir's package main/index), not bare specifiers — Node treats them as relative.
 const isRelative = (s) => s === "." || s === ".." || s.startsWith("./") || s.startsWith("../");
 
+// A `file:` URL is a legal ESM specifier, and a *generated* module is where they
+// show up: Vite bundles `vite.config.js` into `node_modules/.vite-temp/` and has
+// the output import Vite back by absolute `file://` URL, since no relative path
+// from a temp dir would be stable. Decode it to the VFS path it names (percent-
+// escapes and a `?query`/`#hash` included — a cache-busting `?t=…` is routine on
+// these). Anything else URL-ish (`http:`, `data:`) is not ours to resolve.
+const fileUrlToPath = (s) => {
+  let rest = s.slice("file://".length);
+  // An authority, if present, must be empty or "localhost" (RFC 8089).
+  const slash = rest.indexOf("/");
+  if (slash !== 0) {
+    const authority = rest.slice(0, slash < 0 ? rest.length : slash);
+    if (authority !== "localhost") return null;
+    rest = rest.slice(authority.length);
+  }
+  const cut = rest.search(/[?#]/);
+  if (cut >= 0) rest = rest.slice(0, cut);
+  try {
+    return decodeURIComponent(rest);
+  } catch {
+    return null; // a malformed escape names nothing
+  }
+};
+
 // A resolved-but-blocked target (`"exports": { "./x": null }`) — distinct from
 // "no match" so it stops condition/array fallback the way Node's null target does.
 const BLOCKED = Symbol("blocked");
@@ -326,6 +350,10 @@ export function createResolver({ fs, path, conditions = ["node", "import"] } = {
 
   const resolveFrom = (fromDir, spec) => {
     if (spec.startsWith("#")) return resolveImports(fromDir, spec);
+    if (spec.startsWith("file://")) {
+      const p = fileUrlToPath(spec);
+      return p ? resolveFile(path.normalize(p)) : null;
+    }
     if (spec.startsWith("/")) return resolveFile(path.normalize(spec));
     if (isRelative(spec)) return resolveFile(path.join(fromDir, spec));
     return resolveBare(fromDir, spec);

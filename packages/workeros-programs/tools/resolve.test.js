@@ -63,6 +63,33 @@ test("relative resolution with extension + index fallback", () => {
   assert.equal(r.resolveFrom("/proj", "./nope"), null);
 });
 
+// A `file:` URL is a legal ESM specifier. Vite bundles vite.config.js into
+// node_modules/.vite-temp/ and has the output import Vite back by absolute
+// file:// URL — treating that as a bare specifier looked for a package named
+// "file:" and failed the whole dev server ("Cannot find module 'file:///…'").
+test("file: URL specifiers resolve to the path they name", () => {
+  const r = mk({
+    "/proj/node_modules/vite/dist/node/index.js": "",
+    "/proj/a b.js": "",
+  });
+  assert.equal(
+    r.resolveFrom("/proj/node_modules/.vite-temp", "file:///proj/node_modules/vite/dist/node/index.js"),
+    "/proj/node_modules/vite/dist/node/index.js",
+  );
+  // The `fromDir` is irrelevant — a file: URL is absolute.
+  assert.equal(r.resolveFrom("/elsewhere", "file:///proj/a%20b.js"), "/proj/a b.js");
+  // A cache-busting query/hash is routine on these generated imports.
+  assert.equal(r.resolveFrom("/proj", "file:///proj/a%20b.js?t=1700000000"), "/proj/a b.js");
+  assert.equal(r.resolveFrom("/proj", "file:///proj/a%20b.js#frag"), "/proj/a b.js");
+  // RFC 8089: an empty or "localhost" authority is the local machine.
+  assert.equal(r.resolveFrom("/proj", "file://localhost/proj/a%20b.js"), "/proj/a b.js");
+  // A file: URL naming nothing still resolves to nothing (not a throw).
+  assert.equal(r.resolveFrom("/proj", "file:///proj/missing.js"), null);
+  // Not ours to resolve: another host, another scheme, a bad escape.
+  assert.equal(r.resolveFrom("/proj", "file://example.com/proj/a%20b.js"), null);
+  assert.equal(r.resolveFrom("/proj", "file:///proj/a%ZZ.js"), null);
+});
+
 test("node_modules: main, and the walk up to an ancestor", () => {
   const r = mk({
     "/proj/node_modules/leftpad/package.json": '{"main":"lib/index.js"}',
