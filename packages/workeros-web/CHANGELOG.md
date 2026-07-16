@@ -29,6 +29,16 @@ main-thread client API). Format:
   `NET_LOG_RESULT` on the protocol; a 500-entry ring.
 
 ### Fixed
+- **A host-side file write (the editor saving) now fires `fs.watch` — Vite HMR sees
+  edits.** Client filesystem mutations (`os.fs.write`/`mkdir`/`remove`/`rename`, how the
+  playground editor persists a file) went straight to the kernel and never delivered
+  the pending `fs.watch` events, so a watcher — Vite's file watcher — only ever saw
+  writes made by *guest* processes, never an editor save. Editing a source file did
+  nothing: no rebuild, no HMR. The client mutation handlers now drain watch deliveries
+  like the guest syscall path does, and the kernel's client `fs_write` records the
+  change event it was skipping. Verified end to end: editing a component makes Vite log
+  `page reload src/main.jsx` and serve the new module. Covered by `tools/sync-fs.test.js`
+  (and `crates/workeros-kernel` `client_fs_write_records_a_watch_event`).
 - **A Vite dev server is no longer reaped as "CPU time" while idle.** The watchdog
   (ADR-020) reads unresponsiveness — no syscall, no PONG, an idle sync slot — as a
   synchronous `for(;;)` spin and kills after `wallTimeMs`. rolldown's wasm thread pool

@@ -182,6 +182,40 @@ test("fs.watch delivers a change event to a running node process", opts, async (
   assert.match(line, /^EVENT (rename|change) a\.txt$/, line);
 });
 
+// The host-side write path (the playground editor saving a file) must feed
+// fs.watch just like a guest write — otherwise Vite's watcher never sees an edit
+// and HMR never fires. The trigger here is `os.fs.write` (client), not a guest write.
+test("fs.watch sees a host-side (editor) write, not just guest writes", opts, async () => {
+  const { result, pageErrors } = await withPage((page) =>
+    page.evaluate(async () => {
+      const os = await window.__wos.boot();
+      await os.fs.write("/w/seed.txt", "seed"); // ensure /w exists
+      await os.fs.write(
+        "/proj/watch.js",
+        [
+          "const fs = require('fs');",
+          "const w = fs.watch('/w', (type, file) => {",
+          "  if (file === 'edit.txt') { console.log('EVENT', type, file); w.close(); process.exit(0); }",
+          "});",
+          "setTimeout(() => { console.log('TIMEOUT'); process.exit(1); }, 5000);",
+        ].join("\n"),
+      );
+      const dec = new TextDecoder();
+      const proc = await os.spawn(["node", "watch.js"], { cwd: "/proj" });
+      let out = "";
+      proc.onStdout((b) => (out += dec.decode(b)));
+      // Give the watcher a turn to register, then edit via the *client* API.
+      await new Promise((r) => setTimeout(r, 400));
+      await os.fs.write("/w/edit.txt", "changed-by-editor");
+      const code = await proc.exited;
+      return { out, code };
+    }),
+  );
+  assert.deepEqual(pageErrors, []);
+  assert.equal(result.code, 0, result.out);
+  assert.match(result.out.trim(), /^EVENT (rename|change) edit\.txt$/, result.out);
+});
+
 test("readFileSync on a missing file throws ENOENT with a Node-shaped error", opts, async () => {
   const { result, pageErrors } = await withPage((page) =>
     page.evaluate(async () => {

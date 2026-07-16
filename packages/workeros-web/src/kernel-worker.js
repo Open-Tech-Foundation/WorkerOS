@@ -1718,6 +1718,11 @@ self.onmessage = async (ev) => {
 
       case MSG.FS_WRITE:
         kernel.fs_write(msg.path, msg.data);
+        // Notify fs.watch()ers of the change. A host-side write (the playground
+        // editor saving a file) is a mutation like any guest write, so it must feed
+        // the same watch delivery — without this, Vite's file watcher never saw an
+        // editor save and HMR never fired.
+        deliverWatchEvents();
         post({ type: MSG.FS_WRITE, id: msg.id, ok: true });
         break;
 
@@ -1759,6 +1764,7 @@ self.onmessage = async (ev) => {
               try { kernel.sys_readdir(injectorPid, cur); } catch { throw e; }
             }
           }
+          deliverWatchEvents(); // host-side mkdir feeds fs.watch()ers (see FS_WRITE)
           post({ type: MSG.FS_MKDIR, id: msg.id, ok: true });
         } catch (e) {
           post({ type: MSG.ERROR, id: msg.id, error: String(e?.message || e) });
@@ -1781,6 +1787,7 @@ self.onmessage = async (ev) => {
         };
         try {
           removeRec(String(msg.path));
+          deliverWatchEvents(); // host-side rm feeds fs.watch()ers (see FS_WRITE)
           post({ type: MSG.FS_REMOVE, id: msg.id, ok: true });
         } catch (e) {
           post({ type: MSG.ERROR, id: msg.id, error: String(e?.message || e) });
@@ -1792,6 +1799,7 @@ self.onmessage = async (ev) => {
         if (injectorPid < 0) { post({ type: MSG.ERROR, id: msg.id, error: "kernel not ready" }); break; }
         try {
           kernel.sys_rename(injectorPid, msg.from, msg.to);
+          deliverWatchEvents(); // host-side rename feeds fs.watch()ers (see FS_WRITE)
           post({ type: MSG.FS_RENAME, id: msg.id, ok: true });
         } catch (e) {
           post({ type: MSG.ERROR, id: msg.id, error: String(e?.message || e) });

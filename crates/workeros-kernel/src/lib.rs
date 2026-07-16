@@ -819,6 +819,15 @@ impl Kernel {
     pub fn fs_write(&mut self, file_path: &str, data: &[u8]) -> SysResult<()> {
         let abs = path::normalize("/", file_path);
         self.mkdir_p_parent(&abs)?;
+        // Record an fs.watch change like the guest syscall path (path_open) does: a
+        // client write (the playground editor saving a file) is a mutation like any
+        // other, so a watcher — e.g. Vite's file watcher, driving HMR — must see it.
+        // New path → "rename"; overwrite of an existing file → "change".
+        let existed = if self.vfs.watching() {
+            self.vfs.resolve(&abs).is_ok()
+        } else {
+            true
+        };
         let ino = self.vfs.open(
             &abs,
             OpenOptions {
@@ -828,7 +837,16 @@ impl Kernel {
             },
         )?;
         self.vfs.write_at(ino, 0, data)?;
-        self.vfs.close(ino)
+        self.vfs.close(ino)?;
+        if self.vfs.watching() {
+            let kind = if existed {
+                vfs::FsEventKind::Change
+            } else {
+                vfs::FsEventKind::Rename
+            };
+            self.vfs.note_event(&abs, kind);
+        }
+        Ok(())
     }
 
     /// Client `fs.read`: read a whole file.
@@ -1678,6 +1696,29 @@ mod tests {
         let evs2 = k.drain_watch_events();
         assert_eq!(evs2.len(), 1);
         assert_eq!((evs2[0].event_type, evs2[0].filename.as_str()), ("rename", "sub"));
+    }
+
+    #[test]
+    fn client_fs_write_records_a_watch_event() {
+        // A host-side fs_write (the playground editor saving a file) must feed
+        // fs.watch the same as a guest write, or Vite's watcher never sees an edit
+        // and HMR never fires.
+        let mut k = boot();
+        let pid = spawn_main(&mut k, "");
+        k.sys_mkdir(pid, "/w").unwrap();
+        let id = k.watch_add(pid, "/w", false).unwrap();
+
+        // First write creates the file → "rename".
+        k.fs_write("/w/a.txt", b"v1").unwrap();
+        let evs = k.drain_watch_events();
+        assert!(evs.iter().any(|e| e.watch_id == id && e.event_type == "rename" && e.filename == "a.txt"),
+            "create via fs_write should record a rename event");
+
+        // Overwriting the existing file → "change" (the editor re-saving).
+        k.fs_write("/w/a.txt", b"v2").unwrap();
+        let evs2 = k.drain_watch_events();
+        assert!(evs2.iter().any(|e| e.watch_id == id && e.event_type == "change" && e.filename == "a.txt"),
+            "overwrite via fs_write should record a change event");
     }
 
     #[test]

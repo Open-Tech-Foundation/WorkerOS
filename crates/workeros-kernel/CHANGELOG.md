@@ -6,6 +6,13 @@ a release yet, so everything lives under **Unreleased**.
 
 ## [Unreleased]
 
+### Fixed
+- **Client `fs_write` records an `fs.watch` change event.** The host-side write
+  primitive (a non-guest file save) opened, wrote, and closed without noting the
+  change, so a registered watcher never saw it — only guest-syscall writes recorded
+  events. It now notes `rename` (new path) or `change` (overwrite) like `path_open`
+  does, so a `fs.watch` (and Vite's HMR on top of it) reacts to an editor save.
+
 ### Added
 - **Hard links + `realpath` (kernel FS).** `Vfs::link` gives an inode a second
   directory entry (shared content + chunks) — directories are refused (`EISDIR`),
