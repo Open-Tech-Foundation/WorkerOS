@@ -69,12 +69,18 @@ pub const RECOMMENDED: ResourceLimits = ResourceLimits {
     max_procs: 128,
     // 256 open fds/process dwarfs what ordinary programs use; caps fd/pipe bombs.
     max_open_fds: 256,
-    // 256 MiB of in-memory VFS is a large project tree while bounding a disk-fill
-    // DoS against the tab heap (the in-memory VFS lives in the tab, ADR-011).
-    vfs_max_bytes: 256 * 1024 * 1024,
-    // 100k inodes covers a substantial dependency tree; stops an inode-exhaustion
-    // fill (e.g. `while true; do mkdir …`).
-    vfs_max_inodes: 100_000,
+    // 1 GiB of in-memory VFS: a full Vite/React project — its installed
+    // `node_modules` plus the dev server's deps-optimization cache — is ~250-400
+    // MiB of *logical* bytes (the quota is logical; dedup keeps the physical/heap
+    // cost lower), and 256 MiB used to run out mid-`npm install` (npm couldn't
+    // even write its own debug log → ENOSPC). This still bounds a disk-fill DoS
+    // against the tab heap (the in-memory VFS lives in the tab, ADR-011); a host
+    // that wants a tighter or looser ceiling overrides it at boot (below).
+    vfs_max_bytes: 1024 * 1024 * 1024,
+    // 256k inodes covers a large dependency tree (a Vite app's node_modules is
+    // tens of thousands of files) while still stopping an inode-exhaustion fill
+    // (e.g. `while true; do mkdir …`).
+    vfs_max_inodes: 256_000,
 };
 
 impl Default for ResourceLimits {

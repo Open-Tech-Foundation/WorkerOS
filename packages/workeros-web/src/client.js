@@ -24,6 +24,11 @@ function toBytes(data) {
  * @param {object} [opts]
  * @param {string} [opts.workerUrl] URL of kernel-worker.js.
  * @param {string} [opts.wasmUrl] URL of the kernel .wasm binary.
+ * @param {{ vfsMaxBytes?: number, vfsMaxInodes?: number, maxProcs?: number,
+ *           maxOpenFds?: number }} [opts.limits] Override the kernel resource
+ *   caps (INV-6, ADR-020); absent fields inherit the recommended defaults
+ *   (limits.rs `RECOMMENDED`). Raise `vfsMaxBytes` to give a large project tree
+ *   more filesystem headroom, or lower the caps to tighten an untrusted profile.
  * @returns {Promise<WorkerOS>}
  */
 export function boot(opts = {}) {
@@ -68,7 +73,7 @@ export function boot(opts = {}) {
     // `opts.watchdog` optionally overrides the temporal limits (ADR-020):
     // { wallTimeMs, graceMs, sampleMs, memHighWaterBytes } — e.g. a tight
     // profile for untrusted/AI-agent code, or fast budgets in tests.
-    worker.postMessage({ type: MSG.BOOT, wasmUrl, watchdog: opts.watchdog });
+    worker.postMessage({ type: MSG.BOOT, wasmUrl, watchdog: opts.watchdog, limits: opts.limits });
   });
 }
 

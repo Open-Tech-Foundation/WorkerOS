@@ -1623,7 +1623,11 @@ self.onmessage = async (ev) => {
     switch (msg.type) {
       case MSG.BOOT: {
         await init({ module_or_path: msg.wasmUrl });
-        kernel = WebKernel.boot();
+        // A host override of the kernel resource caps (INV-6, ADR-020) rides the
+        // boot message: `{ vfsMaxBytes?, vfsMaxInodes?, maxProcs?, maxOpenFds? }`,
+        // absent fields inheriting limits.rs RECOMMENDED. Used to give a big
+        // project tree more VFS headroom, or to tighten caps for untrusted code.
+        kernel = msg.limits ? WebKernel.bootWithLimits(msg.limits) : WebKernel.boot();
         // The network injector's pseudo-process (ADR-021): host-side endpoint the
         // Service Worker's preview requests are driven through.
         injectorPid = kernel.register_host_process();

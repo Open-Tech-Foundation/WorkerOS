@@ -59,6 +59,21 @@ struct CapsDto {
     net_egress: Option<bool>,
 }
 
+/// A partial resource-cap override for `bootWithLimits` (ADR-020); absent fields
+/// inherit the recommended defaults. Camel-cased to match the JS boot options.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct LimitsDto {
+    #[serde(default)]
+    max_procs: Option<usize>,
+    #[serde(default)]
+    max_open_fds: Option<usize>,
+    #[serde(default)]
+    vfs_max_bytes: Option<u64>,
+    #[serde(default)]
+    vfs_max_inodes: Option<usize>,
+}
+
 #[derive(Serialize)]
 struct WriteDto {
     /// "stdout" | "stderr" | "file" | "pipe" — "pipe" may carry a *short*
@@ -265,12 +280,36 @@ impl StdioTargetDto {
 
 #[wasm_bindgen]
 impl WebKernel {
-    /// Boot the kernel. The JS glue calls this once when the kernel worker
-    /// starts and posts the handshake (version/abi) back to the main thread.
+    /// Boot the kernel with the recommended resource caps. The JS glue calls
+    /// this once when the kernel worker starts and posts the handshake
+    /// (version/abi) back to the main thread.
     #[wasm_bindgen(js_name = boot)]
     pub fn boot() -> WebKernel {
         let (inner, _handshake) = Kernel::boot();
         WebKernel { inner }
+    }
+
+    /// Boot with a partial resource-cap override (INV-6, ADR-020). `limits` is a
+    /// `{ vfsMaxBytes?, vfsMaxInodes?, maxProcs?, maxOpenFds? }` object; absent
+    /// fields inherit the recommended defaults (`limits.rs` `RECOMMENDED`). This
+    /// is the host seam for raising the VFS ceiling (a big project tree) or
+    /// tightening it for untrusted/AI-agent code, per instance.
+    #[wasm_bindgen(js_name = bootWithLimits)]
+    pub fn boot_with_limits(limits: JsValue) -> Result<WebKernel, JsError> {
+        let base = workeros_kernel::limits::ResourceLimits::default();
+        let dto: LimitsDto = if limits.is_undefined() || limits.is_null() {
+            LimitsDto::default()
+        } else {
+            serde_wasm_bindgen::from_value(limits).map_err(|e| JsError::new(&e.to_string()))?
+        };
+        let merged = workeros_kernel::limits::ResourceLimits {
+            max_procs: dto.max_procs.unwrap_or(base.max_procs),
+            max_open_fds: dto.max_open_fds.unwrap_or(base.max_open_fds),
+            vfs_max_bytes: dto.vfs_max_bytes.unwrap_or(base.vfs_max_bytes),
+            vfs_max_inodes: dto.vfs_max_inodes.unwrap_or(base.vfs_max_inodes),
+        };
+        let (inner, _handshake) = Kernel::boot_with_limits(merged);
+        Ok(WebKernel { inner })
     }
 
     #[wasm_bindgen(getter)]
