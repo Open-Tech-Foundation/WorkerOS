@@ -15,8 +15,8 @@
     "access": "public"
   },
   "scripts": {
-    "build:wasm": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --release",
-    "build:wasm:dev": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --dev",
+    "build:wasm": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --release --no-pack && rm -f src/kernel-wasm/.gitignore src/kernel-wasm/package.json",
+    "build:wasm:dev": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --dev --no-pack && rm -f src/kernel-wasm/.gitignore src/kernel-wasm/package.json",
     "build": "npm run build:wasm",
     "build:programs": "node ../workeros-programs/tools/bundle.mjs",
     "build:coreutils": "node ../workeros-coreutils/tools/bundle.mjs",
