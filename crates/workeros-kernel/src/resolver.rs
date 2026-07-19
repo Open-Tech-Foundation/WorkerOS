@@ -266,6 +266,13 @@ fn read_file(vfs: &dyn Vfs, path_abs: &str) -> Result<Vec<u8>, ResolveError> {
         return Err(ResolveError::NotFound(path_abs.to_string()));
     }
     let ino = vfs.resolve(path_abs).map_err(ResolveError::Io)?;
+    // Demand paging (ADR-022): the resolver reads a spawn entry in-kernel, with no
+    // way to page a persisted file's chunks in mid-read. The host pages the entry
+    // in before spawn (see `spawn_missing_chunks`); this refuses a not-yet-resident
+    // entry (EAGAIN) rather than run a half-materialized, corrupt program.
+    if !vfs.file_fully_resident(ino) {
+        return Err(ResolveError::Io(Errno::Again));
+    }
     let mut buf = vec![0u8; meta.size as usize];
     vfs.read_at(ino, 0, &mut buf).map_err(ResolveError::Io)?;
     Ok(buf)

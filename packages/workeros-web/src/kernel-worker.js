@@ -11,8 +11,8 @@ import init, { WebKernel } from "./kernel-wasm/workeros_web_wasm.js";
 import { MSG } from "./protocol.js";
 import { createShell } from "./shell-exec.js";
 import { createLineEditor } from "./shell/readline.js";
-import { bundledCoreutils } from "../../workeros-coreutils/src/index.js";
-import { programs as osPrograms, libraries as osLibraries } from "../../workeros-programs/src/index.js";
+import { bundledCoreutils } from "@opentf/workeros-coreutils";
+import { programs as osPrograms, libraries as osLibraries } from "@opentf/workeros-programs";
 import { allocSyncBuffer, readRequest, requestBytes, writeResponse, views, STATE, S_IDLE } from "./sync-syscall.js";
 import { frameExecResult } from "./exec-frame.js";
 import { openPersistence } from "./persistence.js";
@@ -177,6 +177,55 @@ async function persistNow() {
   }
 }
 
+// Demand paging (ADR-022): fetch the given chunk hashes from the persistence
+// backend and load their bytes into the kernel store, so a faulted read/write can
+// retry and find them resident. Returns the number of chunks actually loaded — 0
+// means none were available (a genuinely absent or corrupt block), which lets a
+// caller fail the syscall instead of looping fault→retry forever. `loadChunk`
+// re-verifies the hash; a mismatch is dropped (the requested block stays absent).
+async function pageInChunks(hexes) {
+  if (!persistence || !persistence.available) return 0;
+  let loaded = 0;
+  for (const hex of hexes) {
+    let bytes;
+    try {
+      bytes = await persistence.getChunk(hex);
+    } catch {
+      bytes = null;
+    }
+    if (!bytes) continue;
+    const got = kernel.loadChunk(bytes);
+    if (got !== hex) {
+      console.warn(`[workeros] chunk ${hex} failed integrity (got ${got}); dropping`);
+      continue;
+    }
+    loaded++;
+  }
+  return loaded;
+}
+
+// Demand paging for spawn (ADR-022): page the resolved entry file in before the
+// in-kernel resolver reads its bytes (shebang + JS/wasm classification) — it has
+// no host round-trip of its own, so a persisted entry executed directly (e.g. wsh
+// running `./app.js` under /home) must be resident first. Loops in case a shebang
+// redirect appears once the entry is readable. Best-effort: if a block is
+// genuinely absent, the resolver refuses the entry (EAGAIN) and spawn fails loudly
+// rather than running a half-materialized program.
+async function ensureEntryResident(argv, env, cwd) {
+  if (!persistence || !persistence.available) return;
+  const envEntries = Object.entries(env || {});
+  for (let i = 0; i < 64; i++) {
+    let missing;
+    try {
+      missing = kernel.spawnMissingChunks(argv, envEntries, cwd);
+    } catch {
+      return;
+    }
+    if (!missing || missing.length === 0) return;
+    if ((await pageInChunks(missing)) === 0) return; // absent block; let spawn surface it
+  }
+}
+
 // The shell session state (cwd/env) for non-interactive, host-driven runs: the
 // client `exec()` channel and captured `system(3)`/child_process runs. Each
 // interactive terminal keeps its *own* session (see `Terminal`); this is the base
@@ -186,7 +235,7 @@ async function persistNow() {
 // back to plain text on a TTY.
 const systemSession = {
   cwd: "/",
-  env: { HOME: "/", PATH: "/bin:/sbin", TERM: "xterm-256color", COLORTERM: "truecolor" },
+  env: { HOME: "/home", PATH: "/bin:/sbin", TERM: "xterm-256color", COLORTERM: "truecolor" },
 };
 
 // The primary controlling terminal (kernel `PRIMARY_TTY`), present from boot. The
@@ -268,8 +317,10 @@ class Terminal {
   constructor(ttyId) {
     this.ttyId = ttyId;
     // A private shell session, seeded from the base env (PATH etc. already applied
-    // by the boot profile) so a new terminal starts ready without re-sourcing.
-    this.session = { cwd: "/", env: { ...systemSession.env } };
+    // by the boot profile) so a new terminal starts ready without re-sourcing. Login
+    // cwd is $HOME (/home), the persistent user disk — like logging into a real OS,
+    // your working dir survives reloads while the ephemeral OS image at / does not.
+    this.session = { cwd: "/home", env: { ...systemSession.env } };
     this.started = false; // the REPL loop is running
     this.execRunning = false; // a foreground command is running under the REPL
     this.termWaiter = null; // { resolve } awaiting the next committed input line
@@ -631,7 +682,10 @@ function startWorker(spawned, { argv, env, cwd, sink, onExit }) {
  *  pipeline. Later stages join `pgroup.leader`. `ttyId` undefined (captured
  *  `system(3)`/child runs) touches no terminal — those inherit the parent's ctty
  *  and never seize a foreground group. */
-function startProcess({ argv, env, cwd, plan, sink, ppid, pgroup, ttyId }) {
+async function startProcess({ argv, env, cwd, plan, sink, ppid, pgroup, ttyId }) {
+  // Demand paging: ensure a directly-executed persisted entry is resident before
+  // the kernel resolver reads it (no-op for the resident OS image at /bin,/sbin).
+  await ensureEntryResident(argv, env, cwd);
   const pgid = pgroup ? pgroup.leader || 0 : undefined;
   // Interactive pipelines attach to their terminal; captured runs pass ctty=null
   // to inherit the calling process's terminal (isatty/winsize stay truthful).
@@ -1071,6 +1125,24 @@ function pumpIo() {
   }
 }
 
+// A sync read/write hit a demand-paging fault (its file's chunks aren't resident).
+// Page the missing chunks in from the backend, then re-service the SAME request —
+// it's still in the SAB and the guest is still parked in Atomics.wait, so a plain
+// re-entry retries transparently. Each retry makes progress (≥1 chunk now resident,
+// shrinking the missing set) or pages in nothing (a genuinely absent/corrupt block)
+// → fail the syscall instead of looping forever.
+function retrySyncAfterPageIn(pid, chunks) {
+  pageInChunks(chunks).then((loaded) => {
+    const rec = programs.get(pid);
+    if (!rec || rec.done) return;
+    if (loaded === 0) {
+      writeResponse(rec.syncSab, -1, { error: "errno Noent (44)" });
+      return;
+    }
+    serviceSync(pid);
+  });
+}
+
 /** Service one synchronous syscall request sitting in a process's SAB. */
 function serviceSync(pid) {
   const rec = programs.get(pid);
@@ -1090,6 +1162,11 @@ function serviceSync(pid) {
     switch (req.call) {
       case "read": {
         const res = kernel.sys_read(pid, req.fd, req.max);
+        if (res.status === "fault") {
+          // Demand paging: the file's chunks for this read aren't resident yet.
+          retrySyncAfterPageIn(pid, res.chunks);
+          return;
+        }
         if (res.status === "again") {
           syncPending.push({ pid, req }); // park; respond when data/EOF arrives
           return;
@@ -1109,6 +1186,11 @@ function serviceSync(pid) {
           // Broken pipe: apply the SIGPIPE disposition. If the default killed
           // the process, its worker is gone — no response to write.
           if (breakPipe(pid)) writeResponse(rec.syncSab, -1, { error: "errno Pipe (64)" });
+          return;
+        }
+        if (eff.target === "fault") {
+          // Demand paging: an in-place write must materialize the whole file first.
+          retrySyncAfterPageIn(pid, eff.chunks);
           return;
         }
         // A write to an un-redirected terminal fd streams to the host; a file
@@ -1305,6 +1387,14 @@ function handleSyscall(pid, msg) {
           breakPipe(pid); // caught: signal delivered, bytes dropped; else killed
           break;
         }
+        if (eff.target === "fault") {
+          // Demand paging: page the file in, then retry the same (fire-and-forget)
+          // write. Give up only if nothing could be paged in (absent block).
+          pageInChunks(eff.chunks).then((loaded) => {
+            if (loaded > 0) handleSyscall(pid, msg);
+          });
+          break;
+        }
         const rec = programs.get(pid);
         if (rec) {
           if (eff.target === "stdout") rec.sink.stdout(args.data);
@@ -1318,8 +1408,15 @@ function handleSyscall(pid, msg) {
       }
       case "read": {
         const res = kernel.sys_read(pid, args.fd, args.max);
-        if (res.status === "again") pendingReads.push({ pid, id, fd: args.fd, max: args.max });
-        else {
+        if (res.status === "fault") {
+          // Demand paging: fetch the file's chunks, then retry the same request.
+          pageInChunks(res.chunks).then((loaded) => {
+            if (loaded === 0) reply(pid, id, false, "errno Noent (44)");
+            else handleSyscall(pid, msg);
+          });
+        } else if (res.status === "again") {
+          pendingReads.push({ pid, id, fd: args.fd, max: args.max });
+        } else {
           reply(pid, id, true, res);
           pumpIo(); // a pipe read frees capacity → parked writers may proceed
         }
@@ -1631,6 +1728,23 @@ self.onmessage = async (ev) => {
         // The network injector's pseudo-process (ADR-021): host-side endpoint the
         // Service Worker's preview requests are driven through.
         injectorPid = kernel.register_host_process();
+        // Durability policy is the HOST's to declare — the kernel only provides the
+        // mount mechanism (INV-1, ADR-022). WorkerOS is an *immutable OS image*: the
+        // whole of `/` (kernel, coreutils, runtime, npm) is reshipped every boot, so
+        // root is ephemeral and nothing of the OS is ever projected to storage. A
+        // small set of persistent "disks" is carved out below. This is what keeps
+        // boot cost O(user-data) instead of O(everything-ever-written) — the OS trees
+        // are never hydrated. Longest-prefix match makes the carve-outs win over the
+        // ephemeral root (see vfs/mount.rs).
+        kernel.mount("/", true);          // ephemeral: the OS image, reshipped each boot
+        kernel.mount("/.system", false);  // persist: the OS's own durable state (policy-gated)
+        kernel.mount("/.apps", false);    // persist: installed apps (reserved for the app SDK)
+        kernel.mount("/home", false);     // persist: user files + the login home ($HOME)
+        // Materialize the disk mount points so the login shell can chdir into $HOME
+        // and tools can write there before anything is restored.
+        for (const dir of ["/.system", "/.apps", "/home"]) {
+          try { kernel.sys_mkdir(injectorPid, dir); } catch { /* already present */ }
+        }
         // Install the coreutils into /sbin (system binaries, kept apart from the
         // /bin OS programs) so the shell can resolve them via PATH. Each ships as
         // a single self-contained bundle (esbuild inlined its one shared import,
@@ -1676,26 +1790,22 @@ self.onmessage = async (ev) => {
               "export PATH=/.node_modules/.bin:$PATH\n",
           ),
         );
-        // Restore the durable filesystem (ADR-022) on top of the freshly
-        // installed OS, from the content-addressed block store. The manifest
-        // holds only persistent paths (the OS trees /bin,/sbin,/lib and /tmp are
-        // ephemeral, so they never conflict). Chunks are loaded (integrity-
-        // checked by hash) before the manifest references them.
+        // Restore the durable disks (ADR-022) on top of the freshly installed OS
+        // image. Demand paging: we hydrate ONLY the manifest — the directory tree
+        // + each file's size/mtime/chunk-hash list — and NOT a single chunk of
+        // file data. Boot cost is therefore O(manifest), independent of how much
+        // is stored; a file's bytes fault in from the backend on first read (see
+        // `pageInChunks` + the "fault" handling in serviceSync/handleSyscall).
+        // With the immutable-OS policy only /home,/.system,/.apps are in the
+        // manifest anyway (the OS trees are ephemeral). This is what makes boot
+        // instant regardless of disk size.
         persistence = await openPersistence();
         try {
           const manifest = await persistence.loadManifest();
           if (manifest && manifest.length) {
-            for (const hex of await persistence.allChunkKeys()) {
-              const bytes = await persistence.getChunk(hex);
-              if (!bytes) continue;
-              const got = kernel.loadChunk(bytes);
-              if (got !== hex) {
-                console.warn(`[workeros] chunk ${hex} failed integrity (got ${got}); skipping`);
-              }
-            }
             kernel.hydrateManifest(manifest);
-            // Re-register retained snapshots on top (their chunks were loaded
-            // above, part of the live set). Ignored if none were stored.
+            // Retained snapshots reference chunks in the durable set; they page in
+            // on demand too. Ignored if none were stored.
             const snaps = await persistence.loadSnapshots();
             if (snaps && snaps.length) kernel.snapshotImport(snaps);
           }
@@ -1731,6 +1841,14 @@ self.onmessage = async (ev) => {
         break;
 
       case MSG.FS_READ: {
+        // Demand paging (ADR-022): a host read bypasses the guest fd fault path,
+        // so page the file's chunks in first (bounded loop; stop if a block is
+        // genuinely absent).
+        let miss = kernel.pathMissingChunks(msg.path);
+        while (miss.length) {
+          if ((await pageInChunks(miss)) === 0) break;
+          miss = kernel.pathMissingChunks(msg.path);
+        }
         const data = kernel.fs_read(msg.path);
         post({ type: MSG.FS_READ, id: msg.id, data });
         break;

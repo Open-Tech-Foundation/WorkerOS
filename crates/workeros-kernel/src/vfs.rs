@@ -317,6 +317,14 @@ pub trait Vfs {
     fn write_at(&mut self, ino: Ino, offset: u64, data: &[u8]) -> SysResult<usize>;
     /// Current size of a file inode in bytes.
     fn size(&self, ino: Ino) -> SysResult<u64>;
+
+    /// Whether every content chunk of file `ino` is resident in memory (demand
+    /// paging, ADR-022). The in-kernel resolver reads a spawn entry's bytes with
+    /// no host round-trip, so it must refuse a not-yet-paged-in entry rather than
+    /// read it half-materialized. Defaults to `true` for non-paging Vfs impls.
+    fn file_fully_resident(&self, _ino: Ino) -> bool {
+        true
+    }
 }
 
 /// Options for [`Vfs::open`].
@@ -795,6 +803,49 @@ impl MemVfs {
     pub fn chunk_bytes_hex(&self, hex: &str) -> Option<Vec<u8>> {
         let h = crate::hash::from_hex(hex)?;
         self.store.get(&h).map(|b| b.to_vec())
+    }
+
+    /// Demand paging (ADR-022): the chunk hashes (hex) covering the byte range
+    /// `[offset, offset+len)` of file `ino` that are **not yet resident** in the
+    /// store. Boot hydrates only the manifest (tree + hash lists), so a file's
+    /// chunks are absent until first touched; the host pages these in from the
+    /// persistence backend before the read completes. Empty when everything the
+    /// read needs is already resident (the common, hot path) or `ino` is not a file.
+    pub fn missing_read_chunks(&self, ino: Ino, offset: u64, len: usize) -> Vec<String> {
+        let (chunks, size) = match self.slots.get(ino).and_then(|s| s.as_ref()).map(|i| &i.kind) {
+            Some(Kind::File { chunks, size }) => (chunks, *size),
+            _ => return Vec::new(),
+        };
+        if len == 0 || offset >= size {
+            return Vec::new();
+        }
+        let end = (offset + len as u64).min(size) as usize;
+        let first = offset as usize / CHUNK_SIZE;
+        let last = (end - 1) / CHUNK_SIZE;
+        let mut out = Vec::new();
+        for h in chunks.iter().take(last + 1).skip(first) {
+            if self.store.get(h).is_none() {
+                out.push(crate::hash::to_hex(h));
+            }
+        }
+        out
+    }
+
+    /// Every non-resident chunk hash (hex) of file `ino`. A write is a
+    /// read-modify-rechunk over the *whole* file (see `write_at`), so the host
+    /// must page the entire file in before an in-place write of a not-yet-resident
+    /// file — a partial materialize would corrupt it. Empty for a fully resident
+    /// file (or a non-file / freshly truncated file with no chunks).
+    pub fn missing_file_chunks(&self, ino: Ino) -> Vec<String> {
+        let chunks = match self.slots.get(ino).and_then(|s| s.as_ref()).map(|i| &i.kind) {
+            Some(Kind::File { chunks, .. }) => chunks,
+            _ => return Vec::new(),
+        };
+        chunks
+            .iter()
+            .filter(|h| self.store.get(h).is_none())
+            .map(crate::hash::to_hex)
+            .collect()
     }
 
     /// Load a chunk's bytes into the store at boot (refcount stays 0 until the
@@ -1634,6 +1685,10 @@ impl Vfs for MemVfs {
             Kind::Dir { .. } => Err(Errno::Isdir),
             Kind::Symlink { target } => Ok(target.len() as u64),
         }
+    }
+
+    fn file_fully_resident(&self, ino: Ino) -> bool {
+        self.missing_file_chunks(ino).is_empty()
     }
 }
 

@@ -558,6 +558,26 @@ impl ProcessCtx {
         }
     }
 
+    /// The inode behind `fd` if it is an open regular file (not a pipe, stdio, or
+    /// directory). The host uses this to page a persisted file's chunks in on
+    /// demand (ADR-022) before a read/write touches its content.
+    pub fn fd_file_ino(&self, fd: Fd) -> Option<usize> {
+        match self.fds.get(&fd) {
+            Some(Handle::File { ino, .. }) => Some(*ino),
+            _ => None,
+        }
+    }
+
+    /// The (inode, read cursor) behind `fd` if it is an open regular file. Lets
+    /// the host page in only the chunks a read at the current offset touches
+    /// (range-granular demand paging), not the whole file.
+    pub fn fd_file_pos(&self, fd: Fd) -> Option<(usize, u64)> {
+        match self.fds.get(&fd) {
+            Some(Handle::File { ino, cursor, .. }) => Some((*ino, *cursor)),
+            _ => None,
+        }
+    }
+
     /// `fd_read`. See [`ReadOutcome`] for the streaming semantics.
     pub fn fd_read(
         &mut self,

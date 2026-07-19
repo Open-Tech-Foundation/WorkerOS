@@ -245,6 +245,16 @@ fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsError> {
     serde_wasm_bindgen::to_value(value).map_err(|e| JsError::new(&e.to_string()))
 }
 
+/// A JS string array of chunk hex hashes — the `chunks` field of a demand-paging
+/// "fault" reply (ADR-022).
+fn hex_array(hexes: &[String]) -> JsValue {
+    let arr = js_sys::Array::new();
+    for h in hexes {
+        arr.push(&JsValue::from_str(h));
+    }
+    arr.into()
+}
+
 fn parse_mode(s: &str) -> Result<RedirectMode, JsError> {
     match s {
         "read" => Ok(RedirectMode::Read),
@@ -494,6 +504,17 @@ impl WebKernel {
     /// target the host forwards the same bytes it passed in to the main thread.
     #[wasm_bindgen]
     pub fn sys_write(&mut self, pid: Pid, fd: Fd, data: &[u8]) -> Result<JsValue, JsError> {
+        // Demand paging (ADR-022): an in-place write is a read-modify-rechunk over
+        // the whole file (write_at), so page the whole file in first if any chunk
+        // is absent — a partial materialize would corrupt it. Returns `{ target:
+        // "fault", chunks }`; the host fetches the chunks and re-issues the write.
+        let missing = self.inner.fd_missing_file_chunks(pid, fd);
+        if !missing.is_empty() {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &JsValue::from_str("target"), &JsValue::from_str("fault")).unwrap();
+            js_sys::Reflect::set(&obj, &JsValue::from_str("chunks"), &hex_array(&missing)).unwrap();
+            return Ok(obj.into());
+        }
         let effect = self.inner.sys_write(pid, fd, data).map_err(errno_to_js)?;
         let dto = match effect {
             WriteEffect::Stdout(b) => WriteDto { target: "stdout", nwritten: b.len() },
@@ -504,16 +525,45 @@ impl WebKernel {
         to_js(&dto)
     }
 
+    /// Demand paging (ADR-022): hex hashes of the not-yet-resident chunks the file
+    /// at `path` needs — for host-side reads (`fs_read`) that bypass a guest fd.
+    #[wasm_bindgen(js_name = pathMissingChunks)]
+    pub fn path_missing_chunks(&self, path: &str) -> Vec<String> {
+        self.inner.path_missing_chunks(path)
+    }
+
+    /// Demand paging (ADR-022): hex hashes of the non-resident chunks of the entry
+    /// `argv` resolves to. The host pages these in before `spawn`, since the
+    /// in-kernel resolver reads the entry's bytes (shebang/kind) without a host
+    /// round-trip. `env` is `[[k,v],…]`.
+    #[wasm_bindgen(js_name = spawnMissingChunks)]
+    pub fn spawn_missing_chunks(&self, argv: Vec<String>, env: JsValue, cwd: &str) -> Result<Vec<String>, JsError> {
+        let env: Vec<(String, String)> = if env.is_undefined() || env.is_null() {
+            Vec::new()
+        } else {
+            serde_wasm_bindgen::from_value(env).map_err(|e| JsError::new(&e.to_string()))?
+        };
+        Ok(self.inner.spawn_missing_chunks(&argv, &env, cwd))
+    }
+
     /// Dispatch `fd_read`. Returns `{ status: "data"|"eof"|"again", data? }`.
     /// `data` is a `Uint8Array`. The host parks the request on "again" (a pipe
     /// with a live writer) and retries when the pipe advances.
     #[wasm_bindgen]
     pub fn sys_read(&mut self, pid: Pid, fd: Fd, max: u32) -> Result<JsValue, JsError> {
-        let result = self.inner.sys_read(pid, fd, max as usize).map_err(errno_to_js)?;
         let obj = js_sys::Object::new();
         let set = |k: &str, v: &JsValue| {
             js_sys::Reflect::set(&obj, &JsValue::from_str(k), v).unwrap();
         };
+        // Demand paging (ADR-022): if the chunks this read touches aren't resident
+        // yet, ask the host to fetch them first (without advancing the fd cursor).
+        let missing = self.inner.fd_missing_read_chunks(pid, fd, max as usize);
+        if !missing.is_empty() {
+            set("status", &JsValue::from_str("fault"));
+            set("chunks", &hex_array(&missing));
+            return Ok(obj.into());
+        }
+        let result = self.inner.sys_read(pid, fd, max as usize).map_err(errno_to_js)?;
         match result {
             ReadResult::Data(bytes) => {
                 set("status", &JsValue::from_str("data"));

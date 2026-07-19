@@ -324,6 +324,55 @@ impl Kernel {
         self.vfs.chunk_bytes_hex(hex)
     }
 
+    // --- Demand paging (ADR-022): residency queries ------------------------
+    // Boot restores only the manifest, so a persisted file's chunk bytes are
+    // absent until first touched. Before a read/write the host asks which chunks
+    // it must fetch from the persistence backend and `load_chunk` in.
+
+    /// Hex hashes a read of `max` bytes at `fd`'s current offset needs but that
+    /// are not yet resident (range-granular).
+    pub fn fd_missing_read_chunks(&self, pid: Pid, fd: Fd, max: usize) -> Vec<String> {
+        match self.contexts.get(&pid).and_then(|c| c.fd_file_pos(fd)) {
+            Some((ino, cursor)) => self.vfs.missing_read_chunks(ino, cursor, max),
+            None => Vec::new(),
+        }
+    }
+
+    /// Hex hashes of every non-resident chunk of `fd`'s file — the whole file,
+    /// which an in-place write must materialize (read-modify-rechunk).
+    pub fn fd_missing_file_chunks(&self, pid: Pid, fd: Fd) -> Vec<String> {
+        match self.contexts.get(&pid).and_then(|c| c.fd_file_ino(fd)) {
+            Some(ino) => self.vfs.missing_file_chunks(ino),
+            None => Vec::new(),
+        }
+    }
+
+    /// Hex hashes of every non-resident chunk of the file at `path` — for host
+    /// reads (`fs_read`) that bypass a guest fd.
+    pub fn path_missing_chunks(&self, path: &str) -> Vec<String> {
+        let abs = path::normalize("/", path);
+        match self.vfs.resolve(&abs) {
+            Ok(ino) => self.vfs.missing_file_chunks(ino),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Hex hashes of the non-resident chunks of the entry `argv` resolves to. The
+    /// in-kernel resolver reads a spawn entry's bytes to parse its shebang/kind, so
+    /// a directly-executed *persisted* script must be paged in first; the host
+    /// calls this before `spawn` and pages the result in. Resolution here is
+    /// path-only (any shebang read is best-effort and swallowed), so a non-resident
+    /// entry still yields its path. Empty if resident or unresolvable.
+    pub fn spawn_missing_chunks(&self, argv: &[String], env: &[(String, String)], cwd: &str) -> Vec<String> {
+        match resolver::resolve_invocation(&self.vfs, cwd, argv, env, DEFAULT_PATH) {
+            Ok(inv) => match self.vfs.resolve(&inv.entry) {
+                Ok(ino) => self.vfs.missing_file_chunks(ino),
+                Err(_) => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Load a chunk's bytes into the store at boot; returns its verified hex
     /// hash so the host can detect a corrupt/misfiled block.
     pub fn load_chunk(&mut self, bytes: Vec<u8>) -> String {

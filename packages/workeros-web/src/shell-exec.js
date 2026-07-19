@@ -98,7 +98,7 @@ export function createShell({ kernel, startProcess, session, readLine }) {
 
     let handle;
     try {
-      handle = startProcess({ argv, env: withNodeBinPath(cwd, env), cwd, plan, ppid, pgroup, sink: { stdout: (b) => outSink(b), stderr: (b) => errSink(b) } });
+      handle = await startProcess({ argv, env: withNodeBinPath(cwd, env), cwd, plan, ppid, pgroup, sink: { stdout: (b) => outSink(b), stderr: (b) => errSink(b) } });
     } catch (e) {
       errSink(enc.encode((argv[0] || "wsh") + ": " + (e.message || e) + "\n"));
       cleanup();

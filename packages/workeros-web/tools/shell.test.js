@@ -274,8 +274,10 @@ test("Tab completion at the interactive prompt: commands, dirs, and ambiguous ma
     page.evaluate(async () => {
       const os = await window.__wos.boot();
       // Seed a tree with two files sharing the prefix "read" under a directory.
-      await os.exec("mkdir -p project/src", {});
-      await os.exec("sh -c 'echo x > project/readme.md; echo y > project/readline.js'", {});
+      // Interactive terminals log into $HOME (/home), so seed there — that's the
+      // cwd the Tab completions below resolve against.
+      await os.exec("mkdir -p /home/project/src", {});
+      await os.exec("sh -c 'echo x > /home/project/readme.md; echo y > /home/project/readline.js'", {});
 
       const dec = new TextDecoder();
       let term = "";

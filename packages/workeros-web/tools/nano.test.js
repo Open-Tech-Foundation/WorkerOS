@@ -790,7 +790,9 @@ test("nano: ^R inserts another file at the cursor", opts, async () => {
     const dec = new TextDecoder();
     let out = "";
     os.onOutput((b) => (out += dec.decode(b)));
-    await os.fs.write("/inc.txt", "INCLUDED\n");
+    // Seed under $HOME (/home): the interactive terminal logs in there, so nano
+    // resolves the relative `inc.txt` typed at the ^R prompt against /home.
+    await os.fs.write("/home/inc.txt", "INCLUDED\n");
     os.startTerminal();
     const waitFor = async (s, ms = 8000) => {
       const t0 = Date.now();

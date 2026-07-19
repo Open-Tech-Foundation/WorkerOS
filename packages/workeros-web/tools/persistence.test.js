@@ -1,8 +1,9 @@
 // Persistence acceptance test (ADR-022), driven in a real browser via Playwright.
-// Proves the headline durability contract end-to-end: a file on a persistent
-// path survives a full page reload (fresh worker + fresh kernel, rehydrated from
-// IndexedDB), while a file under an ephemeral path (`/tmp`) is discarded — the
-// "scaffold a project in /tmp, try it, throw it away on close" workflow.
+// Proves the headline durability contract end-to-end: a file on a persistent disk
+// (`/home` — WorkerOS is an immutable OS image where root `/` is ephemeral and
+// only the disks `/home`,`/.system`,`/.apps` persist) survives a full page reload
+// (fresh worker + fresh kernel, rehydrated from IndexedDB), while a file under an
+// ephemeral path (`/tmp`, or the reshipped OS image at `/`) is discarded.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -33,7 +34,7 @@ test("durable paths survive reload; /tmp is ephemeral (ADR-022)", opts, async ()
     // Session 1 — write a durable file and an ephemeral one, then flush to disk.
     await page.evaluate(async () => {
       const os = await window.__wos.boot();
-      await os.fs.write("/keep.txt", "durable data");
+      await os.fs.write("/home/keep.txt", "durable data");
       await os.fs.write("/tmp/scratch.txt", "ephemeral data");
       await os.flush(); // await the IndexedDB write before we reload
     });
@@ -47,7 +48,7 @@ test("durable paths survive reload; /tmp is ephemeral (ADR-022)", opts, async ()
     const res = await page.evaluate(async () => {
       const os = await window.__wos.boot();
       const dec = new TextDecoder();
-      const keep = dec.decode(await os.fs.read("/keep.txt"));
+      const keep = dec.decode(await os.fs.read("/home/keep.txt"));
       let scratchErr = false;
       let scratch = null;
       try {
@@ -92,7 +93,7 @@ test("multi-chunk binary file survives reload via the block store (ADR-022)", op
       for (let i = 0; i < data.length; i++) {
         data[i] = (i * 31 + 7 + Math.floor(i / (64 * 1024)) * 101) & 0xff;
       }
-      await os.fs.write("/big.bin", data);
+      await os.fs.write("/home/big.bin", data);
       await os.flush();
       // Simple checksum to compare across the reload.
       let sum = 0;
@@ -105,7 +106,7 @@ test("multi-chunk binary file survives reload via the block store (ADR-022)", op
 
     const res = await page.evaluate(async () => {
       const os = await window.__wos.boot();
-      const got = await os.fs.read("/big.bin");
+      const got = await os.fs.read("/home/big.bin");
       let sum = 0;
       for (let i = 0; i < got.length; i++) sum = (sum + got[i] * (i + 1)) >>> 0;
       return { len: got.length, sum };
@@ -160,14 +161,14 @@ test("mark-sweep GC reclaims the chunks of overwritten data (ADR-022)", opts, as
       for (let i = 0; i < big.length; i++) {
         big[i] = (i * 31 + 7 + Math.floor(i / (64 * 1024)) * 101) & 0xff;
       }
-      await os.fs.write("/doc.bin", big);
+      await os.fs.write("/home/doc.bin", big);
       await os.flush();
       const afterBig = await countChunks();
 
       // Overwrite the same path with a tiny body: the big chunks are now
       // unreferenced by the working tree (and no snapshot holds them within the
       // test window), so the next flush mark-sweeps them out of the store.
-      await os.fs.write("/doc.bin", "small");
+      await os.fs.write("/home/doc.bin", "small");
       await os.flush();
       const afterSmall = await countChunks();
 
