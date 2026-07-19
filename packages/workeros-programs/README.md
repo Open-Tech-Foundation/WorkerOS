@@ -1,15 +1,22 @@
 # @opentf/workeros-programs
 
-> The installable `/bin` programs for [WorkerOS](https://github.com/opentf/WorkerOS),
-> plus its Node-compatible guest runtime.
+> The OS-supplied programs for [WorkerOS](https://github.com/opentf/WorkerOS) —
+> the `/bin` tools plus the Node-compatible guest runtime.
 
-This is a **content package**: one registry of every WorkerOS program that isn't
-a core system utility (those live in
-[`@opentf/workeros-coreutils`](https://www.npmjs.com/package/@opentf/workeros-coreutils)).
-The kernel worker installs the whole registry into the VFS at boot. Most users
-never import this directly — it's a dependency of
-[`@opentf/workeros-web`](https://www.npmjs.com/package/@opentf/workeros-web),
-which is what you install to run WorkerOS.
+WorkerOS is composed of separable pieces, one per concern:
+
+| Package | Concern |
+| --- | --- |
+| [`@opentf/workeros-web`](https://www.npmjs.com/package/@opentf/workeros-web) | The kernel + host runtime — the machine and its host API. |
+| [`@opentf/workeros-coreutils`](https://www.npmjs.com/package/@opentf/workeros-coreutils) | The base OS utilities (`/sbin`), shipped with the kernel. |
+| **`@opentf/workeros-programs`** | **The OS-supplied programs (`/bin`) — `node`, `npm`, editors, archivers, …** |
+
+This package is the program set: a registry of every program that isn't a base
+system utility, each carrying the bytes to install into the VFS and the metadata
+the kernel needs to run it. A host installs these programs into a running OS —
+today `@opentf/workeros-web` ships a default set and installs it at boot; a
+selectable, on-demand install manifest (an OS command / host API) is the
+direction this registry is shaped for.
 
 ## Install
 
@@ -44,8 +51,9 @@ registry work end to end (outbound HTTPS rides the host `fetch`).
 
 ## Usage
 
-You normally consume this transitively through `@opentf/workeros-web`. If you're
-building your own host, the manifest is the entry point:
+The manifest is the install API — a host iterates it to place programs into the
+VFS. This is exactly what the kernel worker does at boot, and what an on-demand
+installer would do for a selected subset:
 
 ```js
 import { programs, libraries } from "@opentf/workeros-programs";

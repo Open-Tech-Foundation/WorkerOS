@@ -2,17 +2,22 @@
 
 > The core `/sbin` utilities for [WorkerOS](https://github.com/opentf/WorkerOS).
 
-Small system utilities (`echo`, `cat`, `ls`, `cp`, `mv`, `rm`, `mkdir`, `pwd`,
+The base system utilities (`echo`, `cat`, `ls`, `cp`, `mv`, `rm`, `mkdir`, `pwd`,
 `env`, `seq`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, …) that run as
 WorkerOS guest processes over the native `sys` syscall ABI. They are installed in
 `/sbin` and resolved through the normal `PATH`.
 
-This is a **content package**: the kernel worker installs these into the VFS at
-boot. Most users never import it directly — it's a dependency of
-[`@opentf/workeros-web`](https://www.npmjs.com/package/@opentf/workeros-web),
-which is what you install to run WorkerOS. The other installable programs (`node`,
-`npm`, `sh`/`bash`, `grep`, …) live in
-[`@opentf/workeros-programs`](https://www.npmjs.com/package/@opentf/workeros-programs).
+WorkerOS is composed of separable pieces, one per concern:
+
+| Package | Concern |
+| --- | --- |
+| [`@opentf/workeros-web`](https://www.npmjs.com/package/@opentf/workeros-web) | The kernel + host runtime — the machine and its host API. |
+| **`@opentf/workeros-coreutils`** | **The base OS utilities (`/sbin`), shipped with the kernel.** |
+| [`@opentf/workeros-programs`](https://www.npmjs.com/package/@opentf/workeros-programs) | The OS-supplied programs (`/bin`) — `node`, `npm`, `sh`/`bash`, `grep`, editors, … |
+
+This package is part of the base OS: the utilities that ship alongside the
+kernel. A host installs them into the VFS at boot (this is what
+`@opentf/workeros-web` does); the bundled manifest below is the install API.
 
 ## Install
 
@@ -22,8 +27,8 @@ npm install @opentf/workeros-coreutils
 
 ## Usage
 
-Consume it transitively through `@opentf/workeros-web`, or install the bundled
-manifest yourself when building a host:
+A host installs these into the VFS from the bundled manifest. This is what
+`@opentf/workeros-web` does at boot, and what a custom host does directly:
 
 ```js
 import { bundledCoreutils } from "@opentf/workeros-coreutils";
