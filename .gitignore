@@ -33,6 +33,14 @@ packages/workeros-programs/src/**/*.wasm
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Self-contained package builds (tools/build-dist.mjs / esbuild; shipped in the
+# npm tarball, rebuilt by the release tool's `npm run build`).
+packages/*/dist/
+
+# Website build output + the worker bundle copied into public by tools/copy-runtime.mjs.
+website/dist/
+website/public/workeros/
+
 # Bundled OS programs (built by tools/bundle.mjs; shipped in the npm tarball via prepack).
 packages/workeros-programs/src/bundles/
 packages/workeros-coreutils/src/bundles/

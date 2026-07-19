@@ -840,5 +840,11 @@ async function fetchText(rel) {
 // artifact, exactly like the /bin programs.
 export const bundledCoreutils = Object.keys(coreutils).map((path) => ({
   path,
-  source: () => fetchText(`./bundles/${path.split("/").pop()}.js`),
+  // The built bundle that ships. `source()` fetches it when the package is served
+  // from source; tools/build-dist.mjs inlines it into dist/index.js for the
+  // self-contained, bundler-consumable build (see that file).
+  file: `./bundles/${path.split("/").pop()}.js`,
+  source() {
+    return fetchText(this.file);
+  },
 }));

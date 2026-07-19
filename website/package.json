@@ -5,17 +5,17 @@
   "type": "module",
   "description": "WorkerOS website + live playground, built with the OTF Web framework.",
   "scripts": {
-    "sync": "node tools/sync-runtime.mjs",
-    "dev": "node tools/sync-runtime.mjs && otfw dev",
-    "build": "node tools/sync-runtime.mjs && otfw build --ssg",
-    "build:spa": "node tools/sync-runtime.mjs && otfw build",
-    "serve": "node tools/sync-runtime.mjs && otfw serve"
+    "dev": "otfw dev",
+    "build": "otfw build --ssg",
+    "build:spa": "otfw build",
+    "serve": "otfw serve"
   },
   "dependencies": {
-    "@opentf/web": "^0.18.0",
-    "@opentf/web-docs": "^0.15.0"
+    "@opentf/web": "0.20.0",
+    "@opentf/web-docs": "0.17.0",
+    "@opentf/workeros-web": "*"
   },
   "devDependencies": {
-    "@opentf/web-cli": "^1.14.0"
+    "@opentf/web-cli": "1.18.0"
   }
 }

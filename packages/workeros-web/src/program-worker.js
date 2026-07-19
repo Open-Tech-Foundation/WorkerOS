@@ -13,8 +13,8 @@
 // Isolation level: `Full` (bare dynamic import), ADR-009/§7.1.
 
 import { MSG } from "./protocol.js";
-import { ProcessExit } from "../../workeros-programs/src/node/process-shim.js";
-import { createWasiImports } from "../../workeros-programs/src/wasi/host.js";
+import { ProcessExit } from "@opentf/workeros-programs/node/process-shim";
+import { createWasiImports } from "@opentf/workeros-programs/wasi";
 import { makeSyncCaller, MAX_SYNC_PAYLOAD, views, STATE, S_GUEST_WAIT } from "./sync-syscall.js";
 import { unframeExecResult } from "./exec-frame.js";
 

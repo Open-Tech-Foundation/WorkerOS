@@ -1,0 +1,6 @@
+# Dev toolchain: bun for fast installs, Node for running/tests (correctness).
+# Use the hoisted (npm-style flat) node_modules linker so Node's module
+# resolution behaves identically to an npm install — the test suites run under
+# `node --test`, and the published packages are consumed by Node/bundlers.
+[install]
+linker = "hoisted"

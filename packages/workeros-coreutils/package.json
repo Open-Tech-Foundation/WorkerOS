@@ -4,15 +4,19 @@
   "description": "WorkerOS coreutils — guest programs (echo, cat, ls, cp, mv, rm, mkdir, pwd, env, true, false, seq, head, tail, wc, sort, uniq, cut, tr) written against the native `sys` syscall ABI.",
   "license": "Apache-2.0",
   "type": "module",
-  "main": "src/index.js",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
   "scripts": {
     "build:programs": "node tools/bundle.mjs",
-    "build": "npm run build:programs",
+    "build:dist": "node tools/build-dist.mjs",
+    "build": "npm run build:programs && npm run build:dist",
     "prepack": "npm run build",
     "test": "node --test tools/*.test.js"
   },
   "files": [
-    "src"
+    "dist"
   ],
   "publishConfig": {
     "access": "public"

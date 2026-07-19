@@ -20,7 +20,7 @@ try {
   chromium = null;
 }
 const built = existsSync(
-  fileURLToPath(new URL("../../workeros-programs/src/utils/coreutils.wasm", import.meta.url)),
+  fileURLToPath(new URL("./assets/coreutils.wasm", import.meta.resolve("@opentf/workeros-programs"))),
 );
 const opts = {
   skip: !chromium ? "playwright not installed" : !built ? "coreutils.wasm not built" : false,

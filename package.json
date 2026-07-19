@@ -1,0 +1,18 @@
+{
+  "name": "workeros",
+  "version": "0.0.0",
+  "private": true,
+  "description": "WorkerOS monorepo — the kernel (Rust/wasm) and the JS runtime packages.",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "packages/workeros-programs",
+    "packages/workeros-coreutils",
+    "packages/workeros-web",
+    "website"
+  ],
+  "trustedDependencies": [
+    "@opentf/web-compiler",
+    "esbuild",
+    "@tailwindcss/oxide"
+  ]
+}

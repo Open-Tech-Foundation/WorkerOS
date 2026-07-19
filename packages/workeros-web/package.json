@@ -4,12 +4,12 @@
   "description": "WorkerOS host runtime: kernel-worker + program-worker shims and the main-thread client API.",
   "license": "Apache-2.0",
   "type": "module",
-  "main": "src/index.js",
+  "main": "./dist/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./dist/index.js"
   },
   "files": [
-    "src"
+    "dist"
   ],
   "publishConfig": {
     "access": "public"
@@ -17,7 +17,8 @@
   "scripts": {
     "build:wasm": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --release --no-pack && rm -f src/kernel-wasm/.gitignore src/kernel-wasm/package.json",
     "build:wasm:dev": "wasm-pack build wasm --target web --out-dir ../src/kernel-wasm --dev --no-pack && rm -f src/kernel-wasm/.gitignore src/kernel-wasm/package.json",
-    "build": "npm run build:wasm",
+    "build:dist": "node tools/build-dist.mjs",
+    "build": "npm run build:wasm && npm run build:dist",
     "build:programs": "node ../workeros-programs/tools/bundle.mjs",
     "build:coreutils": "node ../workeros-coreutils/tools/bundle.mjs",
     "build:bundles": "npm run build:programs && npm run build:coreutils",
@@ -30,7 +31,12 @@
     "test:node-compat:full": "node tools/node-compat-full.mjs && node tools/node-compat-report.mjs",
     "report:node-compat": "node tools/node-compat-report.mjs"
   },
+  "dependencies": {
+    "@opentf/workeros-coreutils": "*",
+    "@opentf/workeros-programs": "*"
+  },
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "playwright": "^1.48.0"
   }
 }

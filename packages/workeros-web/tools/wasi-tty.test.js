@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createWasiImports } from "../../workeros-programs/src/wasi/host.js";
+import { createWasiImports } from "@opentf/workeros-programs/wasi";
 
 const FILETYPE_CHARACTER_DEVICE = 2;
 const FILETYPE_REGULAR_FILE = 4;

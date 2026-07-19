@@ -4,7 +4,7 @@
   "description": "WorkerOS OS programs: the installable /bin programs (npm, …) plus the Node-compatible guest runtime (process shim + CommonJS require).",
   "license": "Apache-2.0",
   "type": "module",
-  "main": "src/index.js",
+  "main": "./dist/index.js",
   "scripts": {
     "build:codec": "cargo build -p workeros-codec --release --target wasm32-unknown-unknown && mkdir -p src/codec && cp ../../target/wasm32-unknown-unknown/release/workeros_codec.wasm src/codec/codec.wasm",
     "build:bundler": "cargo build -p workeros-node-bundler --release --target wasm32-unknown-unknown && mkdir -p src/node-bundler && cp ../../target/wasm32-unknown-unknown/release/workeros_node_bundler.wasm src/node-bundler/bundler.wasm",
@@ -13,27 +13,19 @@
     "build:wasm": "npm run build:codec && npm run build:bundler && npm run build:grep && npm run build:utils",
     "build:programs": "node tools/bundle.mjs",
     "build:vendor-npm": "node tools/vendor-npm.mjs",
-    "build": "npm run build:wasm && npm run build:vendor-npm && npm run build:programs",
+    "build:dist": "node tools/build-dist.mjs",
+    "build": "npm run build:wasm && npm run build:vendor-npm && npm run build:programs && npm run build:dist",
     "prepack": "npm run build",
     "pretest": "npm run build:codec",
     "test": "node --import ./tools/codec-setup.mjs --import ./tools/guest-lib-setup.mjs --test tools/*.test.js"
   },
   "exports": {
-    ".": "./src/index.js",
-    "./node": "./src/node/index.js",
-    "./wasi": "./src/wasi/host.js",
-    "./node/process-shim": "./src/node/process-shim.js",
-    "./node/require-runtime": "./src/node/require-runtime.js",
-    "./node/fs": "./src/node/fs.js",
-    "./node/path": "./src/node/path.js",
-    "./node/os": "./src/node/os.js",
-    "./node/url": "./src/node/url.js",
-    "./node/module": "./src/node/module.js",
-    "./node/resolve": "./src/node/resolve.js",
-    "./node/esm-graph": "./src/node/esm-graph.js"
+    ".": "./dist/index.js",
+    "./node/process-shim": "./dist/node/process-shim.js",
+    "./wasi": "./dist/wasi/host.js"
   },
   "files": [
-    "src"
+    "dist"
   ],
   "publishConfig": {
     "access": "public"

@@ -7,12 +7,45 @@
 
 import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Serve from the repo root so both cross-package ESM imports (the program
 // worker loads the workeros-programs/node tenant shim) and the examples/ demos resolve.
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+
+// The runtime imports its sibling packages *by name* (`@opentf/workeros-programs`,
+// `@opentf/workeros-coreutils`, …) — resolved by a bundler in production. The
+// kernel/program workers are ES *module workers*, which cannot use an import map,
+// so the browser can't resolve a bare specifier there. This dev/test server does
+// what the bundler would: it rewrites bare specifiers in served JS to `ROOT`-
+// relative URLs, resolving them through Node's module resolution (the packages'
+// `exports` maps → their built `dist/`). Relative/absolute specifiers pass through.
+const BARE_IMPORT_RE = /(\bfrom\s+|\bimport\s*\(\s*|\bimport\s+)(["'])([^"'\n]+)\2/g;
+const resolveCache = new Map();
+
+function toRootUrl(fileUrl) {
+  const abs = fileURLToPath(fileUrl);
+  if (!abs.startsWith(ROOT)) return null; // outside the served tree
+  return "/" + abs.slice(ROOT.length).split(sep).filter(Boolean).join("/");
+}
+
+function rewriteBareImports(source) {
+  return source.replace(BARE_IMPORT_RE, (whole, kw, quote, spec) => {
+    // Leave relative, absolute, and URL specifiers untouched.
+    if (/^(\.\.?\/|\/|https?:|data:|node:)/.test(spec)) return whole;
+    let url = resolveCache.get(spec);
+    if (url === undefined) {
+      try {
+        url = toRootUrl(import.meta.resolve(spec));
+      } catch {
+        url = null;
+      }
+      resolveCache.set(spec, url);
+    }
+    return url ? `${kw}${quote}${url}${quote}` : whole;
+  });
+}
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -52,8 +85,14 @@ export function createDevServer() {
         res.end("not found");
         return;
       }
-      const body = await readFile(filePath);
-      res.setHeader("Content-Type", MIME[extname(filePath)] || "application/octet-stream");
+      const ext = extname(filePath);
+      let body = await readFile(filePath);
+      // Rewrite bare import specifiers so ES module workers resolve sibling
+      // packages without a bundler or import map (see rewriteBareImports).
+      if (ext === ".js" || ext === ".mjs") {
+        body = rewriteBareImports(body.toString("utf8"));
+      }
+      res.setHeader("Content-Type", MIME[ext] || "application/octet-stream");
       res.statusCode = 200;
       res.end(body);
     } catch {

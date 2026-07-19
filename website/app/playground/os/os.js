@@ -5,12 +5,10 @@
 // boot idempotent under SSG hydration double-mounts (module state persists across
 // the phantom remount).
 //
-// The runtime is served unbundled from /workeros/... by tools/sync-runtime.mjs; a
-// hidden dynamic import keeps the site bundler from touching the worker/wasm graph
-// (same trick as app/page.jsx).
-
-const RUNTIME_URL = "/workeros/packages/workeros-web/src/index.js";
-const loadRuntime = new Function("u", "return import(u)");
+// The runtime is a normal dependency — `@opentf/workeros-web` is resolved by name
+// and bundled into the site, and otfw's worker-assets plugin emits its worker +
+// wasm graph. Nothing is served by hand; boot() finds everything.
+import { boot, installPreviewBridge } from "@opentf/workeros-web";
 
 // The singletons live on `globalThis`, not module scope: the OTF Web compiler emits
 // each app component as its own custom-element module, and the bundler can duplicate
@@ -22,7 +20,6 @@ const loadRuntime = new Function("u", "return import(u)");
 export function getOS() {
   if (!globalThis.__wosOS) {
     globalThis.__wosOS = (async () => {
-      const { boot, installPreviewBridge } = await loadRuntime(RUNTIME_URL);
       const os = await boot();
       // Let the OS answer its own HTTP. The service worker (public/preview-sw.js)
       // intercepts /__preview__/<port>/… and needs a page-side relay into the kernel

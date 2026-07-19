@@ -1,12 +1,8 @@
 import { Link } from "@opentf/web";
-
-// The kernel runtime is served (unbundled) from /workeros/... by the sync step
-// (tools/sync-runtime.mjs → public/). Load it with a hidden dynamic import so the
-// site bundler leaves the worker/wasm graph untouched. Same approach as the
-// full playground (app/playground/page.jsx), reused here to boot a live shell in
-// the hero.
-const RUNTIME_URL = "/workeros/packages/workeros-web/src/index.js";
-const loadRuntime = new Function("u", "return import(u)");
+// The kernel runtime is a normal dependency — `@opentf/workeros-web` is resolved
+// by name and bundled, otfw emitting its worker + wasm graph. Boots a live shell
+// in the hero.
+import { boot } from "@opentf/workeros-web";
 
 // Load a same-origin UMD script once; resolves when the global is installed.
 function loadScript(src) {
@@ -58,7 +54,6 @@ export default function Home() {
         await loadScript("/vendor/xterm/addon-fit.js");
 
         if (!window.crossOriginIsolated) statusText = "waiting for isolation…";
-        const { boot } = await loadRuntime(RUNTIME_URL);
         os = await boot();
         osRef = os;
 
