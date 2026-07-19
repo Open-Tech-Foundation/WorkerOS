@@ -1,8 +1,38 @@
-# WorkerOS coreutils
+# @opentf/workeros-coreutils
 
-Small system utilities that run as WorkerOS guest processes over the native
-`sys` ABI. They are installed in `/sbin` and resolved through the normal
-`PATH`.
+> The core `/sbin` utilities for [WorkerOS](https://github.com/opentf/WorkerOS).
+
+Small system utilities (`echo`, `cat`, `ls`, `cp`, `mv`, `rm`, `mkdir`, `pwd`,
+`env`, `seq`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, …) that run as
+WorkerOS guest processes over the native `sys` syscall ABI. They are installed in
+`/sbin` and resolved through the normal `PATH`.
+
+This is a **content package**: the kernel worker installs these into the VFS at
+boot. Most users never import it directly — it's a dependency of
+[`@opentf/workeros-web`](https://www.npmjs.com/package/@opentf/workeros-web),
+which is what you install to run WorkerOS. The other installable programs (`node`,
+`npm`, `sh`/`bash`, `grep`, …) live in
+[`@opentf/workeros-programs`](https://www.npmjs.com/package/@opentf/workeros-programs).
+
+## Install
+
+```sh
+npm install @opentf/workeros-coreutils
+```
+
+## Usage
+
+Consume it transitively through `@opentf/workeros-web`, or install the bundled
+manifest yourself when building a host:
+
+```js
+import { bundledCoreutils } from "@opentf/workeros-coreutils";
+
+for (const u of bundledCoreutils) {
+  const src = await u.source();
+  vfs.install(u.path, src); // installs under /sbin
+}
+```
 
 ## Compatibility policy
 
