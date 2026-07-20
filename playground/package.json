@@ -1,0 +1,13 @@
+{
+  "name": "workeros-playground",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Local testing app: boot WorkerOS from the local package builds to verify source changes in a real browser.",
+  "scripts": {
+    "dev": "node serve.mjs",
+    "build": "npm --prefix ../packages/workeros-web run build:bundles && npm --prefix ../packages/workeros-web run build:dist",
+    "build:wasm": "npm --prefix ../packages/workeros-web run build:wasm",
+    "start": "npm run build && npm run dev"
+  }
+}

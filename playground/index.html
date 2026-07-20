@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WorkerOS — local testing app</title>
+    <link rel="stylesheet" href="/playground/vendor/xterm/xterm.css" />
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: #0b0c0f; color: #d7dbe4;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+      body { display: flex; flex-direction: column; }
+      header { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+        border-bottom: 1px solid #1c2130; background: #0e1017; font-size: 13px; }
+      header .dot { width: 9px; height: 9px; border-radius: 50%; background: #b5893a; flex: none;
+        transition: background .3s; }
+      header.ready .dot { background: #4ca36a; }
+      header.failed .dot { background: #c8503a; }
+      header strong { font-weight: 600; letter-spacing: .2px; }
+      header .status { color: #8a93a6; }
+      header .spacer { flex: 1; }
+      header .hint { color: #5f6a80; font-size: 12px; }
+      header a { color: #7c9cff; text-decoration: none; }
+      #term-wrap { flex: 1; min-height: 0; padding: 6px 8px; }
+      #term { width: 100%; height: 100%; }
+      /* A visible boot/error banner separate from the terminal, so a crash before
+         the shell renders is not silent. */
+      #banner { display: none; padding: 8px 14px; background: #2a1518; color: #f0b3ab;
+        border-bottom: 1px solid #47222a; white-space: pre-wrap; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <header id="hdr">
+      <span class="dot"></span>
+      <strong>WorkerOS</strong>
+      <span class="status" id="status">booting…</span>
+      <span class="spacer"></span>
+      <span class="hint">local build · rebuild + refresh to verify changes</span>
+    </header>
+    <div id="banner"></div>
+    <div id="term-wrap"><div id="term"></div></div>
+
+    <script src="/playground/vendor/xterm/xterm.js"></script>
+    <script src="/playground/vendor/xterm/addon-fit.js"></script>
+    <!-- Boot lives in main.js (not inline) so the dev server rewrites its bare
+         `@opentf/workeros-web` import to the local dist. -->
+    <script type="module" src="/playground/main.js"></script>
+  </body>
+</html>
