@@ -52,9 +52,20 @@ import constantsModule from "./constants.js";
 // pure factory has no access to. `/bin/node` builds them and passes them here so
 // both `require('process')`/`require('tty')` (CJS) and `import 'node:process'`
 // (ESM) resolve to the same objects, not just one path.
+// The live working directory that `path.resolve`/`path.relative` fall back to,
+// read from the running process (whose `cwd()` tracks `chdir`), with a static-spawn
+// and "/" fallback so a `path` built before `process` exists still resolves.
+const liveCwd = (sys, extras) => () => {
+  try {
+    const c = extras && extras.process && extras.process.cwd();
+    if (typeof c === "string" && c) return c;
+  } catch { /* process not ready */ }
+  return (sys && typeof sys.cwd === "string" && sys.cwd) || "/";
+};
+
 export function makeBuiltins(sys, extras) {
   const fs = createFs(sys.syncFs, sys.onFsEvent);
-  const path = createPath();
+  const path = createPath(liveCwd(sys, extras));
   const os = createOs();
   const url = createUrl();
   // Networking (ADR-021): net is the socket layer, http is built on it. Both are
@@ -191,7 +202,7 @@ export function detectFormat(source, absPath, deps) {
 // ---- the runtime -----------------------------------------------------------
 export function createNodeRuntime(sys, extras) {
   const builtins = makeBuiltins(sys, extras);
-  const path = createPath();
+  const path = createPath(liveCwd(sys, extras));
   const url = createUrl();
   const fs = builtins.get("fs");
 

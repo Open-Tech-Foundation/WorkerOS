@@ -19,6 +19,27 @@ import { stripShebang } from "./esm-graph.js";
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
+// `export * from 'x'` support. The node-bundler transform (oxc's Vite-SSR pass,
+// renamed __vite_ssr_* → __workeros_*) emits `__workeros_exportAll__(ns)` for a
+// star re-export, where `ns` is the resolved namespace of the re-exported module.
+// It must re-export every key except `default` onto *this* module's exports, so it
+// closes over that exports object — hence a per-module factory. Live getters (not
+// copies) so a binding that changes in the source module is seen here, and an
+// existing local/explicit export is never overwritten (Node's precedence rule, and
+// what Vite's own helper does). Missing here was why `create-astro` — whose bundle
+// re-exports with `export *` — died with `__workeros_exportAll__ is not defined`.
+const makeExportAll = (exports) => (sourceNs) => {
+  if (sourceNs == null) return;
+  for (const key of Object.keys(sourceNs)) {
+    if (key === "default" || key in exports) continue;
+    Object.defineProperty(exports, key, {
+      enumerable: true,
+      configurable: true,
+      get: () => sourceNs[key],
+    });
+  }
+};
+
 // Wrap CJS/builtin exports as an ES namespace so `import x from` (default) and
 // `import { y } from` (named) both resolve: the object's own keys are the named
 // exports, plus a `default` that is the whole `module.exports` (Node interop).
@@ -74,6 +95,7 @@ export function createEsmRunner({ fs, path, resolver, transform, detectFormat, m
       "__workeros_exports__",
       "__workeros_dynamic_import__",
       "__workeros_import_meta__",
+      "__workeros_exportAll__",
       code,
     );
     await fn(
@@ -81,6 +103,7 @@ export function createEsmRunner({ fs, path, resolver, transform, detectFormat, m
       exports,
       (s) => importFrom(dir, s),
       makeMeta(abs),
+      makeExportAll(exports),
     );
     return exports;
   };
@@ -125,6 +148,7 @@ export function createEsmRunner({ fs, path, resolver, transform, detectFormat, m
       "__workeros_exports__",
       "__workeros_dynamic_import__",
       "__workeros_import_meta__",
+      "__workeros_exportAll__",
       code,
     );
     fn(
@@ -132,6 +156,7 @@ export function createEsmRunner({ fs, path, resolver, transform, detectFormat, m
       exports,
       (s) => importFrom(dir, s), // dynamic import() stays async → returns a promise
       makeMeta(abs),
+      makeExportAll(exports),
     );
     return exports;
   };

@@ -296,6 +296,11 @@ globalThis.process = process;
 // timeout. (Synchronous throws at module top level already reject up to the
 // program worker; this covers only what escapes the loop.)
 let inFatal = false;
+// Set once we've committed to the terminal fatal path (printed + reported exit 1).
+// The idle-exit tail reads it to avoid overwriting that with a success code when a
+// rejection/error surfaced right as the loop drained (they fire as a *task* after
+// the microtask checkpoint, i.e. potentially after whenIdle() has resolved).
+let fatalReported = false;
 const onFatal = (error, kind) => {
   // process.exit()'s unwinding throw isn't an error — the code is already reported.
   if (error && error.name === "ProcessExit") return;
@@ -309,6 +314,7 @@ const onFatal = (error, kind) => {
   }
   if (inFatal) return; // a throw from within stderr write / emit('exit') — give up cleanly
   inFatal = true;
+  fatalReported = true;
   if (event === "unhandledRejection") {
     // Node ≥15 default: an unhandled rejection is fatal, reported as such.
     err("node: Unhandled promise rejection. " +
@@ -392,6 +398,50 @@ const nodeBuiltins = { process, tty, worker_threads: createWorkerThreads(sys, wo
 // delivering a request to its handler.
 globalThis.global = globalThis;
 globalThis.Buffer = NodeBuffer;
+
+// Node ≥18 ships a global WHATWG `fetch`. The program worker sealed the browser's
+// own `fetch` (sealGuestNetwork) so a guest can't reach the network behind the
+// kernel's back — but the *capability* still exists, through `sys.netFetch` (routed,
+// audited egress). So /bin/node re-provides `fetch` on top of that primitive, the
+// same userland-over-kernel layering as `process` (INV-1): a guest gets the standard
+// API Node exposes while every byte still leaves through the kernel. This is what
+// modern CLIs need — create-astro (and undici-based tools) call global `fetch`
+// directly with no `node:http` fallback, so without it they die with "fetch is not a
+// function". The WHATWG data classes (`Headers`/`Request`/`Response`/`URL`) are not
+// sealed, so we reuse them to normalize the request and shape the response. A process
+// denied egress (netEgress=false) still can't reach out: `sys.netFetch` is refused
+// kernel-side, so this fetch rejects — enforcement stays in the kernel, not here.
+if (typeof globalThis.fetch !== "function" && typeof sys.netFetch === "function") {
+  const H = globalThis.Headers;
+  globalThis.fetch = async (input, init = {}) => {
+    init = init || {};
+    const url =
+      typeof input === "string" ? input
+        : input instanceof URL ? input.href
+        : (input && input.url) || String(input);
+    const method = String(init.method || (input && input.method) || "GET").toUpperCase();
+    const headers = H ? [...new H(init.headers || (input && input.headers) || undefined)] : [];
+    let body;
+    const raw = init.body != null ? init.body : (input && typeof input === "object" ? input.body : null);
+    if (raw != null && method !== "GET" && method !== "HEAD") {
+      if (typeof raw === "string") body = enc.encode(raw);
+      else if (raw instanceof Uint8Array) body = raw;
+      else if (raw instanceof ArrayBuffer) body = new Uint8Array(raw);
+      else body = new Uint8Array(await new Response(raw).arrayBuffer());
+    }
+    const res = await sys.netFetch({ url, method, headers, body });
+    // A null-body status (204/205/304) forbids a body in the Response constructor.
+    const nullBody = res.status === 204 || res.status === 205 || res.status === 304;
+    const out = new Response(nullBody ? null : res.body, {
+      status: res.status,
+      statusText: res.statusText || "",
+      headers: H ? new H(res.headers) : res.headers,
+    });
+    // `Response.url` is read-only/empty by default; real fetch reports the final URL.
+    try { Object.defineProperty(out, "url", { value: res.url || url, configurable: true }); } catch { /* frozen */ }
+    return out;
+  };
+}
 
 const builtins = makeBuiltins(sys, nodeBuiltins);
 const fs = builtins.get("fs");
@@ -672,7 +722,21 @@ if (detectFormat(entrySource, entryAbs, evalSource != null ? undefined : { fs, p
 // entry's synchronous body returns.
 await whenIdle();
 
-// The loop has drained: the process is about to exit successfully. Fire Node's
-// `'exit'` event (0) so end-of-run hooks — notably the compat harness' `mustCall`
-// bookkeeping — get their synchronous chance to assert.
-emitExit(0);
+// The loop drained, but a promise rejected without a handler (or an async callback
+// threw) right as it did would only surface on the *next* task: the browser fires
+// 'unhandledrejection'/'error' during the microtask checkpoint that follows the
+// current task, so onFatal hasn't run yet. Returning now would report exit 0 before
+// that event lands (the program worker's success reportExit wins the race), which is
+// exactly how a create-* CLI whose entry is `void import('./cli').then(m=>m.main())`
+// vanished silently. Yield a few macrotasks so any pending rejection/error dispatches
+// and onFatal reports it (exit 1) first. Node likewise reports a still-unhandled
+// rejection at loop end rather than exiting 0.
+for (let i = 0; i < 3 && !fatalReported; i++) await new Promise((r) => setTimeout(r, 0));
+
+// The loop has drained: the process is about to exit. If a fatal error surfaced in
+// those macrotasks, onFatal already printed it and reported exit 1 (its sys.exit
+// throw was swallowed at the event-listener boundary; the program worker's exit
+// report is idempotent, so success can no longer overwrite it) — leave that as the
+// outcome. Otherwise fire Node's `'exit'` event (0) so end-of-run hooks — notably
+// the compat harness' `mustCall` bookkeeping — get their synchronous chance to assert.
+if (!fatalReported) emitExit(0);

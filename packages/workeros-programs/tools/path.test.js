@@ -21,8 +21,18 @@ test("join normalizes and drops empties", () => {
 test("resolve is right-to-left until absolute", () => {
   assert.equal(path.resolve("/a/b", "c"), "/a/b/c");
   assert.equal(path.resolve("/a/b", "/c/d"), "/c/d");
-  assert.equal(path.resolve("a", "b"), "a/b");
+  // No absolute argument → resolve against the cwd (default "/"), like Node.
+  assert.equal(path.resolve("a", "b"), "/a/b");
   assert.equal(path.resolve("/a/b", "../c"), "/a/c");
+});
+
+test("resolve falls back to the injected cwd when no arg is absolute", () => {
+  const p = createPath(() => "/home/user");
+  assert.equal(p.resolve("my-next"), "/home/user/my-next");
+  assert.equal(p.resolve("."), "/home/user");
+  assert.equal(p.resolve("a", "b"), "/home/user/a/b");
+  // An absolute argument still wins — the cwd is not consulted.
+  assert.equal(p.resolve("/abs", "x"), "/abs/x");
 });
 
 test("dirname / basename / extname", () => {

@@ -16,7 +16,12 @@ function normalizeArray(parts, allowAboveRoot) {
   return res;
 }
 
-export function createPath() {
+// `getCwd` supplies the current working directory that `resolve` (and `relative`,
+// which is defined in terms of it) fall back to when no argument is absolute —
+// exactly what Node's `path.resolve` does with `process.cwd()`. It is injected (not
+// read from a global) so this module stays pure and unit-testable; the runtime wires
+// in the live `process.cwd()`. Default "/" keeps a bare `createPath()` deterministic.
+export function createPath(getCwd = () => "/") {
   const path = {
     sep: "/",
     delimiter: ":",
@@ -48,6 +53,19 @@ export function createPath() {
         if (typeof p !== "string" || p === "") continue;
         resolved = p + "/" + resolved;
         isAbs = path.isAbsolute(p);
+      }
+      // Node: if the accumulated path is still relative after every argument, it is
+      // resolved against the current working directory, yielding an absolute path.
+      // Skipping this left `path.resolve('my-next')` as `'my-next'` (not
+      // `'/home/my-next'`), which made create-next-app copy its template *into the
+      // template dir* under a `my-next/` subfolder, then fail reading the project's
+      // `tsconfig.json` (ENOENT).
+      if (!isAbs) {
+        const cwd = getCwd();
+        if (typeof cwd === "string" && cwd) {
+          resolved = cwd + "/" + resolved;
+          isAbs = path.isAbsolute(cwd);
+        }
       }
       const out = normalizeArray(resolved.split("/"), !isAbs).join("/");
       if (isAbs) return "/" + out;
