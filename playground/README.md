@@ -36,9 +36,10 @@ reloads the page once to grant cross-origin isolation (SharedArrayBuffer), after
 
 - `app/page.jsx` — mounts `<Desktop />` from `@opentf/workeros-desktop`.
 - `app/layout.jsx` — bare, full-viewport.
-- `app/global.css` — a **symlink** to the desktop package's stylesheet (otfw can't
-  bundle CSS imported from JS, so it's linked from `index.html` and served at `/app/`;
-  the symlink keeps it live with the package instead of a copy).
+- `app/global.css` — the desktop's design system, a copy of the package's stylesheet
+  (otfw serves each app's own `app/global.css`, same as the website; it can't bundle
+  CSS imported from JS). If you change the desktop's `global.css`, re-copy it:
+  `cp ../packages/workeros-desktop/app/global.css app/global.css`.
 - `public/` — `preview-sw.js` (COOP/COEP + preview routing), vendored xterm, headers.
 - `index.html` — theme bootstrap + service-worker registration + the `global.css` link.
 

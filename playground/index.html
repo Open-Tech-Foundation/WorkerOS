@@ -22,8 +22,8 @@
          (ADR-010) under `otfw dev`, and routes preview requests into the kernel
          (ADR-021). Without it, boot() throws for lack of cross-origin isolation. -->
     <script src="/preview-sw.js"></script>
-    <!-- The desktop's design system. app/global.css is a symlink to the
-         @opentf/workeros-desktop package's stylesheet (served by otfw at /app/). -->
+    <!-- The desktop's design system (a copy of the package's stylesheet; otfw serves
+         each app's own app/global.css at /app/, same as the website). -->
     <link rel="stylesheet" href="/app/global.css" />
   </head>
   <body>

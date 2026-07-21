@@ -1,7 +1,6 @@
 // Bare, full-viewport layout — the desktop owns the whole screen. Its design system
-// (global.css) is linked from index.html: app/global.css is a symlink to the desktop
-// package's stylesheet (otfw can't bundle CSS imported from JS), so it stays live
-// with the package without being copied.
+// lives in app/global.css (linked from index.html), a copy of the desktop package's
+// stylesheet — otfw serves each app's own app/global.css, the same as the website.
 export default function RootLayout({ children }) {
   return <>{children}</>;
 }
