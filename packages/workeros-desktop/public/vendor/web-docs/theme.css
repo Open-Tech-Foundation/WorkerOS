@@ -1,0 +1,1690 @@
+/* @opentf/web-docs — default theme.
+ *
+ * Plain CSS (no Tailwind directives) so it can be `@import`ed by an app's stylesheet
+ * and inlined at build time, independent of the consumer's utility-class scanner.
+ * Components use semantic `otfw-*` class names; everything below is driven by the
+ * design-token CSS variables, which flip on `[data-theme='dark']`.
+ */
+
+:root {
+  --otfw-bg: #ffffff;
+  --otfw-bg-surface: #f8fafc;
+  --otfw-bg-elevated: #ffffff;
+  --otfw-text: #0f172a;
+  --otfw-text-muted: #64748b;
+  --otfw-border: #e2e8f0;
+  --otfw-accent: #ff851b;
+  --otfw-accent-contrast: #ffffff;
+  --otfw-accent-soft: rgba(255, 133, 27, 0.12);
+  --otfw-code-bg: #f1f5f9;
+  --otfw-code-text: #be4f0c;
+  --otfw-selection: rgba(255, 133, 27, 0.22);
+
+  --otfw-sidebar-width: 17rem;
+  --otfw-toc-width: 15rem;
+  --otfw-content-max: 48rem;
+  --otfw-navbar-height: 3.75rem;
+  --otfw-radius: 0.625rem;
+  --otfw-font: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --otfw-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, monospace;
+}
+
+[data-theme="dark"] {
+  --otfw-bg: #020617;
+  --otfw-bg-surface: #0b1220;
+  --otfw-bg-elevated: #0f172a;
+  --otfw-text: #e2e8f0;
+  --otfw-text-muted: #94a3b8;
+  --otfw-border: #1e293b;
+  --otfw-accent: #ff943d;
+  --otfw-accent-contrast: #0b1220;
+  --otfw-accent-soft: rgba(255, 148, 61, 0.16);
+  --otfw-code-bg: #0f172a;
+  --otfw-code-text: #ffb784;
+  --otfw-selection: rgba(255, 148, 61, 0.3);
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: calc(var(--otfw-navbar-height) + 1rem);
+}
+
+body {
+  margin: 0;
+  font-family: var(--otfw-font);
+  background: var(--otfw-bg);
+  color: var(--otfw-text);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+::selection {
+  background: var(--otfw-selection);
+}
+
+/* Custom elements are inline by default. Structural hosts become block-level grid
+ * items; pure wrapper hosts (a link, a list node) become layout-transparent
+ * (`display: contents`) so their inner semantic element participates directly in the
+ * surrounding flex/grid/list. Hosts are addressed by the stable `web-<kebab>` class
+ * the compiler stamps on every component (the element tag itself is module-hashed
+ * to stay collision-free, so it is not a reliable selector). */
+.web-docs-layout,
+.web-toc,
+.web-footer,
+.web-breadcrumbs,
+.web-pagination,
+.web-callout,
+.web-tabs,
+.web-code-group,
+.web-table {
+  display: block;
+}
+/* The navbar host must be transparent so its sticky <header> sticks to the page
+ * scroll container, not to its own wrapper. Link hosts are transparent so the inner
+ * <a> participates directly in the navbar/list flex layout. The sidebar host (and its
+ * shell wrapper) are transparent so the inner <aside> is the docs-grid column on
+ * desktop and a fixed off-canvas drawer on mobile; the burger host so the button sits
+ * directly in the navbar lead flow. */
+.web-navbar,
+.web-navbar-link,
+.web-link,
+.web-sidebar-node,
+.web-sidebar,
+.web-sidebar-toggle,
+.otfw-sidebar-shell {
+  display: contents;
+}
+
+/* ── Shell ─────────────────────────────────────────────────────────────────── */
+.otfw-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.otfw-shell-body {
+  flex: 1;
+}
+
+/* ── Navbar ────────────────────────────────────────────────────────────────── */
+.otfw-navbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  height: var(--otfw-navbar-height);
+  background: color-mix(in srgb, var(--otfw-bg) 85%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--otfw-border);
+}
+.otfw-navbar-inner {
+  height: 100%;
+  max-width: 90rem;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+  /* Three zones: brand (left) · search (centered) · nav + actions (right). The auto
+   * center column keeps the search trigger centered in the bar regardless of how wide
+   * the side zones are. */
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 1.5rem;
+}
+.otfw-navbar-search {
+  justify-self: center;
+}
+.otfw-navbar-right {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+.otfw-navbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--otfw-text);
+  text-decoration: none;
+}
+.otfw-navbar-logo {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+.otfw-navbar-version {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  padding: 0.22rem 0.45rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--otfw-border);
+  background: var(--otfw-bg-surface);
+  color: var(--otfw-text-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+/* Brand sits at the start of the left grid zone. */
+.otfw-navbar-brand {
+  justify-self: start;
+}
+.otfw-navbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  font-size: 0.9rem;
+}
+.otfw-navbar-link {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--otfw-text-muted);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.15s;
+}
+/* Subtle accent underline beneath the link; scales in on the active route (and
+ * faintly on hover). */
+.otfw-navbar-link::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -0.45rem;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--otfw-accent);
+  transform: scaleX(0);
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+.otfw-navbar-link:hover {
+  color: var(--otfw-text);
+}
+.otfw-navbar-link:hover::after {
+  transform: scaleX(1);
+  opacity: 0.35;
+}
+.otfw-navbar-link.otfw-active {
+  color: var(--otfw-text);
+  font-weight: 600;
+}
+.otfw-navbar-link.otfw-active::after {
+  transform: scaleX(1);
+  opacity: 1;
+}
+.otfw-nav-icon {
+  display: inline-flex;
+}
+.otfw-nav-icon svg {
+  display: block;
+}
+.otfw-navbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+/* GitHub link and theme toggle are uniform ghost icon buttons (no border/fill, subtle
+ * hover background), so the whole right cluster (links + icons) reads as one aligned
+ * row. */
+.otfw-navbar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 0.5rem;
+  color: var(--otfw-text-muted);
+  cursor: pointer;
+  font-family: inherit;
+  /* Icons compile to inline custom-element hosts with the inherited 1.5 line-height,
+   * which baseline-aligns the SVG and pushes it a few px above center. Zero the line
+   * box so the flex centering is exact. */
+  line-height: 0;
+}
+.otfw-navbar-icon > * {
+  display: inline-flex;
+  align-items: center;
+}
+.otfw-navbar-icon:hover {
+  color: var(--otfw-text);
+  background: var(--otfw-bg-surface);
+}
+
+/* Left zone of the navbar: an optional mobile drawer burger followed by the brand. */
+.otfw-navbar-lead {
+  justify-self: start;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+/* The burger reuses `.otfw-navbar-icon` styling; this rule (after it, so it wins the
+ * display cascade) hides it except on small screens that actually have a sidebar
+ * mounted — the <Sidebar> sets `data-otfw-has-sidebar` on the root while present. */
+.otfw-navbar-burger {
+  display: none;
+}
+@media (max-width: 767px) {
+  :root[data-otfw-has-sidebar] .otfw-navbar-burger {
+    display: inline-flex;
+  }
+}
+
+/* ── Navbar: mobile layout ─────────────────────────────────────────────────── */
+/* Below the sidebar breakpoint the centered three-column grid gets cramped, so the bar
+ * becomes a simple flex row: brand (with burger) at the start, a compact action cluster
+ * (search · GitHub · theme) at the end. On pages that have a sidebar the top-level links
+ * move into the drawer (see `.otfw-drawer-links`), so they're dropped from the bar here. */
+@media (max-width: 767px) {
+  .otfw-navbar-inner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0 1rem;
+  }
+  .otfw-navbar-lead {
+    margin-right: auto; /* push the action cluster to the far end */
+  }
+  .otfw-navbar-search {
+    justify-self: auto;
+  }
+  .otfw-navbar-right {
+    gap: 0.5rem;
+  }
+  .otfw-navbar-version {
+    display: none; /* reclaim brand width on small screens */
+  }
+  :root[data-otfw-has-sidebar] .otfw-navbar-nav {
+    display: none; /* surfaced in the drawer instead */
+  }
+}
+
+/* Theme switcher: trigger reuses `.otfw-navbar-icon` so it matches the GitHub button;
+ * it just grows a little to fit the System-mode pair of icons, and anchors the menu. */
+.otfw-theme {
+  position: relative;
+  display: inline-flex;
+}
+.otfw-theme-trigger {
+  width: auto;
+  min-width: 2rem;
+  padding: 0 0.3rem;
+}
+.otfw-theme-trigger-system {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.otfw-theme-trigger-badge {
+  display: inline-flex;
+  align-items: center;
+  padding-left: 0.3rem;
+  border-left: 1px solid var(--otfw-border);
+  opacity: 0.85;
+}
+.otfw-theme-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 60;
+  min-width: 9rem;
+  padding: 0.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  background: var(--otfw-bg-elevated);
+  border: 1px solid var(--otfw-border);
+  border-radius: 0.6rem;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+}
+.otfw-theme-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.45rem 0.6rem;
+  border: none;
+  background: none;
+  border-radius: 0.4rem;
+  color: var(--otfw-text-muted);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.otfw-theme-item:hover {
+  background: var(--otfw-bg-surface);
+  color: var(--otfw-text);
+}
+.otfw-theme-item.is-active {
+  color: var(--otfw-accent);
+  font-weight: 600;
+}
+
+/* Tooltip (hover/focus) — a small contrasting bubble. */
+.otfw-tooltip {
+  position: relative;
+  display: inline-flex;
+}
+.otfw-tooltip-bubble {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%) translateY(3px);
+  white-space: nowrap;
+  padding: 0.28rem 0.5rem;
+  border-radius: 0.4rem;
+  background: var(--otfw-text);
+  color: var(--otfw-bg);
+  font-size: 0.72rem;
+  font-weight: 500;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  z-index: 70;
+}
+.otfw-tooltip-bottom .otfw-tooltip-bubble {
+  top: 100%;
+  margin-top: 0.45rem;
+}
+.otfw-tooltip-top .otfw-tooltip-bubble {
+  bottom: 100%;
+  margin-bottom: 0.45rem;
+}
+.otfw-tooltip:hover .otfw-tooltip-bubble,
+.otfw-tooltip:focus-within .otfw-tooltip-bubble {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.otfw-search-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid var(--otfw-border);
+  background: var(--otfw-bg-surface);
+  color: var(--otfw-text-muted);
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.82rem;
+}
+.otfw-search-trigger:hover {
+  color: var(--otfw-accent);
+  border-color: var(--otfw-accent);
+}
+.otfw-search-kbd {
+  display: none;
+  align-items: center;
+  height: 1.25rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--otfw-border);
+  border-radius: 0.3rem;
+  background: var(--otfw-bg);
+  color: var(--otfw-text-muted);
+  font-family: var(--otfw-mono);
+  font-size: 0.68rem;
+  line-height: 1;
+}
+@media (min-width: 768px) {
+  .otfw-search-kbd {
+    display: inline-flex;
+  }
+}
+.otfw-search-label {
+  display: none;
+}
+@media (min-width: 768px) {
+  .otfw-search-label {
+    display: inline;
+  }
+}
+
+/* ── Search modal (Pagefind) ───────────────────────────────────────────────── */
+.web-search {
+  display: contents;
+}
+.otfw-search-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: none;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh 1rem 1rem;
+  background: color-mix(in srgb, #000 45%, transparent);
+  backdrop-filter: blur(2px);
+}
+.otfw-search-modal.is-open {
+  display: flex;
+}
+.otfw-search-panel {
+  width: 100%;
+  max-width: 36rem;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--otfw-bg-elevated);
+  border: 1px solid var(--otfw-border);
+  border-radius: 0.9rem;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+.otfw-search-field {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--otfw-border);
+  color: var(--otfw-text-muted);
+}
+.otfw-search-input-field {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  font: inherit;
+  font-size: 1rem;
+  color: var(--otfw-text);
+}
+/* Keyboard hint row beneath the input / results. */
+.otfw-search-hint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--otfw-border);
+  color: var(--otfw-text-muted);
+  font-size: 0.72rem;
+}
+.otfw-search-hint-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.otfw-search-hint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.3rem;
+  height: 1.3rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--otfw-border);
+  border-bottom-width: 2px;
+  border-radius: 0.3rem;
+  background: var(--otfw-bg-surface);
+  color: var(--otfw-text);
+  font-family: var(--otfw-mono);
+  font-size: 0.7rem;
+  line-height: 1;
+}
+.otfw-search-results {
+  list-style: none;
+  margin: 0;
+  padding: 0.4rem;
+  overflow-y: auto;
+}
+.otfw-search-result {
+  display: block;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.5rem;
+  text-decoration: none;
+  color: var(--otfw-text);
+}
+.otfw-search-result.is-active {
+  background: var(--otfw-accent-soft);
+}
+.otfw-search-result-crumb {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--otfw-text-muted);
+  letter-spacing: 0.01em;
+  margin-bottom: 0.1rem;
+}
+.otfw-search-result-title {
+  display: block;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+/* The matched section heading, under the page/post title. */
+.otfw-search-result-section {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--otfw-text-muted);
+  margin-top: 0.05rem;
+}
+.otfw-search-result-section::before {
+  content: "#";
+  color: var(--otfw-accent);
+  font-weight: 700;
+}
+.otfw-search-result-excerpt {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--otfw-text-muted);
+  margin-top: 0.15rem;
+  line-height: 1.5;
+}
+.otfw-search-result-excerpt mark {
+  background: var(--otfw-accent-soft);
+  color: var(--otfw-accent);
+  border-radius: 0.2rem;
+  padding: 0 0.1rem;
+}
+.otfw-search-empty {
+  padding: 1.5rem 1rem;
+  text-align: center;
+  color: var(--otfw-text-muted);
+  font-size: 0.9rem;
+}
+
+/* ── Docs grid ─────────────────────────────────────────────────────────────── */
+.otfw-docs {
+  max-width: 90rem;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2.5rem;
+}
+@media (min-width: 768px) {
+  .otfw-docs {
+    grid-template-columns: var(--otfw-sidebar-width) minmax(0, 1fr);
+  }
+}
+@media (min-width: 1280px) {
+  .otfw-docs {
+    grid-template-columns: var(--otfw-sidebar-width) minmax(0, 1fr) var(--otfw-toc-width);
+  }
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────────────────── */
+/* Mobile-first: the sidebar is an off-canvas drawer below the navbar, slid in over a
+ * backdrop. It sits *under* the navbar (z < navbar's 50) so the burger stays tappable
+ * to toggle it. The desktop block below turns it back into the sticky grid column. */
+.otfw-sidebar {
+  position: fixed;
+  top: var(--otfw-navbar-height);
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  width: min(19rem, 80vw);
+  padding: 1.25rem 1.1rem 2rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--otfw-bg);
+  border-right: 1px solid var(--otfw-border);
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition: transform 0.25s ease, visibility 0.25s ease;
+}
+.otfw-sidebar.is-open {
+  transform: translateX(0);
+  visibility: visible;
+}
+.otfw-sidebar-backdrop {
+  position: fixed;
+  top: var(--otfw-navbar-height);
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 39;
+  background: color-mix(in srgb, var(--otfw-text) 45%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+.otfw-sidebar-backdrop.is-open {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (min-width: 768px) {
+  .otfw-sidebar {
+    position: sticky;
+    top: var(--otfw-navbar-height);
+    bottom: auto;
+    left: auto;
+    z-index: auto;
+    width: auto;
+    align-self: start;
+    max-height: calc(100vh - var(--otfw-navbar-height));
+    overflow-y: auto;
+    padding: 2rem 0.5rem 2rem 0;
+    background: none;
+    border-right: none;
+    transform: none;
+    visibility: visible;
+  }
+  .otfw-sidebar-backdrop {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .otfw-sidebar,
+  .otfw-sidebar-backdrop {
+    transition: none;
+  }
+}
+
+/* Top-level site links shown at the top of the mobile drawer (the navbar hides its own
+ * copy there). Hidden on desktop, where those links stay in the navbar and the sidebar
+ * shows only the section tree. The links are NavbarLink elements, stacked into a column
+ * and separated from the tree by a divider. */
+.otfw-drawer-links {
+  display: none;
+}
+@media (max-width: 767px) {
+  .otfw-drawer-links {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.9rem;
+    margin-bottom: 1.25rem;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--otfw-border);
+    font-size: 0.95rem;
+  }
+}
+
+.otfw-sidebar-list,
+.otfw-sidebar-sublist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.otfw-sidebar-sublist {
+  margin: 0.25rem 0 0.75rem 0.25rem;
+  padding-left: 0.75rem;
+  border-left: 1px solid var(--otfw-border);
+}
+.otfw-sidebar-node {
+  margin: 0.1rem 0;
+}
+.otfw-sidebar-group-title {
+  display: block;
+  margin: 1.1rem 0 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--otfw-text-muted);
+}
+/* Collapsible group — a section title that toggles its child list open/closed. */
+.otfw-sidebar-group {
+  margin: 0.15rem 0;
+}
+.otfw-sidebar-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  margin: 0.85rem 0 0.35rem;
+  padding: 0.25rem 0.35rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--otfw-text-muted);
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.12s, background 0.12s;
+}
+.otfw-sidebar-group-toggle:hover {
+  color: var(--otfw-text);
+  background: var(--otfw-bg-surface);
+}
+.otfw-sidebar-group-toggle:focus-visible {
+  outline: 2px solid var(--otfw-accent);
+  outline-offset: 2px;
+}
+.otfw-sidebar-group-label {
+  flex: 1;
+  min-width: 0;
+}
+/* Group that is also a page: link + a slim icon-only toggle sharing one row. */
+.otfw-sidebar-group-row {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  margin-top: 0.35rem;
+}
+.otfw-sidebar-group-row .otfw-sidebar-link {
+  flex: 1;
+  min-width: 0;
+  /* The leading chevron button supplies the left inset; trim the link's own so its text
+   * lines up with the label-only group labels above/below. */
+  padding-left: 0.2rem;
+}
+/* Leading icon-only chevron for a group that is also a page — left-aligned to match the
+ * label-only group toggles (padding mirrors their 0.35rem chevron inset). */
+.otfw-sidebar-group-toggle--icon {
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 0.35rem;
+  justify-content: center;
+  color: var(--otfw-text-muted);
+}
+.otfw-sidebar-chevron {
+  flex: none;
+  transition: transform 0.18s ease;
+}
+.otfw-sidebar-chevron.is-open {
+  transform: rotate(90deg);
+}
+/* Defined after `.otfw-sidebar-chevron` so it wins on source order — a media query adds
+ * no specificity, so an earlier reduced-motion rule would be overridden by the transition
+ * above. */
+@media (prefers-reduced-motion: reduce) {
+  .otfw-sidebar-chevron {
+    transition: none;
+  }
+}
+.otfw-sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 0.45rem;
+  font-size: 0.875rem;
+  color: var(--otfw-text-muted);
+  text-decoration: none;
+  transition: color 0.12s, background 0.12s;
+}
+.otfw-sidebar-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 99px;
+  background: currentColor;
+  opacity: 0.35;
+  transition: opacity 0.12s;
+}
+.otfw-sidebar-link:hover {
+  color: var(--otfw-text);
+  background: var(--otfw-bg-surface);
+}
+.otfw-sidebar-link:hover .otfw-sidebar-dot {
+  opacity: 0.6;
+}
+.otfw-sidebar-link.otfw-active {
+  color: var(--otfw-accent);
+  background: var(--otfw-accent-soft);
+  font-weight: 600;
+}
+.otfw-sidebar-link.otfw-active .otfw-sidebar-dot {
+  opacity: 1;
+}
+
+/* ── Content ───────────────────────────────────────────────────────────────── */
+.otfw-content {
+  min-width: 0;
+  padding: 2.25rem 0 4rem;
+}
+.otfw-prose {
+  max-width: var(--otfw-content-max);
+}
+.otfw-prose h1 {
+  font-size: 2.1rem;
+  font-weight: 800;
+  line-height: 1.15;
+  margin: 0 0 1rem;
+  letter-spacing: -0.02em;
+}
+.otfw-prose h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 2.5rem 0 1rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--otfw-border);
+  letter-spacing: -0.01em;
+}
+.otfw-prose h3 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 2rem 0 0.75rem;
+}
+.otfw-prose h4 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin: 1.6rem 0 0.6rem;
+}
+.otfw-prose h5 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin: 1.4rem 0 0.5rem;
+}
+.otfw-prose h6 {
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--otfw-text-muted);
+  margin: 1.3rem 0 0.5rem;
+}
+.otfw-prose h1,
+.otfw-prose h2,
+.otfw-prose h3,
+.otfw-prose h4,
+.otfw-prose h5,
+.otfw-prose h6 {
+  scroll-margin-top: calc(var(--otfw-navbar-height) + 1rem);
+}
+
+/* Self-linking heading anchor (the hover `#`). Hidden until the heading is
+   hovered or the anchor itself is focused, so it doesn't clutter the page. */
+.otfw-heading-anchor {
+  margin-left: 0.4rem;
+  color: var(--otfw-text-muted);
+  font-weight: 400;
+  text-decoration: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+/* The `#` is presentational only — drawn here, not as a DOM text node, so it never
+   leaks into heading text read by the TOC or the search index. */
+.otfw-heading-anchor::before {
+  content: "#";
+}
+.otfw-prose :is(h1, h2, h3, h4, h5, h6):hover .otfw-heading-anchor,
+.otfw-heading-anchor:focus-visible {
+  opacity: 1;
+}
+.otfw-heading-anchor:hover {
+  color: var(--otfw-accent);
+}
+.otfw-prose p,
+.otfw-prose ul,
+.otfw-prose ol {
+  line-height: 1.75;
+  margin: 0 0 1.1rem;
+  color: var(--otfw-text);
+}
+.otfw-prose ul,
+.otfw-prose ol {
+  padding-left: 1.4rem;
+}
+/* Restore list markers: the Tailwind preflight reset (@import "tailwindcss") sets
+ * `list-style: none` on every ul/ol, which strips bullets and numbers from prose. */
+.otfw-prose ul {
+  list-style: disc;
+}
+.otfw-prose ul ul {
+  list-style: circle;
+}
+.otfw-prose ol {
+  list-style: decimal;
+}
+.otfw-prose li {
+  margin: 0.35rem 0;
+}
+/* Loose list items wrap their content in <p>; keep that from adding block spacing. */
+.otfw-prose li > p {
+  margin: 0;
+}
+/* GFM task list: drop the bullet and keep the checkbox inline with its label
+ * (the label is a block <p>, which would otherwise wrap to the next line). */
+.otfw-prose li:has(> input[type="checkbox"]) {
+  list-style: none;
+}
+.otfw-prose li:has(> input[type="checkbox"]) > p {
+  display: inline;
+}
+/* Custom checkbox so checked vs. unchecked read at a glance (the native disabled
+ * box is nearly identical in both states). Unchecked is an empty bordered box;
+ * checked fills with the accent and draws a white tick. */
+.otfw-prose li > input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0 0.55em 0 0;
+  border: 1.5px solid var(--otfw-border);
+  border-radius: 0.3rem;
+  background: var(--otfw-bg-surface);
+  vertical-align: -0.18em;
+  position: relative;
+  opacity: 1; /* override the browser's disabled-input dimming */
+  cursor: default;
+}
+.otfw-prose li > input[type="checkbox"]:checked {
+  background: var(--otfw-accent);
+  border-color: var(--otfw-accent);
+}
+.otfw-prose li > input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 0.34rem;
+  top: 0.13rem;
+  width: 0.26rem;
+  height: 0.52rem;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+/* Completed items: mute the label (the filled check already marks it done). */
+.otfw-prose li:has(> input[type="checkbox"]:checked) > p {
+  color: var(--otfw-text-muted);
+}
+/* An unclassed <button> in prose (e.g. an inline interactive demo). Component
+ * buttons carry their own class, so this only catches bare demo buttons. */
+.otfw-prose button:not([class]) {
+  font: inherit;
+  cursor: pointer;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--otfw-border);
+  border-radius: 0.5rem;
+  background: var(--otfw-bg-surface);
+  color: inherit;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.otfw-prose button:not([class]):hover {
+  border-color: var(--otfw-accent);
+}
+.otfw-prose a {
+  color: var(--otfw-accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+.otfw-prose a:hover {
+  text-decoration: underline;
+}
+.otfw-prose strong {
+  font-weight: 700;
+}
+.otfw-prose code {
+  font-family: var(--otfw-mono);
+  font-size: 0.86em;
+  background: var(--otfw-code-bg);
+  color: var(--otfw-code-text);
+  padding: 0.15em 0.4em;
+  border-radius: 0.35rem;
+}
+.otfw-prose pre {
+  margin: 0 0 1.4rem;
+  padding: 1rem 1.1rem;
+  border-radius: var(--otfw-radius);
+  border: 1px solid var(--otfw-border);
+  overflow-x: auto;
+  font-family: var(--otfw-mono);
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+/* Build-time highlighted code (syntect) sets its own inline background. */
+.otfw-prose pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+/* Titled code block (built by the MDX front-end): a header bar — language label,
+ * optional filename, and a copy button on the right — above the highlighted <pre>.
+ * The wrapper owns the radius and clips the corners of the dark header and code. */
+.otfw-code {
+  margin: 0 0 1.4rem;
+  border: 1px solid var(--otfw-border);
+  border-radius: var(--otfw-radius);
+  overflow: hidden;
+  background: #2b303b;
+}
+.otfw-code-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.4rem 0.5rem 0.4rem 0.95rem;
+  background: #23272f;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.otfw-code-lang {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.45);
+}
+.otfw-code-name {
+  font-family: var(--otfw-mono);
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.82);
+}
+.otfw-code pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  /* Readable default for blocks without build-time highlighting (e.g. string content
+   * rendered by Tabs via CodeBlock). Fenced blocks carry inline syntect
+   * colors, which override this. */
+  color: #e2e8f0;
+}
+.otfw-copy {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.6rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.78);
+  font-family: var(--otfw-font);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.otfw-copy:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+.otfw-copy.is-copied {
+  background: color-mix(in srgb, #10b981 22%, transparent);
+  border-color: color-mix(in srgb, #10b981 55%, transparent);
+  color: #34d399;
+}
+.otfw-copy .otfw-check-icon {
+  display: none;
+}
+.otfw-copy.is-copied .otfw-copy-icon {
+  display: none;
+}
+.otfw-copy.is-copied .otfw-check-icon {
+  display: inline;
+}
+.otfw-prose blockquote {
+  margin: 0 0 1.2rem;
+  padding: 0.25rem 1.1rem;
+  border-left: 3px solid var(--otfw-accent);
+  color: var(--otfw-text-muted);
+}
+.otfw-prose hr {
+  border: none;
+  border-top: 1px solid var(--otfw-border);
+  margin: 2rem 0;
+}
+.otfw-prose img {
+  max-width: 100%;
+  border-radius: var(--otfw-radius);
+}
+.otfw-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 1.4rem;
+  font-size: 0.9rem;
+}
+.otfw-prose th,
+.otfw-prose td {
+  text-align: left;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--otfw-border);
+}
+.otfw-prose th {
+  background: var(--otfw-bg-surface);
+  font-weight: 600;
+}
+
+/* ── TOC ───────────────────────────────────────────────────────────────────── */
+.otfw-toc {
+  display: none;
+}
+@media (min-width: 1280px) {
+  .otfw-toc {
+    display: block;
+    position: sticky;
+    top: var(--otfw-navbar-height);
+    align-self: start;
+    max-height: calc(100vh - var(--otfw-navbar-height));
+    overflow-y: auto;
+    padding: 2.25rem 0 2rem;
+  }
+}
+.otfw-toc-heading {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--otfw-text-muted);
+  margin-bottom: 0.6rem;
+}
+.otfw-toc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-left: 1px solid var(--otfw-border);
+}
+.otfw-toc-item {
+  margin: 0;
+}
+.otfw-toc-sub .otfw-toc-link {
+  padding-left: 1.5rem;
+}
+.otfw-toc-link {
+  display: block;
+  padding: 0.25rem 0 0.25rem 0.85rem;
+  margin-left: -1px;
+  border-left: 2px solid transparent;
+  font-size: 0.82rem;
+  color: var(--otfw-text-muted);
+  text-decoration: none;
+}
+.otfw-toc-link:hover {
+  color: var(--otfw-text);
+}
+.otfw-toc-link.otfw-active {
+  color: var(--otfw-accent);
+  border-left-color: var(--otfw-accent);
+  font-weight: 600;
+}
+
+/* ── Breadcrumbs ───────────────────────────────────────────────────────────── */
+.otfw-breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 1.25rem;
+  font-size: 0.8rem;
+  color: var(--otfw-text-muted);
+}
+.otfw-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.otfw-crumb-sep {
+  opacity: 0.5;
+}
+.otfw-crumb-link {
+  color: var(--otfw-text-muted);
+  text-decoration: none;
+}
+.otfw-crumb-link:hover {
+  color: var(--otfw-accent);
+}
+
+/* ── Page meta (last updated · edit link) ──────────────────────────────────── */
+.otfw-page-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 2.5rem;
+}
+/* Empty when a page has neither bit of meta — collapse the top margin then. */
+.otfw-page-meta:empty {
+  margin-top: 0;
+}
+.otfw-last-updated {
+  font-size: 0.8rem;
+  color: var(--otfw-text-muted);
+}
+.otfw-last-updated-time {
+  font-weight: 600;
+  color: var(--otfw-text);
+}
+.otfw-edit-page {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--otfw-text-muted);
+  text-decoration: none;
+}
+.otfw-edit-page:hover {
+  color: var(--otfw-accent);
+}
+.otfw-page-meta + .otfw-pagination {
+  margin-top: 1.5rem;
+}
+
+/* ── Pagination ────────────────────────────────────────────────────────────── */
+.otfw-pagination {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--otfw-border);
+}
+.otfw-page-link {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.85rem 1.1rem;
+  border: 1px solid var(--otfw-border);
+  border-radius: var(--otfw-radius);
+  text-decoration: none;
+  min-width: 0;
+  transition: border-color 0.15s;
+}
+.otfw-page-link:hover {
+  border-color: var(--otfw-accent);
+}
+.otfw-page-next {
+  text-align: right;
+  margin-left: auto;
+}
+.otfw-page-dir {
+  font-size: 0.75rem;
+  color: var(--otfw-text-muted);
+}
+.otfw-page-title {
+  font-weight: 600;
+  color: var(--otfw-text);
+}
+.otfw-page-spacer {
+  display: block;
+}
+
+/* ── Footer ────────────────────────────────────────────────────────────────── */
+.otfw-footer {
+  border-top: 1px solid var(--otfw-border);
+  background: var(--otfw-bg-surface);
+  margin-top: 2rem;
+}
+.otfw-footer-inner {
+  max-width: 90rem;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.85rem;
+  color: var(--otfw-text-muted);
+}
+.otfw-footer-links {
+  display: flex;
+  gap: 1.25rem;
+}
+.otfw-footer-link {
+  color: var(--otfw-text-muted);
+  text-decoration: none;
+}
+.otfw-footer-link:hover {
+  color: var(--otfw-text);
+}
+
+/* ── Callout ───────────────────────────────────────────────────────────────── */
+/* Per-type accent color `--c` drives a tinted fill, border, title color and a
+ * filled icon chip — all derived from the one color via color-mix, so the same
+ * rule adapts to light and dark automatically. */
+.otfw-callout {
+  --c: var(--otfw-text-muted);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.85rem;
+  margin: 1.5rem 0;
+  padding: 1rem 1.1rem;
+  border: 1px solid color-mix(in srgb, var(--c) 28%, var(--otfw-border));
+  border-left: 3px solid var(--c);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--c) 7%, var(--otfw-bg));
+}
+/* Plain icon (design default): the glyph is tinted with the accent, no filled chip. */
+.otfw-callout-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.65rem;
+  height: 1.65rem;
+  color: var(--c);
+  font-size: 1.15rem;
+  line-height: 1;
+}
+.otfw-callout-title {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: color-mix(in srgb, var(--c) 60%, var(--otfw-text));
+  margin-bottom: 0.25rem;
+}
+.otfw-callout-content {
+  min-width: 0;
+}
+.otfw-callout-body {
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+.otfw-callout-body > :last-child {
+  margin-bottom: 0;
+}
+.otfw-callout-note {
+  --c: var(--otfw-text-muted);
+}
+.otfw-callout-tip {
+  --c: #10b981;
+}
+.otfw-callout-info {
+  --c: #3b82f6;
+}
+.otfw-callout-warning {
+  --c: #f59e0b;
+}
+.otfw-callout-danger {
+  --c: #ef4444;
+}
+
+/* ── Tabs ──────────────────────────────────────────────────────────────────── */
+.otfw-tabs {
+  margin: 1.5rem 0;
+  border: 1px solid var(--otfw-border);
+  border-radius: var(--otfw-radius);
+  overflow: hidden;
+}
+.otfw-tabs-list {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.4rem;
+  background: var(--otfw-bg-surface);
+  border-bottom: 1px solid var(--otfw-border);
+}
+.otfw-tab {
+  padding: 0.35rem 0.85rem;
+  border: none;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--otfw-text-muted);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.otfw-tab.otfw-active {
+  background: var(--otfw-bg);
+  color: var(--otfw-accent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.otfw-tabs-panels {
+  padding: 1rem 1.1rem;
+}
+.otfw-tabs-panels pre {
+  margin: 0;
+  border: none;
+}
+/* A CodeBlock filling a panel shouldn't add its own trailing margin on top of the
+ * panel's padding. */
+.otfw-tab-panel > .otfw-code {
+  margin: 0;
+}
+.otfw-hidden {
+  display: none;
+}
+
+/* ── Steps ─────────────────────────────────────────────────────────────────── */
+.otfw-steps {
+  counter-reset: otfw-step;
+  margin: 1.5rem 0;
+  padding-left: 1.75rem;
+  border-left: 1px solid var(--otfw-border);
+}
+.otfw-steps > h3,
+.otfw-steps > h4 {
+  position: relative;
+  counter-increment: otfw-step;
+  margin-top: 1.6rem;
+  font-size: 1.05rem;
+}
+.otfw-steps > h3:first-child,
+.otfw-steps > h4:first-child {
+  margin-top: 0;
+}
+.otfw-steps > h3::before,
+.otfw-steps > h4::before {
+  content: counter(otfw-step);
+  position: absolute;
+  left: calc(-1.75rem - 1px);
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 999px;
+  background: var(--otfw-bg);
+  border: 1px solid var(--otfw-border);
+  color: var(--otfw-text-muted);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.otfw-steps > h3:hover::before,
+.otfw-steps > h4:hover::before {
+  border-color: var(--otfw-accent);
+  color: var(--otfw-accent);
+}
+
+/* ── Table wrapper ─────────────────────────────────────────────────────────── */
+.otfw-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 1.4rem;
+}
+.otfw-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.otfw-table th,
+.otfw-table td {
+  text-align: left;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--otfw-border);
+}
+.otfw-table th {
+  background: var(--otfw-bg-surface);
+  font-weight: 600;
+}
+
+/* ── Cards (index grids, e.g. the API overview) ────────────────────────────── */
+.otfw-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+.otfw-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--otfw-border);
+  border-radius: 0.75rem;
+  background: var(--otfw-bg-surface);
+  text-decoration: none;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.otfw-card:hover {
+  border-color: var(--otfw-accent);
+  transform: translateY(-2px);
+}
+.otfw-card-title {
+  font-weight: 700;
+  color: var(--otfw-text);
+}
+.otfw-card-desc {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--otfw-text-muted);
+}
+
+/* ── Blog ──────────────────────────────────────────────────────────────────── */
+.otfw-blog {
+  max-width: 90rem;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+.otfw-blog-main {
+  width: 100%;
+  max-width: var(--otfw-content-max);
+  margin: 0 auto;
+  padding: 3rem 0;
+}
+/* A post gets content + a sticky "On this page" TOC on wide screens. */
+.otfw-blog-post {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2.5rem;
+}
+@media (min-width: 1280px) {
+  .otfw-blog-post {
+    grid-template-columns: minmax(0, 1fr) var(--otfw-toc-width);
+    /* No `align-items: start` — the TOC column is a <web-toc> custom element that
+       must stretch to the row height so its inner `position: sticky` nav has travel
+       room (mirrors `.otfw-docs`). With `start` the host shrinks to content and the
+       TOC scrolls away with the page. */
+  }
+  .otfw-blog-post .otfw-blog-main {
+    margin: 0;
+    justify-self: end;
+  }
+}
+.otfw-blog-back {
+  display: inline-block;
+  margin-bottom: 1.5rem;
+  font-size: 0.85rem;
+  color: var(--otfw-text-muted);
+  text-decoration: none;
+}
+.otfw-blog-back:hover {
+  color: var(--otfw-text);
+}
+
+/* Post banner (title + description + meta). */
+.otfw-post-banner {
+  margin-bottom: 2.5rem;
+  padding-bottom: 1.75rem;
+  border-bottom: 1px solid var(--otfw-border);
+}
+.otfw-post-title {
+  font-size: clamp(2rem, 5vw, 2.75rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--otfw-text);
+}
+.otfw-post-desc {
+  margin-top: 0.75rem;
+  font-size: 1.15rem;
+  color: var(--otfw-text-muted);
+  line-height: 1.5;
+}
+
+/* Meta row: date · author · reading time. */
+.otfw-post-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+  color: var(--otfw-text-muted);
+}
+.otfw-post-meta > * + *::before {
+  content: "·";
+  margin-right: 0.75rem;
+  color: var(--otfw-border);
+}
+.otfw-reading-time,
+.otfw-post-author,
+.otfw-post-date {
+  white-space: nowrap;
+}
+
+/* Tags. */
+.otfw-post-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.otfw-post-tag {
+  padding: 0.15rem 0.6rem;
+  border-radius: 9999px;
+  background: var(--otfw-bg-surface);
+  border: 1px solid var(--otfw-border);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--otfw-text-muted);
+}
+
+/* Index listing. */
+.otfw-post-list {
+  display: flex;
+  flex-direction: column;
+}
+.otfw-post-card {
+  display: block;
+  padding: 1.6rem 0;
+  border-top: 1px solid var(--otfw-border);
+  text-decoration: none;
+  transition: opacity 0.15s;
+}
+.otfw-post-card:hover .otfw-post-card-title {
+  color: var(--otfw-accent);
+}
+.otfw-post-card .otfw-post-meta {
+  margin-top: 0;
+}
+.otfw-post-card-title {
+  margin-top: 0.4rem;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--otfw-text);
+  transition: color 0.15s;
+}
+.otfw-post-card-desc {
+  margin-top: 0.4rem;
+  color: var(--otfw-text-muted);
+  line-height: 1.5;
+}
+.otfw-post-empty {
+  padding: 2rem 0;
+  color: var(--otfw-text-muted);
+}
+
+/* ── Blog: cover images & author ───────────────────────────────────────────── */
+.otfw-post-cover {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 7;
+  object-fit: cover;
+  border-radius: 0.85rem;
+  border: 1px solid var(--otfw-border);
+  margin-bottom: 1.75rem;
+}
+.otfw-post-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.otfw-post-avatar {
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 9999px;
+  object-fit: cover;
+  border: 1px solid var(--otfw-border);
+}
+.otfw-post-author-role {
+  color: var(--otfw-text-muted);
+  opacity: 0.8;
+}
+/* Cards with a cover use a media + body two-row layout. */
+.otfw-post-card-cover {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 8;
+  object-fit: cover;
+  border-radius: 0.6rem;
+  border: 1px solid var(--otfw-border);
+  margin-bottom: 1rem;
+}

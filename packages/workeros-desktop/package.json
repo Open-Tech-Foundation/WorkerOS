@@ -1,0 +1,20 @@
+{
+  "name": "@opentf/workeros-desktop",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "WorkerOS desktop — a full-viewport window-manager shell (dock, launcher, apps) over the WorkerOS kernel. Developed against the local runtime build; features graduate to the website playground.",
+  "scripts": {
+    "dev": "otfw dev",
+    "build": "otfw build",
+    "serve": "otfw serve",
+    "build:runtime": "npm --prefix ../workeros-web run build:bundles && npm --prefix ../workeros-web run build:dist"
+  },
+  "dependencies": {
+    "@opentf/web": "0.20.0",
+    "@opentf/workeros-web": "*"
+  },
+  "devDependencies": {
+    "@opentf/web-cli": "1.18.0"
+  }
+}

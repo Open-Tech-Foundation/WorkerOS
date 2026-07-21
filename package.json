@@ -8,6 +8,7 @@
     "packages/workeros-programs",
     "packages/workeros-coreutils",
     "packages/workeros-web",
+    "packages/workeros-desktop",
     "website"
   ],
   "trustedDependencies": [
