@@ -3,11 +3,20 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Local testing app: boot WorkerOS from the local package builds to verify source changes in a real browser.",
+  "description": "Local host app that mounts the @opentf/workeros-desktop package against the LOCAL runtime build, so the desktop can be run and iterated on locally.",
   "scripts": {
-    "dev": "node serve.mjs",
-    "build": "npm --prefix ../packages/workeros-web run build:bundles && npm --prefix ../packages/workeros-web run build:dist",
-    "build:wasm": "npm --prefix ../packages/workeros-web run build:wasm",
-    "start": "npm run build && npm run dev"
+    "dev": "otfw dev",
+    "build": "otfw build",
+    "serve": "otfw serve",
+    "build:runtime": "npm --prefix ../packages/workeros-web run build:bundles && npm --prefix ../packages/workeros-web run build:dist",
+    "build:wasm": "npm --prefix ../packages/workeros-web run build:wasm"
+  },
+  "dependencies": {
+    "@opentf/web": "0.20.0",
+    "@opentf/workeros-desktop": "*",
+    "@opentf/workeros-web": "*"
+  },
+  "devDependencies": {
+    "@opentf/web-cli": "1.18.0"
   }
 }

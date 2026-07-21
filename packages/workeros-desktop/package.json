@@ -4,6 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "description": "WorkerOS desktop — a full-viewport window-manager shell (dock, launcher, apps) over the WorkerOS kernel. Developed against the local runtime build; features graduate to the website playground.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./global.css": "./app/global.css",
+    "./app/*": "./app/*"
+  },
   "scripts": {
     "dev": "otfw dev",
     "build": "otfw build",

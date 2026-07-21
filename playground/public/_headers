@@ -1,0 +1,13 @@
+# Cloudflare Pages edge headers.
+#
+# Grant cross-origin isolation at the edge so the playground gets SharedArrayBuffer
+# on the FIRST load (no service-worker reload). The COI service worker stays as a
+# fallback for hosts that can't set headers. All app subresources are same-origin,
+# so `require-corp` is safe here.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+# Be explicit about the kernel wasm MIME (enables streaming instantiation).
+/*.wasm
+  Content-Type: application/wasm

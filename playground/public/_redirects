@@ -1,0 +1,4 @@
+# SPA fallback: unknown client routes serve the app shell (200, no redirect).
+# With `otfw build --ssg` each route is pre-rendered, so this only catches paths
+# that have no static file. Static assets are matched before this rule.
+/*    /index.html    200
