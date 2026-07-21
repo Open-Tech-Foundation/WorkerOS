@@ -16,6 +16,9 @@ const nameOf = (p) => p.slice(p.lastIndexOf("/") + 1);
  * @param {object} [opts]
  * @param {number} [opts.writeCap] cap a single `write` to this many bytes (to
  *   exercise the caller's chunk loop). Default: unlimited.
+ * @param {number} [opts.fdCap] max concurrently-open fds before `open` throws
+ *   `Mfile` (EMFILE), mirroring the kernel's per-process fd cap. Default:
+ *   unlimited.
  */
 export function createFakeSyncFs(opts = {}) {
   const files = new Map(); // path → Uint8Array
@@ -67,6 +70,7 @@ export function createFakeSyncFs(opts = {}) {
 
     open(path, o = {}) {
       if (links.has(path)) return this.open(linkTarget(path), o); // follow symlink
+      if (opts.fdCap && fds.size >= opts.fdCap) fail("Mfile"); // per-process fd cap
       if (dirs.has(path)) {
         const fd = nextFd++;
         fds.set(fd, { path, offset: 0, dir: true });

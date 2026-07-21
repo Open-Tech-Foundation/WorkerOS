@@ -569,3 +569,45 @@ test("async Tier 3 ops surface errors via error-first callbacks", async () => {
   assert.equal(err.code, "ENOENT");
   await new Promise((res, rej) => fs.mkdtemp("/t-", (e, d) => e ? rej(e) : (assert.ok(d.startsWith("/t-")), res())));
 });
+
+test("EMFILE backpressure: promises.open queues and retries as fds free", async () => {
+  // Kernel caps fds per process; without graceful-fs-style retry an `npm
+  // install` fd burst (cacache/tar) aborts with EMFILE. The async/promises
+  // fd-opening ops must instead queue on EMFILE and drain as fds close.
+  const fs = createFs(createFakeSyncFs({ fdCap: 4 }));
+  for (let i = 0; i < 8; i++) fs.writeFileSync(`/f${i}`, "x"); // sequential: within cap
+
+  // Hold the cap full with 4 open handles.
+  const held = await Promise.all([0, 1, 2, 3].map((i) => fs.promises.open(`/f${i}`, "r")));
+
+  // 4 more opens must hit EMFILE and park (stay pending), not reject.
+  let resolved = 0;
+  const waiters = [4, 5, 6, 7].map((i) => fs.promises.open(`/f${i}`, "r").then((fh) => (resolved++, fh)));
+
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(resolved, 0, "opens must wait while all fds are held, not fail");
+
+  // Releasing the held fds triggers the drain → the parked opens complete.
+  await Promise.all(held.map((fh) => fh.close()));
+  const opened = await Promise.all(waiters);
+  assert.equal(resolved, 4, "parked opens resolve once fds free");
+  await Promise.all(opened.map((fh) => fh.close()));
+});
+
+test("EMFILE backpressure: async appendFile retries instead of failing (cacache path)", async () => {
+  const fs = createFs(createFakeSyncFs({ fdCap: 4 }));
+  const held = await Promise.all([0, 1, 2, 3].map((i) => {
+    fs.writeFileSync(`/h${i}`, "x");
+    return fs.promises.open(`/h${i}`, "r");
+  }));
+  // appendFile (callback API) opens internally → EMFILE while the cap is full.
+  let err, done = false;
+  fs.appendFile("/index", "entry\n", (e) => { err = e; done = true; });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(done, false, "appendFile must park on EMFILE, not error out");
+  await Promise.all(held.map((fh) => fh.close())); // frees fds → drain
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(done, true);
+  assert.equal(err ?? null, null, "no error once the retry succeeds");
+  assert.equal(fs.readFileSync("/index", "utf8"), "entry\n");
+});

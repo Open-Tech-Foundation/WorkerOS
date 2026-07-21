@@ -372,6 +372,18 @@ impl ProcessCtx {
 
     pub fn path_open(&mut self, vfs: &mut dyn Vfs, path_arg: &str, opts: OpenOptions) -> SysResult<Fd> {
         let abs = self.resolve_path(path_arg)?;
+        // Enforce the fd cap *before* the VFS mutation below, so a failed open
+        // has no side effects (POSIX: an `open` that fails with `EMFILE` creates
+        // no file). Otherwise `vfs.open` with `create`/`truncate` would leave a
+        // half-created inode behind on `EMFILE` — and a caller that retries an
+        // *exclusive* (`wx`) open as fds free (npm's cacache tmp files, via
+        // /bin/node's graceful-fs-style retry) would then hit `EEXIST` on the
+        // leaked file. The kernel is single-threaded, so no fd can be allocated
+        // between this check and the `alloc_fd` below: the check is exact, and
+        // `alloc_fd` still enforces the cap as the authoritative seam.
+        if self.fds.len() >= self.max_open_fds {
+            return Err(Errno::Mfile);
+        }
         // For `fs.watch`: note whether this open creates a new path (rename) or
         // truncates an existing file (change). Only probed when a watcher exists.
         let existed = if vfs.watching() { vfs.resolve(&abs).is_ok() } else { true };
@@ -777,9 +789,16 @@ mod tests {
         let fd_a = open(&mut p, &mut vfs, "/a").unwrap();
         let _fd_b = open(&mut p, &mut vfs, "/b").unwrap();
         assert_eq!(open(&mut p, &mut vfs, "/c").unwrap_err(), Errno::Mfile);
-        // Closing a descriptor frees a slot, so the next open succeeds.
+        // The failed open is atomic: it created no inode (POSIX EMFILE has no
+        // side effects). A leaked `/c` here would make an *exclusive* retry fail
+        // EEXIST — the cacache-tmp bug this guards against.
+        assert_eq!(vfs.resolve("/c").unwrap_err(), Errno::Noent);
+        // Closing a descriptor frees a slot, so the next open succeeds — and an
+        // exclusive create still works because nothing was left behind.
         p.fd_close(&mut vfs, &mut pipes, fd_a).unwrap();
-        assert!(open(&mut p, &mut vfs, "/c").is_ok());
+        assert!(p
+            .path_open(&mut vfs, "/c", OpenOptions { create: true, exclusive: true, ..Default::default() })
+            .is_ok());
     }
 
     #[test]

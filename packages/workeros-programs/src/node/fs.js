@@ -297,6 +297,61 @@ export function createFs(syncFs, onFsEvent) {
     }
   };
 
+  // --- EMFILE backpressure (graceful-fs-style) ---------------------------
+  // The kernel caps open fds per process (`EMFILE`, ADR-020). Real Node
+  // survives fd exhaustion because npm bundles graceful-fs, which queues an
+  // async `open` that hits `EMFILE` and retries it as other fds close instead
+  // of failing the whole operation. But graceful-fs only patches the legacy
+  // callback/sync fs API, NOT `fs/promises` — which is exactly what npm's
+  // cacache uses (`cacache.insert` → `fs.appendFile` on `_cacache/index-v5`).
+  // Without this, a transient fd burst during `npm install` (tar extraction +
+  // concurrent handles) aborts the whole install with `EMFILE`.
+  //
+  // This resilience is userland policy, so it lives here in `/bin/node`, not
+  // the (generic) kernel: it makes I/O robust at *any* fd cap. A synchronous
+  // `open` can't wait for fds to free, so only the async/promises paths are
+  // covered — which is all cacache needs.
+  const emfileQueue = []; // { attempt, startedAt }
+  let emfileDraining = false;
+  const EMFILE_TIMEOUT_MS = 60000; // give up after 60s, like graceful-fs
+
+  const isEmfile = (e) => e && e.code === "EMFILE";
+
+  // Run `fn` (a sync op that may throw `EMFILE`) as a Promise, retrying it as
+  // fds free. Non-`EMFILE` results (success or any other error) settle at once.
+  function withEmfileRetry(fn) {
+    return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
+      const attempt = () => {
+        try {
+          resolve(fn());
+        } catch (e) {
+          if (isEmfile(e) && Date.now() - startedAt < EMFILE_TIMEOUT_MS) {
+            emfileQueue.push({ attempt, startedAt });
+          } else {
+            reject(e);
+          }
+        }
+      };
+      attempt();
+    });
+  }
+
+  // When an fd is released, give queued opens another chance (on a later tick,
+  // so the close fully settles first). Self-reschedules while the process is
+  // still fd-starved; queued items past the timeout reject themselves, so the
+  // queue always drains and this terminates.
+  function drainEmfileQueue() {
+    if (emfileDraining || emfileQueue.length === 0) return;
+    emfileDraining = true;
+    defer(() => {
+      emfileDraining = false;
+      const pending = emfileQueue.splice(0, emfileQueue.length);
+      for (const item of pending) item.attempt(); // may re-queue if still EMFILE
+      if (emfileQueue.length) drainEmfileQueue();
+    });
+  }
+
   function openSync(path, flags = "r", _mode) {
     path = toPath(path);
     const { opts, append } =
@@ -312,6 +367,8 @@ export function createFs(syncFs, onFsEvent) {
   function closeSync(fd) {
     guard(() => syncFs.close(fd), "close", openPaths.get(fd));
     openPaths.delete(fd);
+    // An fd just freed up — let any open()s parked on EMFILE retry.
+    if (emfileQueue.length) drainEmfileQueue();
   }
 
   // `readSync(fd, buffer, offset, length, position)` — Node also accepts the
@@ -936,6 +993,16 @@ export function createFs(syncFs, onFsEvent) {
     });
   };
 
+  // Like `asyncify`, but for ops that open an fd: the first attempt runs on a
+  // deferred macrotask (loop-keepalive, as above), and an `EMFILE` there is
+  // queued and retried as fds free instead of failing the callback.
+  const asyncifyOpen = (syncFn) => (...all) => {
+    const [args, cb] = takeCallback(all);
+    defer(() => {
+      withEmfileRetry(() => syncFn(...args)).then((r) => cb(null, r), (e) => cb(e));
+    });
+  };
+
   // `fs.read(fd, buffer, offset, length, position, cb)` — also the modern
   // `fs.read(fd[, options], cb)` form. Delivers `(err, bytesRead, buffer)`.
   function read(fd, ...all) {
@@ -1127,10 +1194,12 @@ export function createFs(syncFs, onFsEvent) {
 
   const asyncApi = {
     access: asyncify(accessSync),
-    readFile: asyncify(readFileSync),
-    writeFile: asyncify(writeFileSync),
-    appendFile: asyncify(appendFileSync),
-    open: asyncify(openSync),
+    // fd-opening ops get EMFILE backpressure (graceful-fs parity).
+    readFile: asyncifyOpen(readFileSync),
+    writeFile: asyncifyOpen(writeFileSync),
+    appendFile: asyncifyOpen(appendFileSync),
+    open: asyncifyOpen(openSync),
+    copyFile: asyncifyOpen(copyFileSync),
     close: asyncify(closeSync),
     read, write, readv, writev, exists,
     stat: asyncify(statSync),
@@ -1148,7 +1217,6 @@ export function createFs(syncFs, onFsEvent) {
     rm: asyncify(rmSync),
     unlink: asyncify(unlinkSync),
     rename: asyncify(renameSync),
-    copyFile: asyncify(copyFileSync),
     cp: asyncify(cpSync),
     opendir: asyncify(opendirSync),
     glob: asyncify(globSync),
@@ -1210,10 +1278,13 @@ export function createFs(syncFs, onFsEvent) {
   const wrapP = (fn) => (...args) => {
     try { return Promise.resolve(fn(...args)); } catch (e) { return Promise.reject(e); }
   };
+  // fd-opening ops go through the EMFILE retry queue (graceful-fs parity):
+  // cacache/tar drive these under `fs/promises`, which graceful-fs never patches.
+  const wrapPOpen = (fn) => (...args) => withEmfileRetry(() => fn(...args));
   fs.promises = {
-    readFile: wrapP(readFileSync),
-    writeFile: wrapP(writeFileSync),
-    appendFile: wrapP(appendFileSync),
+    readFile: wrapPOpen(readFileSync),
+    writeFile: wrapPOpen(writeFileSync),
+    appendFile: wrapPOpen(appendFileSync),
     stat: wrapP(statSync),
     lstat: wrapP(lstatSync),
     statfs: wrapP(statfsSync),
@@ -1228,7 +1299,7 @@ export function createFs(syncFs, onFsEvent) {
     rm: wrapP(rmSync),
     unlink: wrapP(unlinkSync),
     rename: wrapP(renameSync),
-    copyFile: wrapP(copyFileSync),
+    copyFile: wrapPOpen(copyFileSync),
     cp: wrapP(cpSync),
     access: wrapP(accessSync),
     truncate: wrapP(truncateSync),
@@ -1240,7 +1311,7 @@ export function createFs(syncFs, onFsEvent) {
     lutimes: wrapP(lutimesSync),
     glob: wrapP(globSync),
     opendir: wrapP(opendirSync),
-    open: (path, flags = "r", mode) => settle(() => new FileHandle(openSync(path, flags, mode))),
+    open: (path, flags = "r", mode) => withEmfileRetry(() => new FileHandle(openSync(path, flags, mode))),
     watch, // async-iterable in Node; here it returns the FSWatcher (EventEmitter)
     openAsBlob,
     constants,
