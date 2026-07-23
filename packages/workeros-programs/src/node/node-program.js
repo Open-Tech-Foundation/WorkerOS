@@ -213,7 +213,13 @@ const process = emitter({
   // (`[...process.execArgv]`), e.g. Next's getParsedNodeOptions.
   execArgv: [],
   env: { ...sys.env },
-  platform: "workeros",
+  // Report a REAL Node platform, for the same reason `version` reports a Node
+  // semver (below): packages switch on `process.platform` and treat an unknown
+  // value as a hard error — Next.js's wasm-SWC loader throws "Unsupported
+  // platform" and aborts. WorkerOS is Linux-personality (posix paths, it runs
+  // linux/wasm binaries), so "linux" is the honest compat answer; our true
+  // identity stays in `release.name` ("workeros"), exactly as for `version`.
+  platform: "linux",
   arch: "wasm32",
   config: processConfig,
   features: Object.freeze({ debug: false, inspector: false }),

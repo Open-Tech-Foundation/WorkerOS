@@ -7,7 +7,10 @@ import { createOs } from "../src/node/os.js";
 test("constants and posix personality", () => {
   const os = createOs();
   assert.equal(os.EOL, "\n");
-  assert.equal(os.platform(), "workeros");
+  // A real Node platform (Linux-personality) so `process.platform`/`os.platform()`
+  // branches don't error on an unknown value; true identity is os.type().
+  assert.equal(os.platform(), "linux");
+  assert.equal(os.type(), "WorkerOS");
   assert.equal(os.arch(), "wasm32");
   assert.equal(os.endianness(), "LE");
   assert.equal(os.devNull, "/dev/null");
