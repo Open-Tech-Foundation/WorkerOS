@@ -281,6 +281,11 @@ const workerContexts = new Map();
 // spawnWorker, and a later workerPost on the same port resolves it (see the
 // `workerPost` syscall). Dropped when the worker exits.
 const workerTokens = new Map();
+// node:child_process fork IPC: child pid → parent pid, for a child spawned with
+// an IPC channel (`fork`, or `spawn`/`spawnSync` with `stdio:'ipc'`). Lets the
+// child answer `workerInit` with `ipc:true` (so it wires `process.send`) and lets
+// `ipcSend` route messages between the parent and that child. Dropped on exit.
+const ipcParents = new Map();
 
 // Deliver a cooperative signal to a live JS program (posted to its worker).
 function deliverSignal(pid, signal) {
@@ -1611,6 +1616,9 @@ function handleSyscall(pid, msg) {
           break;
         }
         const childPid = spawned.pid;
+        // fork IPC: record the parent↔child link so `ipcSend` can route between
+        // them and the child's `workerInit` reports `ipc:true`.
+        if (args.ipc) ipcParents.set(childPid, pid);
         // A terminal-reading child joins its parent's process group (spawn
         // inherited it, ADR-025), so if the parent is the foreground job the
         // child gets ^C + the termios restore on exit automatically.
@@ -1618,7 +1626,15 @@ function handleSyscall(pid, msg) {
         // parent worker's child streams; 'ignore' → dropped.
         const route = (fd, msgType) => {
           const mode = stdio[fd];
-          if (mode === "inherit") return (b) => parentTty && parentTty.out(crlf(b));
+          if (mode === "inherit") {
+            if (parentTty) return (b) => parentTty.out(crlf(b));
+            // No controlling terminal (a headless parent — e.g. one spawned over a
+            // pipe): `stdio:'inherit'` still means "use the parent's stdout/stderr",
+            // so forward to the parent's own sink rather than dropping the output.
+            const s = parentRec && parentRec.sink;
+            if (s) return (b) => (fd === 1 ? s.stdout(b) : s.stderr(b));
+            return () => {};
+          }
           if (mode === "ignore") return () => {};
           return (b) => parentWorker && parentWorker.postMessage({ type: msgType, pid: childPid, data: b });
         };
@@ -1630,6 +1646,7 @@ function handleSyscall(pid, msg) {
           sink,
           onExit: (code) => {
             cleanup();
+            ipcParents.delete(childPid);
             if (parentWorker) parentWorker.postMessage({ type: MSG.CHILD_EXIT, pid: childPid, code: code | 0 });
           },
         });
@@ -1686,12 +1703,34 @@ function handleSyscall(pid, msg) {
         break;
       }
       case "workerInit": {
-        // A starting /bin/node asks whether it is a worker (and if so, its data).
+        // A starting /bin/node asks whether it is a worker (and if so, its data),
+        // and whether it holds a fork IPC channel to its parent (so it wires
+        // `process.send`). A fork child is a real process, not a worker thread —
+        // it stays `isMainThread:true`, just with `ipc:true`.
         const ctx = workerContexts.get(pid);
+        const ipc = ipcParents.has(pid);
         reply(pid, id, true, ctx
-          ? { isMainThread: false, threadId: ctx.threadId, workerData: ctx.workerData }
-          : { isMainThread: true, threadId: 0, workerData: null });
+          ? { isMainThread: false, threadId: ctx.threadId, workerData: ctx.workerData, ipc }
+          : { isMainThread: true, threadId: 0, workerData: null, ipc });
         break;
+      }
+      case "ipcSend": {
+        // fork IPC relay (structured clone). From a child (`to === "parent"`) →
+        // deliver to its parent as CHILD_MESSAGE; from a parent (`to` = child pid)
+        // → deliver to that child as IPC_TO_CHILD. Fire-and-forget, like workerPost.
+        if (args.to === "parent") {
+          const parentPid = ipcParents.get(pid);
+          const pw = parentPid !== undefined && programs.get(parentPid);
+          if (pw && !pw.done) pw.worker.postMessage({ type: MSG.CHILD_MESSAGE, pid, data: args.data });
+        } else {
+          const childPid = args.to | 0;
+          // Only relay to a child that actually holds an IPC channel to this parent.
+          if (ipcParents.get(childPid) === pid) {
+            const cw = programs.get(childPid);
+            if (cw && !cw.done) cw.worker.postMessage({ type: MSG.IPC_TO_CHILD, data: args.data });
+          }
+        }
+        break; // fire-and-forget: no reply
       }
       case "workerPost": {
         // Relay a structured-clone message. From a worker (`to === "parent"`) →

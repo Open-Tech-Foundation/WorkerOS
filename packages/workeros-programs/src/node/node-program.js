@@ -363,6 +363,38 @@ const whenIdle = loop.whenIdle;
 // builtin construction below doesn't matter.
 globalThis.__workerosLoop = loop;
 
+// fork IPC (child side): a process launched by `child_process.fork` (or `spawn`
+// with `stdio:'ipc'`) holds a message channel to its parent. Wire `process.send`/
+// `'message'`/`connected`/`disconnect`, and hold the event loop open while the
+// channel is live — Node keeps a process with an open IPC channel from exiting.
+// Tools gate real work on it: Next.js's dev-server worker only starts when
+// `process.send` exists, otherwise it does nothing and exits.
+if (workerInit && workerInit.ipc) {
+  process.connected = true;
+  process.channel = { ref: () => loop.ref(), unref: () => loop.unref() };
+  loop.ref();
+  process.send = (message, sendHandle, options, callback) => {
+    if (typeof sendHandle === "function") callback = sendHandle;
+    else if (typeof options === "function") callback = options;
+    if (!process.connected) {
+      const err = new Error("channel closed");
+      if (typeof callback === "function") queueMicrotask(() => callback(err));
+      return false;
+    }
+    sys.ipcSend("parent", message);
+    if (typeof callback === "function") queueMicrotask(() => callback(null));
+    return true;
+  };
+  process.disconnect = () => {
+    if (!process.connected) return;
+    process.connected = false;
+    process.channel = null;
+    loop.unref();
+    queueMicrotask(() => process.emit("disconnect"));
+  };
+  sys.onIpcMessage?.((data) => process.emit("message", data));
+}
+
 // Deliver kernel signals to process listeners. SIGWINCH refreshes the cached
 // terminal size first, so a handler (and later reads of stdout.columns) see the
 // new geometry; its default disposition is otherwise a harmless no-op. A handler
@@ -717,7 +749,9 @@ globalThis.__workerosImport = async (base, spec) => {
 // process.exit (via sys.exit) unwinds past here and is caught by the program worker,
 // which reports the code; a genuine error likewise propagates (stack + exit 1).
 if (detectFormat(entrySource, entryAbs, evalSource != null ? undefined : { fs, path }) === "cjs") {
-  const run = createNodeRuntime(sys, nodeBuiltins);
+  // Reuse the builtins already built above, so the CJS entry and the modules it
+  // `import()`s share one child_process / worker_threads / IPC instance.
+  const run = createNodeRuntime(sys, nodeBuiltins, builtins);
   await run(entryAbs, entrySource);
 } else {
   await evalEsm(entryAbs, entrySource, evalSource == null);

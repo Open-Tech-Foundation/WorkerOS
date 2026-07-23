@@ -111,6 +111,7 @@ export function createChildProcess(sys = globalThis.sys) {
     if (!child) return;
     if (kind === "stdout") child.stdout._push(payload);
     else if (kind === "stderr") child.stderr._push(payload);
+    else if (kind === "message") child.emit("message", payload);
     else if (kind === "exit") {
       children.delete(pid);
       child._finish(payload && typeof payload.code === "number" ? payload.code : 0);
@@ -196,6 +197,9 @@ export function createChildProcess(sys = globalThis.sys) {
       this.exitCode = null;
       this.signalCode = null;
       this.killed = false;
+      this._ipc = false;
+      this.connected = false;
+      this.channel = null;
       this._stdio = stdio || ["pipe", "pipe", "pipe"];
       this.stdout = new ChildStream();
       this.stderr = new ChildStream();
@@ -212,14 +216,41 @@ export function createChildProcess(sys = globalThis.sys) {
     }
     ref() { return this; }
     unref() { return this; }
-    // No IPC channel for `fork` (INV-5) — the message never sends.
-    send() { return false; }
-    disconnect() {}
+    // fork IPC (or `spawn` with `stdio:'ipc'`): a real parent→child channel.
+    _enableIpc() {
+      this._ipc = true;
+      this.connected = true;
+      // Node exposes a `channel` object with ref/unref; a truthy value is what
+      // libraries check to detect an IPC channel is present.
+      this.channel = { ref: () => {}, unref: () => {} };
+    }
+    // send(message[, sendHandle][, options][, callback]) — sendHandle (passing a
+    // socket/server across the channel) is unsupported; everything else works.
+    send(message, sendHandle, options, callback) {
+      if (typeof sendHandle === "function") { callback = sendHandle; sendHandle = undefined; }
+      else if (typeof options === "function") { callback = options; options = undefined; }
+      if (!this._ipc || !this.connected || this.pid == null) {
+        const err = new Error("Channel closed");
+        if (typeof callback === "function") queueMicrotask(() => callback(err));
+        else queueMicrotask(() => this.emit("error", err));
+        return false;
+      }
+      sys.ipcSend(this.pid, message);
+      if (typeof callback === "function") queueMicrotask(() => callback(null));
+      return true;
+    }
+    disconnect() {
+      if (!this._ipc || !this.connected) return;
+      this.connected = false;
+      this.channel = null;
+      queueMicrotask(() => this.emit("disconnect"));
+    }
     // Called by the dispatcher on the child's exit: close the streams, then report
     // exit/close. A killed child reports code null + the signal name, as in Node.
     _finish(code) {
       this.stdout._end();
       this.stderr._end();
+      if (this._ipc && this.connected) { this.connected = false; this.channel = null; this.emit("disconnect"); }
       const sig = this.killed ? this.signalCode : null;
       this.exitCode = sig ? null : code;
       this.emit("exit", this.exitCode, sig);
@@ -250,7 +281,7 @@ export function createChildProcess(sys = globalThis.sys) {
     const env = options.env || globalThis.process?.env || {};
     const cwd = options.cwd != null ? String(options.cwd) : globalThis.process?.cwd?.() ?? sys.cwd;
     try {
-      const { pid } = await sys.spawnChild({ argv, env, cwd, input, stdio });
+      const { pid } = await sys.spawnChild({ argv, env, cwd, input, stdio, ipc: !!options._ipc });
       child.pid = pid;
       children.set(pid, child);
       // A non-piped output fd never streams back as `data` (it went to the
@@ -273,14 +304,18 @@ export function createChildProcess(sys = globalThis.sys) {
   function spawn(command, args, options) {
     const n = normalizeArgs(args, options, undefined);
     const argv = buildArgv(command, n.args, n.options);
-    const child = new ChildProcess(normalizeStdio(n.options.stdio));
+    const stdio = normalizeStdio(n.options.stdio);
+    // An IPC channel is opened by `fork`, or by `spawn` with `'ipc'` among stdio.
+    const ipc = !!n.options._ipc || (Array.isArray(stdio) && stdio.includes("ipc"));
+    const child = new ChildProcess(stdio);
+    if (ipc) child._enableIpc();
     // Hold /bin/node's event loop open from the moment spawn() is called — *before*
     // the deferred launch below — so a `spawn()` right after an awaited child (whose
     // exit dropped the ref count to 0) doesn't let the process go idle and exit in
     // the gap. Released once in _finish (or the launch error path).
     refLoop();
     let launched = false;
-    const launch = () => { if (launched) return; launched = true; launchChild(child, argv, n.options); };
+    const launch = () => { if (launched) return; launched = true; launchChild(child, argv, { ...n.options, _ipc: ipc }); };
     child._setLaunch(launch);
     // Launch once stdin closes; if the caller never writes stdin, launch on the
     // next microtask (after synchronous setup), with empty stdin.
@@ -333,7 +368,10 @@ export function createChildProcess(sys = globalThis.sys) {
   // fork(modulePath[, args][, options]) — run `node <module>` as a child. No IPC.
   function fork(modulePath, args, options) {
     const n = normalizeArgs(args, options, undefined);
-    return spawn("node", [modulePath, ...(n.args || [])], { ...n.options, shell: false });
+    // fork always opens an IPC channel (Node): the child gets `process.send` and
+    // the returned ChildProcess a `.send()` + `'message'` events. `execPath`/
+    // `execArgv` are honored only nominally — we always run our `node`.
+    return spawn("node", [modulePath, ...(n.args || [])], { ...n.options, shell: false, _ipc: true });
   }
 
   // ---- synchronous forms (block on the sync-syscall channel) ----------------

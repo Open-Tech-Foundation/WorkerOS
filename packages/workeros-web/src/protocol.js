@@ -78,6 +78,12 @@ export const MSG = Object.freeze({
   CHILD_STDOUT: "child_stdout",
   CHILD_STDERR: "child_stderr",
   CHILD_EXIT: "child_exit",
+  // node:child_process fork IPC. CHILD_MESSAGE carries a structured-clone message
+  // from a forked child up to its parent ({ pid, data }); IPC_TO_CHILD delivers a
+  // message the parent sent down to that child ({ data }). Routed to the guest's
+  // child dispatcher / process 'message' respectively.
+  CHILD_MESSAGE: "child_message",
+  IPC_TO_CHILD: "ipc_to_child",
   // kernel worker → program worker: node:worker_threads traffic. A structured-clone
   // message relayed between a Worker and its spawner ({ threadId, data }; threadId
   // 0 = the parent), or a worker's exit ({ threadId, code }). Routed to the guest's

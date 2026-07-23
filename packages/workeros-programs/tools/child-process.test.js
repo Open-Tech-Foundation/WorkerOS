@@ -17,9 +17,9 @@ function fakeSys(respond) {
   return {
     calls,
     onChildEvent: (cb) => { dispatch = cb; },
-    spawnChild: async ({ argv, env, cwd, input, stdio }) => {
+    spawnChild: async ({ argv, env, cwd, input, stdio, ipc }) => {
       const line = argv.join(" ");
-      calls.push({ argv, line, env, cwd, stdio, input: input ? dec.decode(input) : null });
+      calls.push({ argv, line, env, cwd, stdio, ipc: !!ipc, input: input ? dec.decode(input) : null });
       const r = respond(line, input) || {};
       if (r.throw) throw new Error(r.throw);
       const pid = 1000 + calls.length;
@@ -239,11 +239,54 @@ test("a mixed stdio array keeps piped fds streaming", async () => {
   assert.deepEqual(sys.calls[0].stdio, ["inherit", "pipe", "ignore"]);
 });
 
-test("fork runs `node <module>` with no IPC channel", async () => {
+test("fork runs `node <module>` and opens an IPC channel", async () => {
   const sys = fakeSys(() => ({ stdout: "" }));
   const cp = createChildProcess(sys);
   const child = cp.fork("/app/worker.js", ["--flag"]);
+  // fork always opens an IPC channel: the child is connected from the start.
+  assert.equal(child.connected, true);
   await new Promise((resolve) => child.on("close", resolve));
   assert.deepEqual(sys.calls[0].argv, ["node", "/app/worker.js", "--flag"]);
-  assert.equal(child.send(), false);
+  // The spawn requested an IPC channel from the kernel.
+  assert.equal(sys.calls[0].ipc, true);
+  // After the child exits the channel is closed; send() reports failure via its
+  // callback (no unhandled 'error'), and connected flips false.
+  assert.equal(child.connected, false);
+  const err = await new Promise((resolve) => child.send({ x: 1 }, (e) => resolve(e)));
+  assert.equal(err instanceof Error, true);
+});
+
+// fork IPC (guest side): the ChildProcess.send routes to sys.ipcSend keyed by the
+// child pid, and a dispatched "message" event surfaces as a 'message' on the
+// child. (The full parent↔child round-trip over the real kernel is covered by the
+// e2e harness; this pins the guest wiring.)
+test("fork IPC: child.send routes to ipcSend; a dispatched message emits", async () => {
+  let dispatch = null;
+  const sent = [];
+  const sys = {
+    onChildEvent: (cb) => { dispatch = cb; },
+    // A long-lived child: no exit delivered, so the channel stays open.
+    spawnChild: async () => ({ pid: 4242 }),
+    ipcSend: (to, data) => sent.push({ to, data }),
+    childKill: () => {},
+  };
+  const cp = createChildProcess(sys);
+  const child = cp.fork("/app/worker.js");
+  // Let the deferred launch resolve so child.pid is assigned.
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(child.pid, 4242);
+  assert.equal(child.connected, true);
+
+  // Outbound: parent → child.
+  assert.equal(child.send({ hello: 1 }), true);
+  assert.deepEqual(sent, [{ to: 4242, data: { hello: 1 } }]);
+
+  // Inbound: kernel delivers a child→parent message → 'message' event.
+  const got = await new Promise((resolve) => {
+    child.on("message", resolve);
+    dispatch(4242, "message", { pong: 2 });
+  });
+  assert.deepEqual(got, { pong: 2 });
+
+  child.kill();
 });

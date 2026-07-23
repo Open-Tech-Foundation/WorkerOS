@@ -207,8 +207,16 @@ export function detectFormat(source, absPath, deps) {
 }
 
 // ---- the runtime -----------------------------------------------------------
-export function createNodeRuntime(sys, extras) {
-  const builtins = makeBuiltins(sys, extras);
+// `builtins` may be passed in to SHARE the one set the process already built for
+// its ESM/dynamic-import path. This matters: several builtins are stateful and
+// single-instance per process (child_process's live-children map + its
+// `onChildEvent` dispatcher, worker_threads, the fork-IPC dispatcher). Building a
+// second set here — the old default — meant a CJS entry and the modules it
+// `import()`s used *different* child_process instances, and the single-slot
+// kernel dispatchers routed child stdout/exit/IPC to only one of them. That broke
+// `next dev`, whose CJS bin dynamically imports the CJS worker that forks the
+// server. Omitting `builtins` (tests, `-e`) still builds a fresh set.
+export function createNodeRuntime(sys, extras, builtins = makeBuiltins(sys, extras)) {
   const path = createPath(liveCwd(sys, extras));
   const url = createUrl();
   const fs = builtins.get("fs");

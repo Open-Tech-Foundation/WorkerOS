@@ -79,6 +79,8 @@ let fsEventDispatch = null;
 // The kernel worker delivers CHILD_STDOUT/CHILD_STDERR/CHILD_EXIT for spawned
 // children; node:child_process routes each to the right ChildProcess by pid.
 let childDispatch = null;
+let ipcDispatch = null; // fork IPC: parent→this-child message handler (process 'message')
+let pendingIpcMessages = []; // buffer until the guest registers onIpcMessage
 // The guest's worker_threads event dispatcher (installed by node:worker_threads).
 // The kernel worker delivers WORKER_MESSAGE/WORKER_EXIT for spawned workers;
 // node:worker_threads routes each to the right Worker / parentPort by thread id.
@@ -216,6 +218,18 @@ function makeSys(start, syncCall) {
     spawnChild: (opts) => call("spawnChild", opts),
     childKill: (childPid, signal) => call("childKill", { pid: childPid, signal }),
     onChildEvent: (cb) => { childDispatch = cb; },
+    // node:child_process fork IPC. `ipcSend` relays a structured-clone message to
+    // the parent (`"parent"`) or to a forked child by pid (fire-and-forget). A
+    // child→parent message arrives via `onChildEvent` as kind "message"; a
+    // parent→child message arrives via the dispatcher set with `onIpcMessage`.
+    ipcSend: (to, data) =>
+      kernelPost({ type: MSG.SYSCALL, call: "ipcSend", args: { to, data } }),
+    onIpcMessage: (cb) => {
+      ipcDispatch = cb;
+      const queued = pendingIpcMessages;
+      pendingIpcMessages = [];
+      for (const data of queued) cb(data);
+    },
     // node:worker_threads. `spawnWorker` launches a `/bin/node` worker thread and
     // resolves its `{ threadId }`; `workerInit` (queried once at /bin/node startup)
     // reports whether *this* process is a worker and its `workerData`; `workerPost`
@@ -461,14 +475,28 @@ self.addEventListener("message", async (ev) => {
     }
     return;
   }
-  if (msg.type === MSG.CHILD_STDOUT || msg.type === MSG.CHILD_STDERR || msg.type === MSG.CHILD_EXIT) {
-    // Live stdio/exit of a spawned child — hand it to node:child_process's
+  if (
+    msg.type === MSG.CHILD_STDOUT || msg.type === MSG.CHILD_STDERR ||
+    msg.type === MSG.CHILD_EXIT || msg.type === MSG.CHILD_MESSAGE
+  ) {
+    // Live stdio/exit/IPC of a spawned child — hand it to node:child_process's
     // dispatcher (if any), which fans it out to the owning ChildProcess by pid.
     const kind =
-      msg.type === MSG.CHILD_STDOUT ? "stdout" : msg.type === MSG.CHILD_STDERR ? "stderr" : "exit";
+      msg.type === MSG.CHILD_STDOUT ? "stdout"
+      : msg.type === MSG.CHILD_STDERR ? "stderr"
+      : msg.type === MSG.CHILD_MESSAGE ? "message"
+      : "exit";
     const payload = kind === "exit" ? { code: msg.code, signal: msg.signal ?? null } : msg.data;
     try { childDispatch?.(msg.pid, kind, payload); } catch (e) {
       writeBytes(2, new TextEncoder().encode("child_process handler error: " + (e?.message ?? e) + "\n"));
+    }
+    return;
+  }
+  if (msg.type === MSG.IPC_TO_CHILD) {
+    // fork IPC inbound: a message from this process's parent → process 'message'.
+    if (!ipcDispatch) { pendingIpcMessages.push(msg.data); return; }
+    try { ipcDispatch(msg.data); } catch (e) {
+      writeBytes(2, new TextEncoder().encode("ipc handler error: " + (e?.message ?? e) + "\n"));
     }
     return;
   }
