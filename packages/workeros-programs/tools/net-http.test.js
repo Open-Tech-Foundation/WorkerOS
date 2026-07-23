@@ -31,13 +31,17 @@ class Channel {
 let nextFd = 3;
 const fds = new Map();
 const ports = new Map();
+let nextEphemeralPort = 49152; // IANA ephemeral range, like the kernel's allocator
 const bind = (ch, dir) => { const fd = nextFd++; fds.set(fd, { ch, dir }); return fd; };
 
 const sys = {
+  // Mirrors the kernel contract: returns { listener, port }, where `port` is the
+  // kernel-assigned ephemeral port when the caller asked for 0 (Node's listen(0)).
   async netListen(port) {
-    if (ports.has(port)) { const e = new Error("EADDRINUSE"); e.code = "EADDRINUSE"; throw e; }
-    ports.set(port, { backlog: [], waiters: [] });
-    return port;
+    const bound = port || nextEphemeralPort++;
+    if (ports.has(bound)) { const e = new Error("EADDRINUSE"); e.code = "EADDRINUSE"; throw e; }
+    ports.set(bound, { backlog: [], waiters: [] });
+    return { listener: bound, port: bound };
   },
   async netConnect(port) {
     const l = ports.get(port);
@@ -49,8 +53,24 @@ const sys = {
   },
   async netAccept(listener) {
     const l = ports.get(listener);
-    while (l.backlog.length === 0) await new Promise((r) => l.waiters.push(r));
-    return l.backlog.shift();
+    if (!l) { const e = new Error("EBADF"); e.code = "EBADF"; throw e; }
+    for (;;) {
+      if (l.backlog.length) return l.backlog.shift();
+      if (l.closed) { const e = new Error("EBADF"); e.code = "EBADF"; throw e; }
+      await new Promise((r) => l.waiters.push(r));
+    }
+  },
+  // Releasing the listener must REJECT the parked netAccept, not just wake it:
+  // Server.close() unwinds its accept loop on that rejection (net.js). Waking
+  // without rejecting spins the loop forever on an empty backlog.
+  async netClose(listener) {
+    const l = ports.get(listener);
+    if (!l) return;
+    l.closed = true;
+    ports.delete(listener);
+    const w = l.waiters;
+    l.waiters = [];
+    for (const r of w) r();
   },
   async read(fd) { return fds.get(fd).ch.read(); },
   write(fd, bytes) { fds.get(fd).ch.push(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)); return true; },

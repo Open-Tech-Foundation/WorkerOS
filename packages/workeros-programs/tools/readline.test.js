@@ -4,6 +4,7 @@ import { readline } from "../src/node/readline.js";
 import { EventEmitter } from "../src/node/events.js";
 import { createNodeRuntime } from "../src/node/require-runtime.js";
 import { createFs } from "../src/node/fs.js";
+import { createTty } from "../src/node/tty.js";
 import { createFakeSyncFs } from "./fake-syncfs.js";
 
 function fakeSys(stdinText = "") {
@@ -24,6 +25,78 @@ function fakeSys(stdinText = "") {
     close: async (fd) => syncFs.close(fd),
     stat: async (p) => syncFs.stat(p),
   };
+}
+
+// The light EventEmitter `/bin/node` installs on its tty streams (node-program.js).
+// Deliberately NOT the shared node:events EventEmitter: `tty.ReadStream` starts its
+// read pump from the `_onadd` hook, and only this emitter fires it.
+function lightEmitter(obj = {}) {
+  const map = new Map();
+  const list = (ev) => map.get(ev) || (map.set(ev, []), map.get(ev));
+  obj.on = (ev, fn) => { list(ev).push(fn); obj._onadd?.(ev); return obj; };
+  obj.addListener = obj.on;
+  obj.prependListener = (ev, fn) => { list(ev).unshift(fn); obj._onadd?.(ev); return obj; };
+  obj.once = (ev, fn) => { const g = (...a) => { obj.off(ev, g); fn(...a); }; return obj.on(ev, g); };
+  obj.off = (ev, fn) => { map.set(ev, list(ev).filter((f) => f !== fn)); obj._onremove?.(ev); return obj; };
+  obj.removeListener = obj.off;
+  obj.removeAllListeners = (ev) => { if (ev === undefined) map.clear(); else map.set(ev, []); return obj; };
+  obj.listenerCount = (ev) => list(ev).length;
+  obj.listeners = (ev) => [...list(ev)];
+  obj.setMaxListeners = () => obj;
+  obj.emit = (ev, ...a) => { const l = [...list(ev)]; for (const fn of l) fn(...a); return l.length > 0; };
+  return obj;
+}
+
+// Build the `process` the guest program sees, wired to `sys` the way /bin/node
+// does (node-program.js): stdin is a real tty.ReadStream pumping `sys.read(0, …)`.
+//
+// This is not optional scaffolding. `makeBuiltins` registers no `process` — the
+// real one arrives through `extras`. A guest run without it falls through to the
+// HOST `globalThis.process`, so the program reads the *test runner's* stdin
+// (empty, already closed) instead of the OS's, and the test passes or hangs for
+// reasons that have nothing to do with WorkerOS.
+function guestProcess(sys) {
+  const written = [];
+  const tty = createTty({
+    write: (fd, bytes) => { written.push(new TextDecoder().decode(bytes)); return true; },
+    isattyFor: () => false,
+    getWinsize: () => ({ cols: 80, rows: 24 }),
+    getEnv: () => ({}),
+    setRawMode: () => {},
+    readFd: (fd, max) => sys.read(fd, max),
+    cancelRead: () => {},
+    emitter: lightEmitter,
+  });
+  const process = lightEmitter({
+    argv: ["node", "/m.js"],
+    argv0: "node",
+    env: {},
+    platform: "linux",
+    pid: 1,
+    cwd: () => "/",
+    exit: () => {},
+    nextTick: (fn, ...a) => queueMicrotask(() => fn(...a)),
+    stdin: new tty.ReadStream(0, { isTTY: false }),
+    stdout: new tty.WriteStream(1),
+    stderr: new tty.WriteStream(2),
+  });
+  return { process, tty, written: () => written.join("") };
+}
+
+// Poll for a guest-side effect, bounded. The runner is invoked with
+// `--test-timeout=0`, so an assertion that waits on a promise the guest never
+// settles wedges the entire suite indefinitely rather than failing — this turns
+// that class of regression into a ~2s failure.
+async function waitFor(fn, ms = 2000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try {
+      return fn();
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  }
 }
 
 test("createInterface question reads one line from a data-emitting input stream", async () => {
@@ -139,7 +212,11 @@ test("promises facade exposes createInterface", () => {
 
 test("guest require resolves readline and question reads cooked stdin", async () => {
   const sys = fakeSys("hello from stdin\n");
+  const { process: guest, tty, written } = guestProcess(sys);
   const main = [
+    // `require('process')` rather than the bare global, so the guest can only be
+    // reading the process wired to `sys` above — never the host's.
+    "const process = require('process');",
     "const readline = require('readline');",
     "const fs = require('fs');",
     "(async () => {",
@@ -149,7 +226,10 @@ test("guest require resolves readline and question reads cooked stdin", async ()
     "  fs.writeFileSync('/readline-ok', line);",
     "})();",
   ].join("\n");
-  await createNodeRuntime(sys)("/m.js", main);
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(createFs(sys.syncFs).readFileSync("/readline-ok", "utf8"), "hello from stdin");
+  await createNodeRuntime(sys, { process: guest, tty })("/m.js", main);
+
+  const fs = createFs(sys.syncFs);
+  const line = await waitFor(() => fs.readFileSync("/readline-ok", "utf8"));
+  assert.equal(line, "hello from stdin");
+  assert.equal(written(), "prompt> ");
 });
