@@ -42,20 +42,24 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
   // Node makes between `require(...)` and `import ...`.
   const resolver = createResolver({ fs, path, conditions: ["node", "require"] });
 
-  // Node exposes require.cache keyed by filename → a { exports } record.
+  // Node exposes require.cache keyed by filename → the real `module` object.
+  // Tools reach through it and use the whole record — `require.cache[id].require`,
+  // `.parent`, `.children` — so hand back the actual module object we built in
+  // `load` (tracked in moduleObjs), not a { exports }-only stub. A currently-
+  // evaluating module is already in moduleObjs (seeded before eval), so a cyclic
+  // peek sees its live, partial exports — as in Node.
   const cacheProxy = new Proxy(
     {},
     {
-      get: (_, k) =>
-        cache.has(k) ? { id: k, filename: k, exports: cache.get(k), loaded: true } : undefined,
-      has: (_, k) => cache.has(k),
-      deleteProperty: (_, k) => (cache.delete(k), true),
-      ownKeys: () => [...cache.keys()],
+      get: (_, k) => moduleObjs.get(k),
+      has: (_, k) => moduleObjs.has(k),
+      deleteProperty: (_, k) => (moduleObjs.delete(k), cache.delete(k), true),
+      ownKeys: () => [...moduleObjs.keys()],
       getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
     },
   );
 
-  function load(absPath, isMain = false) {
+  function load(absPath, isMain = false, parent = null) {
     if (cache.has(absPath)) {
       // A cyclic require of a module that is still evaluating must see its CURRENT
       // `module.exports`: a module may reassign `module.exports = X` and only then
@@ -92,11 +96,21 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
       filename: absPath,
       path: path.dirname(absPath),
       loaded: false,
+      // Node always populates these on the `module` object handed to a CJS
+      // wrapper. Omitting `parent` breaks the `module.parent.require(...)` idiom
+      // some tools use; `parent` is the module that first required this one (null
+      // for the process entry), deprecated but still present in Node.
+      parent: isMain ? null : parent || null,
+      children: [],
+      paths: nodeModulePaths(path.dirname(absPath)),
     };
     moduleObjs.set(absPath, module);
     if (isMain) mainModule = module;
+    if (parent && !isMain) parent.children.push(module);
     cache.set(absPath, module.exports); // seed before eval for require cycles
-    const require = makeRequire(module.path);
+    // `module.require(id)` — resolves relative to this module's dir, like Node's.
+    const require = makeRequire(module.path, module);
+    module.require = require;
     // Route dynamic `import()` to the fs-backed loader so a CJS module can import an
     // ESM one (as in Node). CJS has no static import/import.meta, so for ordinary
     // modules `transformModule` returns the source untouched.
@@ -112,6 +126,15 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
     try {
       fn(require, module, module.exports, module.path, absPath);
     } catch (e) {
+      // A module that throws while evaluating is NOT cached (Node semantics): drop
+      // the seed we set for cycle-safety so the next require/import re-evaluates
+      // and re-throws, instead of silently handing back partial exports. Without
+      // this, a dynamic `import()` of a throwing CJS module resolves against the
+      // stale partial — hiding the real failure behind a missing named export
+      // (e.g. `mod.nextDev is not a function` when next-dev.js actually threw).
+      cache.delete(absPath);
+      moduleObjs.delete(absPath);
+      if (parent) parent.children = parent.children.filter((c) => c !== module);
       // Name the failing module — eval'd modules are anonymous blobs, so a raw
       // "Class extends value ..." otherwise gives no clue which file threw.
       if (e instanceof Error && !e._wosModule) {
@@ -125,13 +148,13 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
     return module.exports;
   }
 
-  function makeRequire(fromDir) {
+  function makeRequire(fromDir, ownerModule = null) {
     const require = (spec) => {
       const b = builtins.get(builtinKey(spec));
       if (b) return b;
       const abs = resolver.resolveFrom(fromDir, spec);
       if (!abs) throw moduleNotFound(spec, fromDir);
-      return load(abs);
+      return load(abs, false, ownerModule);
     };
     require.resolve = (spec) => {
       if (builtins.has(builtinKey(spec))) return spec;
@@ -204,39 +227,38 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
   Module.prototype.require = function (spec) {
     return makeRequire(this.filename ? path.dirname(this.filename) : this.path)(spec);
   };
+  // `require('module')` IS the `Module` constructor in Node — not a namespace
+  // object that merely *carries* it. Everything (createRequire, _cache, the
+  // statics) hangs off `Module` itself, and `Module.Module === Module`. Getting
+  // this shape right matters: `require('module').prototype.require` is a real
+  // access — Next.js's require-hook reads it (`const originalRequire =
+  // mod.prototype.require`), and a plain-object namespace has no `.prototype`, so
+  // it throws "Cannot read properties of undefined (reading 'require')".
   Module._nodeModulePaths = nodeModulePaths;
   Module._resolveFilename = _resolveFilename;
+  // Node's public static: resolve a *request* (against parent), then load it.
   Module._load = (spec, parent) => load(_resolveFilename(spec, parent));
   Module.createRequire = createRequire;
+  // Computed after the registry is fully populated (see makeBuiltins): the
+  // "module" key is pre-seeded there so it counts itself.
   Module.builtinModules = [...builtins.keys()];
   Module.isBuiltin = isBuiltin;
   Module.wrap = (src) =>
     "(function (exports, require, module, __filename, __dirname) { " + src + "\n});";
-
-  const mod = {
-    createRequire,
-    // Computed after the registry is fully populated (see makeBuiltins): the
-    // "module" key is pre-seeded there so it counts itself.
-    builtinModules: [...builtins.keys()],
-    isBuiltin,
-    syncRequire: makeRequire, // internal: a require rooted at an arbitrary dir
-    _load: load, // internal: load a CJS module by absolute path (ESM-graph interop)
-    _loadMain: (p) => load(p, true), // internal: load the entry as the process main
-    get mainModule() {
-      return mainModule;
-    },
-    wrap: (src) =>
-      "(function (exports, require, module, __filename, __dirname) { " + src + "\n});",
-    _cache: cacheProxy,
-    _resolveFilename,
-    _nodeModulePaths: nodeModulePaths,
-  };
-  // `require('module').Module` is the constructable class (Node's own shape:
-  // `Module.Module === Module`), while `require('module').createRequire` etc. work
-  // straight off the namespace too. `default` covers ESM-interop importers.
-  mod.Module = Module;
+  Module._cache = cacheProxy;
+  Object.defineProperty(Module, "mainModule", {
+    get: () => mainModule,
+    enumerable: true,
+    configurable: true,
+  });
+  // Internal (not Node's API): the ESM-graph interop loads an already-resolved
+  // absolute path directly, bypassing request resolution. Kept distinct from the
+  // public `_load(spec, parent)` so neither has to compromise its contract.
+  Module._loadByPath = load;
+  Module._loadMain = (p) => load(p, true); // load the entry as the process main
+  Module.syncRequire = makeRequire; // a require rooted at an arbitrary dir
+  // Node's self-referential shape: `require('module').Module === require('module')`.
   Module.Module = Module;
-  Module.createRequire = createRequire;
-  mod.default = mod;
-  return mod;
+  Module.default = Module; // ESM-interop default import
+  return Module;
 }

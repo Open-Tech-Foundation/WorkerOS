@@ -527,7 +527,7 @@ globalThis.__workerosBuiltins = builtins;
 // synchronous CJS loader — backed by the sync `fs`, so a CJS dep reached from
 // ESM resolves its own `require`s at load time. Cached, so a stitch-time probe
 // and the runtime import share one instance.
-globalThis.__workerosLoadCjs = (p) => builtins.get("module")._load(p);
+globalThis.__workerosLoadCjs = (p) => builtins.get("module")._loadByPath(p);
 
 const isIdent = (k) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k);
 // A synthetic ES module that re-exports a live runtime object `m`: `export
