@@ -380,14 +380,49 @@ function installGlobals(start, sys) {
   sealGuestNetwork();
 
   const enc = new TextEncoder();
-  const line = (fd, args) => sys.write(fd, enc.encode(args.map(stringify).join(" ") + "\n"));
-  // A routing console — a terminal concern, given to every guest.
+  let indent = "";
+  const line = (fd, args) => sys.write(fd, enc.encode(indent + args.map(stringify).join(" ") + "\n"));
+  const counts = new Map();
+  const timers = new Map();
+  // A routing console — a terminal concern, given to every guest. The full method
+  // surface matters beyond stdout/stderr routing: code binds these up front
+  // (`console.assert.bind(console)`, `.time`, `.trace`, … — Next.js's edge-runtime
+  // console shim does exactly this), so a missing method is a `.bind`-of-undefined
+  // crash before a single line is ever logged. Every standard method must at least
+  // exist as a function; the common ones behave.
   globalThis.console = {
     log: (...a) => line(1, a),
     info: (...a) => line(1, a),
     debug: (...a) => line(1, a),
+    dir: (...a) => line(1, a),
+    dirxml: (...a) => line(1, a),
+    table: (...a) => line(1, a),
     warn: (...a) => line(2, a),
     error: (...a) => line(2, a),
+    trace: (...a) => line(2, ["Trace:", ...a]),
+    assert: (cond, ...a) => { if (!cond) line(2, ["Assertion failed:", ...a]); },
+    count: (label = "default") => {
+      const n = (counts.get(label) || 0) + 1;
+      counts.set(label, n);
+      line(1, [`${label}: ${n}`]);
+    },
+    countReset: (label = "default") => { counts.delete(label); },
+    time: (label = "default") => { timers.set(label, Date.now()); },
+    timeEnd: (label = "default") => {
+      const t = timers.get(label);
+      if (t != null) { line(1, [`${label}: ${Date.now() - t}ms`]); timers.delete(label); }
+    },
+    timeLog: (label = "default", ...a) => {
+      const t = timers.get(label);
+      if (t != null) line(1, [`${label}: ${Date.now() - t}ms`, ...a]);
+    },
+    group: (...a) => { if (a.length) line(1, a); indent += "  "; },
+    groupCollapsed: (...a) => { if (a.length) line(1, a); indent += "  "; },
+    groupEnd: () => { indent = indent.slice(0, -2); },
+    clear: () => {},
+    timeStamp: () => {},
+    profile: () => {},
+    profileEnd: () => {},
   };
 }
 
