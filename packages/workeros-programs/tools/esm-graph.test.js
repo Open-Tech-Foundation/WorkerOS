@@ -98,6 +98,26 @@ test("transformModule: `import` as a method/property name is NOT a dynamic impor
   assert.match(out, /globalThis\.__workerosImport\("\/proj\/m\.js", '\.\/c\.js'\)/);
 });
 
+test("transformModule: a method named `import` with no prefix is not a dynamic import", () => {
+  // Next.js's BloomFilter defines a plain `import(data) { … }` method — no async/
+  // get/set/static prefix, so the prev-token guard doesn't catch it. A dynamic
+  // import is an expression and is never followed by a `{` body, so the matching
+  // `)` → `{` shape identifies the method. Rewriting it put dots in method-name
+  // position ("Unexpected token '.'"), which crashed `next dev` at load.
+  const src = [
+    "class BloomFilter {",
+    "  export() { return this.items; }",
+    "  import(data) { this.items = data.items; return this; }",
+    "  reload() { return import('./chunk.js'); }", // a genuine dynamic import
+    "}",
+  ].join("\n");
+  const out = transformModule(src, "/proj/bloom.js", { staticUrl: tag });
+  assert.match(out, /\n {2}import\(data\) \{/, "method `import` left intact");
+  assert.doesNotMatch(out, /__workerosImport\([^)]*data/, "method not rewritten as a call");
+  assert.match(out, /globalThis\.__workerosImport\("\/proj\/bloom\.js", '\.\/chunk\.js'\)/, "real dynamic import still rewritten");
+  assert.doesNotThrow(() => new Function(out), "transformed source compiles");
+});
+
 test("transformModule: import.meta is bound to a real meta object", () => {
   const src = "console.log(import.meta.url, import.meta.resolve('./x'));";
   const out = transformModule(src, "/proj/m.js", { staticUrl: tag });

@@ -244,10 +244,31 @@ export function transformModule(src, absPath, { staticUrl }) {
         k += 2;
         continue;
       }
-      // dynamic `import(` — rewrite the callee and inject this module as the base
+      // dynamic `import(` — rewrite the callee and inject this module as the base.
+      // But a class/object METHOD named `import` (`import(data) { … }`, e.g. Next's
+      // BloomFilter) is a definition, not a call: a dynamic import is an expression
+      // and is never followed by a `{` body. Find the matching `)` and, if a `{`
+      // follows, leave `import` alone — rewriting it to `globalThis.__workerosImport`
+      // in method-name position is a syntax error ("Unexpected token '.'").
       if (a?.t === "punct" && a.v === "(") {
-        edits.push({ start: tk.start, end: tk.end, text: "globalThis.__workerosImport" });
-        edits.push({ start: a.end, end: a.end, text: baseLit + ", " });
+        let depthP = 0;
+        let isMethod = false;
+        for (let j = k + 1; j < toks.length; j++) {
+          const t = toks[j];
+          if (t.t !== "punct") continue;
+          if (t.v === "(") depthP++;
+          else if (t.v === ")") {
+            if (--depthP === 0) {
+              const nx = toks[j + 1];
+              isMethod = nx?.t === "punct" && nx.v === "{";
+              break;
+            }
+          }
+        }
+        if (!isMethod) {
+          edits.push({ start: tk.start, end: tk.end, text: "globalThis.__workerosImport" });
+          edits.push({ start: a.end, end: a.end, text: baseLit + ", " });
+        }
         continue;
       }
     }
