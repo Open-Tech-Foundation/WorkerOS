@@ -614,8 +614,16 @@ function runCaptured(line, input, opts) {
 // inherit (a denied-network guest cannot shell out to regain fetch — ADR-024);
 // `opts.caps` ({ netEgress?: bool }) is an explicit host-policy override.
 function spawnKernel(argv, env, cwd, plan, opts = {}) {
+  // Node drops env pairs whose value is `undefined` and coerces the rest to
+  // strings; a raw `Object.entries` would forward `[key, undefined]`, which the
+  // kernel's `Vec<(String, String)>` rejects ("expected a string, got unit").
+  // Real tools spread env with the odd undefined value (Next.js's dev server
+  // spawns like this), so normalize here — the single point every spawn passes.
+  const envPairs = Object.entries(env || {})
+    .filter(([, v]) => v != null)
+    .map(([k, v]) => [k, String(v)]);
   return kernel.spawn(
-    argv, Object.entries(env || {}), cwd, Date.now(), opts.ppid || 0, plan || null,
+    argv, envPairs, cwd, Date.now(), opts.ppid || 0, plan || null,
     opts.caps || null,
     // Process-group placement (ADR-025): undefined/null inherits the parent's
     // group; 0 becomes a new group's leader; a pid joins that group.

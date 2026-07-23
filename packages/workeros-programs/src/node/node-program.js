@@ -208,6 +208,10 @@ const process = emitter({
   argv: ["node", ...sys.argv.slice(1)],
   argv0: "node",
   execPath: "/bin/node",
+  // The node-specific CLI flags the runtime was launched with (`--inspect`, …).
+  // We accept none, so it's empty — but it MUST be an array: tools spread it
+  // (`[...process.execArgv]`), e.g. Next's getParsedNodeOptions.
+  execArgv: [],
   env: { ...sys.env },
   platform: "workeros",
   arch: "wasm32",

@@ -145,12 +145,29 @@ export const libraries = [
   { path: "/lib/workeros-node/esm-runner.js", file: "./node/esm-runner.js" },
   { path: "/lib/workeros-node/net.js", file: "./node/net.js" },
   { path: "/lib/workeros-node/http.js", file: "./node/http.js" },
+  // Outbound HTTPS rides fetch; tls/dns/http2 are load-only stubs so npm's fetch
+  // stack constructs its (unused) agents. ADR-008.
+  { path: "/lib/workeros-node/https.js", file: "./node/https.js" },
+  { path: "/lib/workeros-node/tls.js", file: "./node/tls.js" },
+  { path: "/lib/workeros-node/dns.js", file: "./node/dns.js" },
+  { path: "/lib/workeros-node/http2.js", file: "./node/http2.js" },
   { path: "/lib/workeros-node/crypto.js", file: "./node/crypto.js" },
   { path: "/lib/workeros-node/zlib.js", file: "./node/zlib.js" },
   { path: "/lib/workeros-node/child-process.js", file: "./node/child-process.js" },
   { path: "/lib/workeros-node/worker-threads.js", file: "./node/worker-threads.js" },
   { path: "/lib/workeros-node/wasm-codec.js", file: "./node/wasm-codec.js" },
   { path: "/lib/workeros-node/node-bundler.js", file: "./node/node-bundler.js" },
+  { path: "/lib/workeros-node/v8.js", file: "./node/v8.js" },
+  { path: "/lib/workeros-node/constants.js", file: "./node/constants.js" },
+  { path: "/lib/workeros-node/diagnostics-channel.js", file: "./node/diagnostics-channel.js" },
+  { path: "/lib/workeros-node/console.js", file: "./node/console.js" },
+  { path: "/lib/workeros-node/inspector.js", file: "./node/inspector.js" },
+  // AsyncLocalStorage with real async context propagation — what makes interactive
+  // prompt libraries (Inquirer, @clack) work under `npx create-*`.
+  { path: "/lib/workeros-node/async-hooks.js", file: "./node/async-hooks.js" },
+  // node:wasi — the WASI preview1 host over the guest VFS, so wasm-compiled native
+  // tools (napi-rs bindings like Vite's rolldown) instantiate and run in-process.
+  { path: "/lib/workeros-node/wasi.js", file: "./node/wasi.js" },
   // The codec wasm (crates/workeros-codec) — a binary library. `source` returns
   // null when it isn't built, so zlib/crypto transparently use their JS fallback.
   { path: "/lib/workeros-codec/codec.wasm", file: "./codec/codec.wasm" },
