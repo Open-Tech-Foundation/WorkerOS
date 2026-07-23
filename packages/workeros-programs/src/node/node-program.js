@@ -563,12 +563,15 @@ const builtinBlob = (key) => {
 // CJS loader (its `require` subtree resolves out of the VFS at load time).
 const cjsBlob = (abs) => {
   if (!pathToBlob.has(abs)) {
-    let keys = [];
-    try {
-      keys = ownKeys(globalThis.__workerosLoadCjs(abs)); // cached; probes named exports
-    } catch {
-      // A load failure surfaces at runtime (the real import), not here.
-    }
+    // Load once to read the named exports (cached & shared with the blob's own
+    // `__workerosLoadCjs(abs)`, so both see the same instance). A failure here
+    // must PROPAGATE, not be swallowed: ESM named exports are static, baked into
+    // the blob at build time, so a caught failure would freeze a `default`-only
+    // blob — and then, since a throwing module is no longer cached, a retry that
+    // happens to succeed would resolve with every named export silently missing
+    // (`mod.nextDev is not a function`). Letting it throw surfaces the real load
+    // error and rejects the import, which is the honest outcome.
+    const keys = ownKeys(globalThis.__workerosLoadCjs(abs));
     pathToBlob.set(abs, blobUrl(reexportSource(`globalThis.__workerosLoadCjs(${JSON.stringify(abs)})`, keys)));
   }
   return pathToBlob.get(abs);
