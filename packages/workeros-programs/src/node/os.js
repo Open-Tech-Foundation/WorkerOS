@@ -16,11 +16,9 @@ export function createOs() {
     EOL: "\n",
     devNull: "/dev/null",
 
-    // Matches `process.platform` — a REAL Node platform ("linux"), so packages
-    // that switch on it don't hit an "unsupported platform" hard error. WorkerOS
-    // is Linux-personality; true identity lives in `type()` ("WorkerOS") and
-    // `process.release.name`.
-    platform: () => "linux",
+    // One posix personality, matching `process.platform`. Not a real Node platform
+    // string (INV-5) — code that branches win32/posix takes the posix path.
+    platform: () => "workeros",
     arch: () => "wasm32",
     machine: () => "wasm32",
     type: () => "WorkerOS",

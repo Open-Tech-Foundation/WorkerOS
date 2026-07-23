@@ -34,9 +34,7 @@ export function createProcess({ argv, env, cwd, write, exit }) {
     // Node convention: argv[0] is the runtime, argv[1] the script.
     argv: ["node", ...argv.slice(1)],
     env: { ...env },
-    // A real Node platform so `process.platform` branches don't hit "unsupported
-    // platform" errors; WorkerOS is Linux-personality (true identity elsewhere).
-    platform: "linux",
+    platform: "workeros",
     // A truthful, non-Node-fidelity version tag (INV-5): we are not Node.
     version: "workeros-node/0.0.0",
     cwd() {
