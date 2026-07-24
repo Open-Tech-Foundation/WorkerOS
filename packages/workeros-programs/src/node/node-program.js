@@ -169,6 +169,28 @@ const hrtime = (prev) => {
 };
 hrtime.bigint = () => BigInt(nowNs());
 
+// `process.memoryUsage()` — a browser can't report true RSS, so we surface the
+// JS heap the engine does expose (Chrome's `performance.memory`) as a documented
+// approximation (INV-5), zero-filling the fields it can't know. Real tools call
+// it during builds (Next's dev server samples it), so it must exist and return
+// the `{ rss, heapTotal, heapUsed, external, arrayBuffers }` shape, plus the
+// `.rss()` fast-path Node also provides.
+const memoryUsage = () => {
+  const m = (globalThis.performance && performance.memory) || {};
+  const heapTotal = m.totalJSHeapSize || 0;
+  const heapUsed = m.usedJSHeapSize || 0;
+  return { rss: m.jsHeapSizeLimit || heapTotal, heapTotal, heapUsed, external: 0, arrayBuffers: 0 };
+};
+memoryUsage.rss = () => memoryUsage().rss;
+
+// `process.cpuUsage([prev])` — microseconds of CPU time. No per-process CPU
+// accounting in a browser; approximate with wall-clock since load (honest, and
+// enough for the diff-based sampling tools do), split entirely to `user`.
+const cpuUsage = (prev) => {
+  const user = Math.floor((globalThis.performance ? performance.now() : 0) * 1000);
+  return prev ? { user: user - prev.user, system: -prev.system } : { user, system: 0 };
+};
+
 // Build/runtime feature metadata used by Node packages and Node's own test/common
 // harness. These are truthful gates for the WorkerOS host: browser Intl is
 // available, while native shared libraries, OpenSSL, sanitizers, inspector, and
@@ -241,6 +263,8 @@ const process = emitter({
   cwd: () => cwd,
   chdir: (d) => { cwd = resolveCwd(String(d)); },
   hrtime,
+  memoryUsage,
+  cpuUsage,
   nextTick: (cb, ...args) => queueMicrotask(() => cb(...args)),
   umask,
   // A terminal fd gets a real tty stream (setRawMode / cursorTo / …); a redirected
