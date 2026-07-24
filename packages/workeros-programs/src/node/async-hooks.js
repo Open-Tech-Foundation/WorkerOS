@@ -192,6 +192,18 @@ export class AsyncLocalStorage {
       nativeThen.call(result, restore, restore);
       return result;
     }
+    // A callback that synchronously returns a *stream* (React server rendering:
+    // renderToReadableStream / renderToFlightStream) hands back work rendered
+    // LAZILY as the stream is pulled — long after run() returns, in the consumer's
+    // context. Real async_hooks would ride the store into those pulls; we can't
+    // wrap native await, so keep this instance's store active for a stream return
+    // (don't restore) so the deferred render still observes it. It is overwritten
+    // by the next run() on this instance; the honest cost is a store lingering
+    // between stream-returning runs — fine for one-request-at-a-time rendering.
+    if (result && typeof result === "object" &&
+        (typeof result.getReader === "function" || typeof result.tee === "function")) {
+      return result;
+    }
     this._store = prev;
     return result;
   }
