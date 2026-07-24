@@ -1,45 +1,75 @@
 // `node:async_hooks` — AsyncLocalStorage / AsyncResource for the WorkerOS Node
 // runtime. GUEST code (INV-1).
 //
-// Node builds this on libuv's async-context tracking, which propagates the active
-// store across every `await`, timer, and callback. WorkerOS has no such hook into
-// the host event loop, so this is a best-effort, synchronous-scope implementation
-// (INV-5): `run(store, fn)` makes `getStore()` return `store` for the *synchronous*
-// execution of `fn`, and `enterWith(store)` sets it until the next `run`/`exit`.
-// Continuations resumed after an `await` inside `fn` see the store that was current
-// when they were *scheduled* only if nothing else ran `run`/`enterWith` in between
-// — good enough for the common "wrap a request in run(), read getStore() in the
-// handler" pattern, without pretending to do full async propagation.
+// Node builds this on libuv's async-context tracking, which propagates each
+// store across every `await`, timer, and callback. WorkerOS has no such hook, so
+// this threads the context itself (INV-5). Two mechanisms combine:
+//
+//   1. Each `run(store, fn)` keeps its instance's store active for the WHOLE
+//      async lifetime of `fn` (until the promise it returns settles), not just
+//      the synchronous frame. V8's native `await` resumes through internal
+//      promise reactions we cannot wrap, so a store scoped to the sync frame
+//      would vanish at the first `await`. Because the store lives on the instance,
+//      resumptions still observe it.
+//   2. Explicitly scheduled continuations (`.then`, timers, microtasks, message
+//      ports) snapshot the full context at schedule time and restore it when they
+//      run — covering callbacks that outlive the `run()` that scheduled them.
+//
+// Each AsyncLocalStorage instance is INDEPENDENT (its own store), exactly as in
+// Node — Next relies on several instances (`workAsyncStorage`,
+// `workUnitAsyncStorage`, …) holding different stores at once. The honest limit is
+// concurrency: the stores are real per-instance state, but with no libuv two
+// genuinely-interleaved async trees share those instances, so a callback from one
+// that resumes while the other is active can see the other's store. For the
+// dominant one-async-task-at-a-time pattern (a server handling one request, a
+// render) this is correct.
 
-let currentStore; // the active store for the running synchronous frame
+// Every AsyncLocalStorage instance ever created, so context snapshot/restore can
+// span all of them at once (Set membership is cheap; Next has ~10 instances).
+const allInstances = new Set();
 
-// Real AsyncLocalStorage propagates the active store across every async hop — a
-// `.then()` continuation, a timer, a microtask — because libuv threads the async
-// context through them. WorkerOS has no libuv, so we thread it ourselves: when a
-// continuation is *scheduled* while a store is active, capture the store and
-// restore it while the continuation runs. This is what lets `@inquirer/core` (and
-// anything hook-based) keep its store across the promise chain a prompt resolves
-// through. Installed once, lazily, the first time node:async_hooks is used — so
-// programs that never touch async_hooks pay nothing, and even for those that do,
-// the wrap is skipped whenever no store is active (`currentStore === undefined`),
-// which is the overwhelmingly common case.
+// The unpatched `Promise.prototype.then`, captured before installContextPropagation
+// monkeypatches it — used to schedule a store-restore reaction that must NOT itself
+// be context-bound (that would fight the restore).
+const nativeThen = Promise.prototype.then;
+
+// Capture the store of every instance, or null when none is active (the common
+// case → callers skip all wrapping and pay nothing).
+function snapshotContext() {
+  let active = false;
+  const snap = [];
+  for (const als of allInstances) {
+    snap.push([als, als._store]);
+    if (als._store !== undefined) active = true;
+  }
+  return active ? snap : null;
+}
+
+// Run `fn` with the snapshot installed across all instances, restoring the prior
+// values afterwards.
+function runWithContext(snap, fn, thisArg, args) {
+  const saved = [];
+  for (const als of allInstances) saved.push([als, als._store]);
+  for (const [als, v] of snap) als._store = v;
+  try {
+    return Reflect.apply(fn, thisArg, args);
+  } finally {
+    for (const [als, v] of saved) als._store = v;
+  }
+}
+
 function installContextPropagation() {
   if (globalThis.__workerosAlsPatched) return;
   globalThis.__workerosAlsPatched = true;
 
-  // Wrap a scheduled callback so it runs under the store active *now* (at schedule
-  // time). Returns the callback unchanged when no store is active — zero overhead.
+  // Wrap a scheduled callback so it runs under the context active *now* (at
+  // schedule time). Returns the callback unchanged when no store is active.
   const bindCtx = (fn) => {
-    if (typeof fn !== "function" || currentStore === undefined) return fn;
-    const snapshot = currentStore;
+    if (typeof fn !== "function") return fn;
+    const snap = snapshotContext();
+    if (!snap) return fn;
     return function (...args) {
-      const prev = currentStore;
-      currentStore = snapshot;
-      try {
-        return fn.apply(this, args);
-      } finally {
-        currentStore = prev;
-      }
+      return runWithContext(snap, fn, this, args);
     };
   };
 
@@ -80,107 +110,147 @@ function installContextPropagation() {
       return origNextTick.call(this, bindCtx(cb), ...rest);
     };
   }
+
+  // MessagePort message events. In a Worker `MessageChannel` exists, so libraries
+  // that yield to the event loop via a channel — notably React's `scheduler`,
+  // which does `port1.onmessage = work; port2.postMessage(null)` to slice server
+  // rendering — run their continuation in a 'message' handler, not a timer. Node
+  // threads the context through a MessagePort; we carry a FIFO of context
+  // snapshots from a port to its entangled peer (linked in the MessageChannel
+  // wrapper below; delivery is ordered and 1:1) and restore the match per message.
+  const MP = globalThis.MessagePort;
+  const MC = globalThis.MessageChannel;
+  if (typeof MP === "function" && MP.prototype && typeof MC === "function" && !MP.prototype.__wosCtxPatched) {
+    MP.prototype.__wosCtxPatched = true;
+    const origPost = MP.prototype.postMessage;
+    MP.prototype.postMessage = function (...args) {
+      const peer = this.__wosPeer;
+      if (peer) (peer.__wosCtxQ || (peer.__wosCtxQ = [])).push(snapshotContext());
+      return origPost.apply(this, args);
+    };
+    const wrapHandler = (port, fn) => {
+      if (typeof fn !== "function") return fn;
+      return function (...a) {
+        const q = port.__wosCtxQ;
+        const snap = q && q.length ? q.shift() : null;
+        return snap ? runWithContext(snap, fn, this, a) : fn.apply(this, a);
+      };
+    };
+    const onmsg = Object.getOwnPropertyDescriptor(MP.prototype, "onmessage");
+    if (onmsg && onmsg.set) {
+      Object.defineProperty(MP.prototype, "onmessage", {
+        configurable: true,
+        enumerable: onmsg.enumerable,
+        get: onmsg.get,
+        set(fn) { onmsg.set.call(this, wrapHandler(this, fn)); },
+      });
+    }
+    const origAdd = MP.prototype.addEventListener;
+    if (typeof origAdd === "function") {
+      MP.prototype.addEventListener = function (type, listener, ...rest) {
+        return type === "message" && typeof listener === "function"
+          ? origAdd.call(this, type, wrapHandler(this, listener), ...rest)
+          : origAdd.call(this, type, listener, ...rest);
+      };
+    }
+    globalThis.MessageChannel = function MessageChannel() {
+      const ch = new MC();
+      if (ch.port1 && ch.port2) { ch.port1.__wosPeer = ch.port2; ch.port2.__wosPeer = ch.port1; }
+      return ch;
+    };
+    globalThis.MessageChannel.prototype = MC.prototype;
+  }
 }
 
 export class AsyncLocalStorage {
   constructor() {
     this._enabled = true;
-    // Install the async-context propagation the first time any store exists — so a
-    // program that never uses AsyncLocalStorage never has its promises/timers
-    // wrapped (the module merely being loaded costs nothing).
+    this._store = undefined;
+    allInstances.add(this);
+    // Install async-context propagation the first time any store exists — a program
+    // that never uses AsyncLocalStorage pays nothing (loading the module is free).
     installContextPropagation();
   }
 
-  // Run `fn` with `store` as the active store, restoring the previous store when
-  // `fn` returns (synchronously — a returned promise resolves under whatever store
-  // is current then; that's the honest limit).
+  // Run `fn` with `store` as this instance's active store. If `fn` is async
+  // (returns a thenable), hold the store until that promise settles so the awaited
+  // work sees it (see the module header); otherwise restore at the sync boundary.
   run(store, fn, ...args) {
-    const prev = currentStore;
-    currentStore = store;
+    const prev = this._store;
+    this._store = store;
+    let result;
     try {
-      return fn(...args);
-    } finally {
-      currentStore = prev;
+      result = fn(...args);
+    } catch (err) {
+      this._store = prev;
+      throw err;
     }
+    if (result != null && typeof result.then === "function") {
+      // Restore only if nothing deeper re-pointed this instance meanwhile, so an
+      // inner run/enterWith that outlives us isn't clobbered.
+      const restore = () => { if (this._store === store) this._store = prev; };
+      nativeThen.call(result, restore, restore);
+      return result;
+    }
+    this._store = prev;
+    return result;
   }
 
-  // Run `fn` with no active store, restoring afterwards.
+  // Run `fn` with no active store for this instance, restoring afterwards.
   exit(fn, ...args) {
-    const prev = currentStore;
-    currentStore = undefined;
+    const prev = this._store;
+    this._store = undefined;
     try {
       return fn(...args);
     } finally {
-      currentStore = prev;
+      this._store = prev;
     }
   }
 
   getStore() {
-    return this._enabled ? currentStore : undefined;
+    return this._enabled ? this._store : undefined;
   }
 
-  // Set the active store for the rest of the current frame (no automatic restore).
+  // Set the active store for the rest of the current async context (no auto-restore).
   enterWith(store) {
     this._enabled = true;
-    currentStore = store;
+    this._store = store;
   }
 
   disable() {
     this._enabled = false;
-    currentStore = undefined;
+    this._store = undefined;
   }
 
-  // Static helper Node added: bind a snapshot of the current store to `fn`.
+  // Bind a snapshot of the current (all-instance) context to `fn`.
   static bind(fn) {
-    const snapshot = currentStore;
-    return (...args) => {
-      const prev = currentStore;
-      currentStore = snapshot;
-      try {
-        return fn(...args);
-      } finally {
-        currentStore = prev;
-      }
+    const snap = snapshotContext();
+    return function (...args) {
+      return snap ? runWithContext(snap, fn, this, args) : fn.apply(this, args);
     };
   }
 
   static snapshot() {
-    const snapshot = currentStore;
-    return (fn, ...args) => {
-      const prev = currentStore;
-      currentStore = snapshot;
-      try {
-        return fn(...args);
-      } finally {
-        currentStore = prev;
-      }
-    };
+    const snap = snapshotContext();
+    return (fn, ...args) => (snap ? runWithContext(snap, fn, undefined, args) : fn(...args));
   }
 }
 
 // AsyncResource: without libuv there is no real async id/destroy lifecycle, but
-// the one behaviour libraries genuinely depend on is context propagation — an
-// AsyncResource captures the active AsyncLocalStorage store at *construction* and
-// restores it whenever its callback runs later, bridging the async gap that a
-// plain `run()` can't. This is what makes `@inquirer/core` work: it binds its
-// keypress/update handlers with `AsyncResource.bind(fn)` during a render (store
-// active), and when a keystroke fires those handlers asynchronously, `getStore()`
-// must still return that render's store. So we snapshot `currentStore` here.
+// the behaviour libraries depend on is context propagation — capture the active
+// context at construction and restore it whenever the callback runs later. This is
+// what makes `@inquirer/core` work: it binds its keypress handlers with
+// `AsyncResource.bind(fn)` during a render (stores active), and when a keystroke
+// fires them asynchronously, `getStore()` still returns that render's stores.
 export class AsyncResource {
   constructor(type, opts) {
     this.type = type;
     this._asyncId = typeof opts === "object" && opts && typeof opts.asyncId === "number" ? opts.asyncId : 1;
-    this._store = currentStore; // the async context captured at creation time
+    this._snap = snapshotContext(); // the async context captured at creation time
   }
 
   runInAsyncScope(fn, thisArg, ...args) {
-    const prev = currentStore;
-    currentStore = this._store;
-    try {
-      return Reflect.apply(fn, thisArg, args);
-    } finally {
-      currentStore = prev;
-    }
+    return this._snap ? runWithContext(this._snap, fn, thisArg, args) : Reflect.apply(fn, thisArg, args);
   }
 
   emitDestroy() {
@@ -195,22 +265,18 @@ export class AsyncResource {
     return 0;
   }
 
-  // Bind `fn` so every later call runs under the store captured by this resource.
+  // Bind `fn` so every later call runs under the context captured by this resource.
   bind(fn) {
     const self = this;
-    const bound = function (...args) { return self.runInAsyncScope(fn, this, ...args); };
-    return bound;
+    return function (...args) { return self.runInAsyncScope(fn, this, ...args); };
   }
 
-  // Static bind: snapshot the current store now, restore it on each later call.
-  // Matches Node: `AsyncResource.bind(fn)` returns a function pinned to the async
-  // context that was active when `bind` was called.
+  // Static bind: snapshot the current context now, restore it on each later call.
   static bind(fn, type, thisArg) {
     const res = new AsyncResource(type || fn.name || "bound-anonymous-fn");
-    const bound = function (...args) {
+    return function (...args) {
       return res.runInAsyncScope(fn, thisArg === undefined ? this : thisArg, ...args);
     };
-    return bound;
   }
 }
 
