@@ -120,6 +120,12 @@ export function createHttp(sys, EventEmitter, net) {
       this.headersSent = false;
       this.finished = false;
       this._headers = new Map(); // lowercase name → { name, value }
+      // Node's OutgoingMessage exposes `_header` (the serialized status line +
+      // headers, null until flushed) and `_implicitHeader()`. Real libraries
+      // reach for these internals — e.g. Next's bundled `compression` does
+      // `if (!this._header) this._implicitHeader()` before writing — so mirror
+      // the contract, not just the public surface (INV-5 honest compat).
+      this._header = null;
       this._chunked = false;
       this.sendDate = true;
       // A HEAD response carries headers (incl. Content-Length) but never a body.
@@ -171,6 +177,22 @@ export function createHttp(sys, EventEmitter, net) {
       }
       head += CRLF;
       this._socket.write(enc.encode(head));
+      // Node stores the emitted header block here; libs test `_header` truthiness
+      // to know headers are already on the wire (see the `_implicitHeader` note).
+      this._header = head;
+    }
+
+    // OutgoingMessage internal (Node): emit the implicit header if a body write
+    // happens before an explicit writeHead(). Callers gate on `!this._header`.
+    _implicitHeader() {
+      this._flushHead();
+    }
+
+    // `res.flushHeaders()` — send the status line + headers now without waiting for
+    // the first body write. Next's streaming SSR (`createWriterFromResponse`) calls
+    // it before piping the React stream, so the client sees headers immediately.
+    flushHeaders() {
+      this._flushHead();
     }
 
     write(chunk, encoding, cb) {
