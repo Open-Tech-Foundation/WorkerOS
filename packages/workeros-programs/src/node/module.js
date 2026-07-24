@@ -243,6 +243,12 @@ export function createModule({ fs, path, url, builtins, detectFormat }) {
   // "module" key is pre-seeded there so it counts itself.
   Module.builtinModules = [...builtins.keys()];
   Module.isBuiltin = isBuiltin;
+  // Node's `Module.findSourceMap(path)` → the SourceMap for a loaded file, or
+  // undefined. We don't emit source maps, so the honest answer is always undefined
+  // (INV-5) — but the method MUST exist: Next calls it while filtering error stack
+  // frames during a render, and a missing function turned every such call into a
+  // thrown TypeError that derailed the render (a page fell through to not-found).
+  Module.findSourceMap = () => undefined;
   Module.wrap = (src) =>
     "(function (exports, require, module, __filename, __dirname) { " + src + "\n});";
   Module._cache = cacheProxy;
