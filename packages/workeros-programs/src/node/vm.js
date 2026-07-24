@@ -64,19 +64,28 @@ const filenameOf = (options, fallback) => {
 // `Symbol.unscopables` must be undefined or `with` would exclude names from the
 // scope; `get`/`set` reflect onto the sandbox so bare assignments are captured.
 function makeScope(sandbox) {
-  return new Proxy(sandbox, {
+  let proxy;
+  proxy = new Proxy(sandbox, {
     has() {
       return true;
     },
     get(target, key, receiver) {
       if (key === Symbol.unscopables || key === Symbol.toStringTag) return undefined;
       if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
+      // Inside a context the global-object aliases ARE the sandbox (Node
+      // semantics), not the host global. Code like Next's RSC client-reference
+      // manifest does `globalThis.__RSC_MANIFEST = …` and the host then reads it
+      // back off the same sandbox object — so `globalThis`/`global`/`self` must
+      // reflect onto this scope, or the write leaks to the host global and is
+      // invisible to the caller. Only when the sandbox doesn't define its own.
+      if (key === "globalThis" || key === "global" || key === "self") return proxy;
       return globalThis[key];
     },
     set(target, key, value, receiver) {
       return Reflect.set(target, key, value, receiver);
     },
   });
+  return proxy;
 }
 
 // Evaluate `code` with `sandbox` installed as the scope. The code string is
