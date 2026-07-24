@@ -27,7 +27,13 @@ let systemShell = null;
 // what we last stored, so an idle OS does no I/O.
 let persistence = null;
 let lastPersistedGen = 0;
-let saving = false;
+// `saving` holds the in-flight save promise (or null). `saveRequested` is the
+// coalescing flag: any persist request raises it, and the running save loop
+// drains it — so a request that arrives mid-save triggers a follow-up pass
+// rather than being dropped. Awaiting `persistNow()` therefore resolves only
+// once the tree is durable through the latest request (see persistNow).
+let saving = null;
+let saveRequested = false;
 const AUTOSAVE_MS = 2000;
 // Rolling auto-snapshot cadence (ADR-022, Stage 4). We checkpoint the durable
 // tree into the last-10 undo ring at most this often, so a busy editor doesn't
@@ -137,44 +143,61 @@ const MUTATING_CALLS = new Set([
 // Persist the durable tree to the content-addressed block store if it changed
 // since the last flush (ADR-022). Writes only *new* chunk hashes (delta), then
 // the manifest root and the snapshot set, then mark-sweeps unreferenced chunks.
-// Coalesces concurrent calls; safe on a timer and on tab hide.
-async function persistNow() {
-  if (!kernel || !persistence || !persistence.available || saving) return;
-  const gen = kernel.fsGeneration();
-  if (gen === lastPersistedGen) return;
-  saving = true;
-  try {
-    // Take a rolling auto-snapshot on a bounded cadence so the last-10 durable
-    // states stay recoverable (the kernel evicts the oldest beyond the ring).
-    const now = Date.now();
-    if (now - lastAutoSnap >= AUTO_SNAPSHOT_MS) {
-      kernel.snapshotAuto();
-      lastAutoSnap = now;
+// Coalesces concurrent calls: a request that lands mid-save schedules a
+// follow-up pass instead of being dropped, and the returned promise resolves
+// only once the tree is durable through the latest request — so an explicit
+// flush on tab hide/unload never silently loses the writes it was meant to save.
+function persistNow() {
+  saveRequested = true;
+  if (saving) return saving;
+  saving = (async () => {
+    try {
+      // Drain: each pass clears the flag then stores the current generation; a
+      // request arriving during the awaits below re-raises it and loops again.
+      while (saveRequested) {
+        saveRequested = false;
+        if (!kernel || !persistence || !persistence.available) return;
+        const gen = kernel.fsGeneration();
+        if (gen === lastPersistedGen) continue;
+        await doPersist(gen);
+        lastPersistedGen = gen;
+      }
+    } catch (err) {
+      console.warn("[workeros] persist failed:", err && err.message);
+    } finally {
+      saving = null;
     }
-    // Read the kernel's durable projection synchronously — no writes can
-    // interleave between these calls in the single-threaded worker. `live` is
-    // every chunk the working tree *or* a retained snapshot needs.
-    const manifest = kernel.manifest();
-    const live = kernel.liveChunks();
-    const liveSet = new Set(live);
-    const known = await persistence.knownChunks();
-    // Delta: store only chunks the block store doesn't already hold.
-    for (const hex of live) {
-      if (known.has(hex)) continue;
-      const bytes = kernel.chunkBytes(hex);
-      if (bytes) await persistence.putChunk(hex, bytes);
-    }
-    await persistence.saveManifest(manifest);
-    await persistence.saveSnapshots(kernel.snapshotExport());
-    // Mark-sweep GC: any previously-stored chunk no longer live is garbage.
-    const garbage = [...known].filter((hex) => !liveSet.has(hex));
-    if (garbage.length) await persistence.deleteChunks(garbage);
-    lastPersistedGen = gen;
-  } catch (err) {
-    console.warn("[workeros] persist failed:", err && err.message);
-  } finally {
-    saving = false;
+  })();
+  return saving;
+}
+
+// One durable snapshot pass for the given generation. Reads the kernel's durable
+// projection synchronously (no writes interleave in the single-threaded worker),
+// then writes new chunks + manifest + snapshots and mark-sweeps dead chunks.
+async function doPersist(gen) {
+  // Take a rolling auto-snapshot on a bounded cadence so the last-10 durable
+  // states stay recoverable (the kernel evicts the oldest beyond the ring).
+  const now = Date.now();
+  if (now - lastAutoSnap >= AUTO_SNAPSHOT_MS) {
+    kernel.snapshotAuto();
+    lastAutoSnap = now;
   }
+  // `live` is every chunk the working tree *or* a retained snapshot needs.
+  const manifest = kernel.manifest();
+  const live = kernel.liveChunks();
+  const liveSet = new Set(live);
+  const known = await persistence.knownChunks();
+  // Delta: store only chunks the block store doesn't already hold.
+  for (const hex of live) {
+    if (known.has(hex)) continue;
+    const bytes = kernel.chunkBytes(hex);
+    if (bytes) await persistence.putChunk(hex, bytes);
+  }
+  await persistence.saveManifest(manifest);
+  await persistence.saveSnapshots(kernel.snapshotExport());
+  // Mark-sweep GC: any previously-stored chunk no longer live is garbage.
+  const garbage = [...known].filter((hex) => !liveSet.has(hex));
+  if (garbage.length) await persistence.deleteChunks(garbage);
 }
 
 // Demand paging (ADR-022): fetch the given chunk hashes from the persistence
